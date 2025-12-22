@@ -647,47 +647,58 @@ class SupplierPortalDataGenerator:
         print(f"  Portal Users: {len(self.portal_users)}")
     
     def to_json(self, output_file='supplier_portal_data.json'):
-        """Export to JSON"""
+        """Export to JSON with flat structure matching actual table names"""
         print(f"\nExporting to JSON...")
         
         data = {
-            'metadata': {
-                'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'suppliers_count': len(self.suppliers),
-                'materials_count': len(self.materials)
-            },
-            'purchase_requisitions': {
-                'requisition_headers': self.purchase_requisitions[:20],  # Sample
-                'requisition_lines': self.req_lines[:50]
-            },
-            'rfq_management': {
-                'rfq_headers': self.rfq_headers,
-                'rfq_lines': self.rfq_lines[:50],  # Sample
-                'rfq_suppliers': self.rfq_suppliers[:30],
-                'rfq_responses': self.rfq_responses[:20],
-                'rfq_response_lines': self.rfq_response_lines[:50]
-            },
-            'contracts': {
-                'supplier_contracts': self.supplier_contracts,
-                'contract_pricing': self.contract_pricing[:30]  # Sample
-            },
-            'performance': {
-                'performance_metrics': self.performance_metrics[:30],  # Sample
-                'scorecards': self.scorecards[:30]
-            },
-            'invoicing': {
-                'supplier_invoices': self.supplier_invoices,
-                'invoice_lines': self.invoice_lines[:50],  # Sample
-                'three_way_matches': self.three_way_matches[:30]
-            },
-            'qualification': {
-                'qualification_records': self.qualification_records,
-                'supplier_documents': self.supplier_documents[:20],
-                'supplier_audits': self.supplier_audits
-            },
-            'portal': {
-                'portal_users': self.portal_users[:30]  # Sample
-            }
+            # Master Data
+            'suppliers': [],
+            'supplier_contacts': [],
+            
+            # Purchase Requisitions
+            'requisition_headers': self.purchase_requisitions[:20],
+            'requisition_lines': self.req_lines[:50],
+            
+            # RFQ Management
+            'rfq_headers': self.rfq_headers,
+            'rfq_lines': self.rfq_lines[:50],
+            'rfq_suppliers': self.rfq_suppliers[:30],
+            'rfq_responses': self.rfq_responses[:20],
+            'rfq_response_lines': self.rfq_response_lines[:50],
+            
+            # Supplier Contracts
+            'supplier_contracts': self.supplier_contracts,
+            'contract_pricing': self.contract_pricing[:30],
+            'contract_terms': [],
+            'contract_amendments': [],
+            
+            # Performance Management
+            'supplier_performance_metrics': self.performance_metrics[:30],
+            'supplier_scorecards': self.scorecards[:30],
+            'scorecard_items': [],
+            'performance_audit_log': [],
+            
+            # Invoicing & Payments
+            'supplier_invoices': self.supplier_invoices,
+            'invoice_line_items': self.invoice_lines[:50],
+            'invoice_tax_lines': [],
+            'three_way_matches': self.three_way_matches[:30],
+            'payment_records': [],
+            
+            # Supplier Qualification
+            'supplier_qualification': self.qualification_records,
+            'qualification_audits': self.supplier_audits,
+            'supplier_documents': self.supplier_documents[:20],
+            'document_categories': [],
+            
+            # Portal & Access
+            'portal_users': self.portal_users[:30],
+            'user_roles': [],
+            'user_permissions': [],
+            'portal_activity_log': [],
+            
+            # Integration & Logging
+            'supplier_portal_integration_log': []
         }
         
         with open(output_file, 'w') as f:
@@ -697,9 +708,17 @@ class SupplierPortalDataGenerator:
 
 
 if __name__ == "__main__":
+    from pathlib import Path
+    
+    # Get the directory of this script (data folder)
+    script_dir = Path(__file__).parent
+    
     generator = SupplierPortalDataGenerator()
     generator.generate_all_data()
-    generator.to_json()
+    
+    # Export to JSON (in same folder as script)
+    json_file = script_dir / "supplier_portal_data.json"
+    generator.to_json(str(json_file))
     
     print("\n" + "="*80)
     print("Supplier Portal Data Generation Complete!")

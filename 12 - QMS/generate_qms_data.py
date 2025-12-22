@@ -632,13 +632,17 @@ class QMSDataGenerator:
         for i, complaint in enumerate(complaints_with_8d):
             initiated_date = datetime.strptime(complaint['complaint_date'], '%Y-%m-%d')
             
+            # Convert team_members to PostgreSQL array format: {id1, id2, id3, id4}
+            team_members_list = random.sample(self.employees, 4)
+            team_members_array = '{' + ','.join([tm for tm in team_members_list]) + '}'
+            
             eight_d = {
                 'eight_d_id': self.generate_id('8D', 'eight_d'),
                 'eight_d_number': f'8D-{datetime.now().year}-{i+1:05d}',
                 'source_type': 'customer_complaint',
                 'source_document_id': complaint['complaint_id'],
                 'team_leader': random.choice(self.employees),
-                'team_members': random.sample(self.employees, 4),
+                'team_members': team_members_array,  # Now in PostgreSQL array format
                 'problem_description': complaint['complaint_description'],
                 'is_statement': f'Problem IS affecting {complaint["complaint_type"]}',
                 'is_not_statement': f'Problem is NOT affecting other aspects',
@@ -839,52 +843,50 @@ class QMSDataGenerator:
         print(f"  Quality KPIs: {len(self.quality_kpis)}")
     
     def to_json(self, output_file='qms_data.json'):
-        """Export to JSON"""
+        """Export to JSON with flat structure matching actual table names"""
         print(f"\nExporting to JSON...")
         
         data = {
-            'metadata': {
-                'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            },
-            'ncr': {
-                'ncr_headers': self.ncr_headers[:30],  # Sample
-                'ncr_defect_details': self.ncr_defect_details[:50]
-            },
-            'capa': {
-                'capa_headers': self.capa_headers,
-                'capa_actions': self.capa_actions[:50]
-            },
-            'audits': {
-                'quality_audits': self.quality_audits,
-                'audit_findings': self.audit_findings[:50]
-            },
-            'control_plans': {
-                'control_plans': self.control_plans,
-                'control_characteristics': self.control_characteristics[:30]
-            },
-            'spc': {
-                'spc_charts': self.spc_charts,
-                'spc_data_points': self.spc_data_points[:100]  # Sample
-            },
-            'calibration': {
-                'measuring_equipment': self.measuring_equipment,
-                'calibration_records': self.calibration_records[:30],
-                'calibration_alerts': self.calibration_alerts
-            },
-            'documents': {
-                'quality_documents': self.quality_documents
-            },
-            'complaints': {
-                'customer_complaints': self.customer_complaints,
-                'eight_d_reports': self.eight_d_reports
-            },
-            'ppap': {
-                'ppap_submissions': self.ppap_submissions
-            },
-            'metrics': {
-                'supplier_quality_metrics': self.supplier_quality_metrics[:30],
-                'quality_kpis': self.quality_kpis
-            }
+            # Non-Conformance
+            'ncr_headers': self.ncr_headers[:30],
+            'ncr_defect_details': self.ncr_defect_details[:50],
+            
+            # CAPA
+            'capa_headers': self.capa_headers,
+            'capa_actions': self.capa_actions[:50],
+            
+            # Audits
+            'quality_audits': self.quality_audits,
+            'audit_findings': self.audit_findings[:50],
+            
+            # Control Plans
+            'control_plans': self.control_plans,
+            'control_plan_characteristics': self.control_characteristics[:30],
+            
+            # SPC
+            'spc_control_charts': self.spc_charts,
+            'spc_data_points': self.spc_data_points[:100],
+            
+            # Calibration
+            'measuring_equipment': self.measuring_equipment,
+            'calibration_records': self.calibration_records[:30],
+            'calibration_alerts': self.calibration_alerts,
+            
+            # Documentation
+            'quality_documents': self.quality_documents,
+            'document_revisions': [],  # Empty for now
+            
+            # Customer & Problem Solving
+            'customer_complaints': self.customer_complaints,
+            'eight_d_reports': self.eight_d_reports,
+            
+            # Supplier Quality
+            'ppap_submissions': self.ppap_submissions,
+            'supplier_quality_metrics': self.supplier_quality_metrics[:30],
+            
+            # QMS Integration
+            'quality_kpis': self.quality_kpis,
+            'qms_integration_log': []
         }
         
         with open(output_file, 'w') as f:
@@ -894,9 +896,17 @@ class QMSDataGenerator:
 
 
 if __name__ == "__main__":
+    from pathlib import Path
+    
+    # Get the directory of this script (data folder)
+    script_dir = Path(__file__).parent
+    
     generator = QMSDataGenerator()
     generator.generate_all_data()
-    generator.to_json()
+    
+    # Export to JSON (in same folder as script)
+    json_file = script_dir / "qms_data.json"
+    generator.to_json(str(json_file))
     
     print("\n" + "="*80)
     print("QMS Data Generation Complete!")

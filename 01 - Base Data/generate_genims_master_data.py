@@ -659,15 +659,23 @@ class DataGenerator:
 
 
 if __name__ == "__main__":
+    import os
+    from pathlib import Path
+    
+    # Get the directory of this script (data folder)
+    script_dir = Path(__file__).parent
+    
     # Generate all master data
     generator = DataGenerator()
     generator.generate_all()
     
-    # Export to SQL
-    generator.to_sql_inserts("genims_master_data_inserts.sql")
+    # Export to SQL (in same folder as script)
+    sql_file = script_dir / "genims_master_data_inserts.sql"
+    generator.to_sql_inserts(str(sql_file))
     
-    # Export to JSON
-    generator.to_json("genims_master_data.json")
+    # Export to JSON (in same folder as script)
+    json_file = script_dir / "genims_master_data.json"
+    generator.to_json(str(json_file))
     
     print("\n" + "=" * 80)
     print("Data generation complete!")

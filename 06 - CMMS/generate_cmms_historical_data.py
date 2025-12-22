@@ -17,9 +17,7 @@ MRO_PARTS_COUNT = 200
 PM_SCHEDULES_PER_ASSET = 2
 WORK_ORDERS_PER_DAY = (3, 10)
 
-class CMM
-
-SDataGenerator:
+class CMMSDataGenerator:
     def __init__(self, master_data_file='genims_master_data.json'):
         """Initialize with master data"""
         print("Loading master data...")
@@ -165,12 +163,13 @@ SDataGenerator:
         skill_levels = ['technician', 'senior_technician', 'specialist']
         
         for factory in self.factories:
+            factory_code = factory.get('factory_code', f"FAC-{factory['factory_id'][-4:]}")
             for i in range(TECHNICIANS_PER_FACTORY):
                 tech = {
                     'technician_id': self.generate_id('TECH', 'tech'),
                     'technician_code': f"TECH{self.counters['tech']-1:04d}",
                     'first_name': f"Tech{i+1}",
-                    'last_name': factory['factory_code'],
+                    'last_name': factory_code,
                     'hire_date': (datetime.now() - timedelta(days=random.randint(365, 3650))).strftime('%Y-%m-%d'),
                     'skill_level': random.choice(skill_levels),
                     'trade': random.choice(trades),
@@ -418,28 +417,43 @@ SDataGenerator:
         print(f"  Maintenance History: {len(self.maintenance_history)}")
     
     def to_json(self, output_file='cmms_historical_data.json'):
-        """Export to JSON"""
+        """Export to JSON with flat structure matching actual table names"""
         print(f"\nExporting to JSON...")
         
         data = {
-            'metadata': {
-                'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'days_of_history': DAYS_OF_HISTORY
-            },
-            'master_data': {
-                'assets': self.assets[:50],  # Sample
-                'technicians': self.technicians,
-                'mro_parts': self.mro_parts[:50],  # Sample
-                'pm_schedules': self.pm_schedules,
-                'failure_codes': self.failure_codes
-            },
-            'operational_data': {
-                'work_orders': self.work_orders[:100],  # Sample
-                'wo_tasks': self.wo_tasks[:200],  # Sample
-                'parts_transactions': self.parts_transactions[:100],
-                'labor_entries': self.labor_entries[:100],
-                'maintenance_history': self.maintenance_history[:100]
-            }
+            # Assets & Teams
+            'maintenance_assets': self.assets[:50],
+            'maintenance_technicians': self.technicians,
+            'maintenance_teams': [],  # Generated on demand
+            'failure_codes': self.failure_codes,
+            
+            # MRO Parts
+            'mro_parts': self.mro_parts[:50],
+            'mro_parts_transactions': self.parts_transactions[:100],
+            
+            # Maintenance Planning
+            'pm_schedules': self.pm_schedules,
+            'pm_generation_log': [],
+            
+            # Work Orders
+            'work_orders': self.work_orders[:100],
+            'work_order_tasks': self.wo_tasks[:200],
+            'work_procedures': [],
+            
+            # Labor & Costs
+            'labor_time_entries': self.labor_entries[:100],
+            'maintenance_costs': [],
+            'maintenance_cost_centers': [],
+            
+            # Maintenance History
+            'maintenance_history': self.maintenance_history[:100],
+            'equipment_meter_readings': [],
+            'service_contracts': [],
+            'service_call_logs': [],
+            
+            # Integration & Logging
+            'cmms_integration_log': [],
+            'asset_reliability_metrics': []
         }
         
         with open(output_file, 'w') as f:
@@ -449,9 +463,20 @@ SDataGenerator:
 
 
 if __name__ == "__main__":
-    generator = CMM SDataGenerator()
+    from pathlib import Path
+    
+    # Get the directory of this script (data folder)
+    script_dir = Path(__file__).parent
+    
+    # Load master data from the same folder structure
+    master_data_file = script_dir.parent / "01 - Base Data" / "genims_master_data.json"
+    
+    generator = CMMSDataGenerator(str(master_data_file))
     generator.generate_all_data()
-    generator.to_json()
+    
+    # Export to JSON (in same folder as script)
+    json_file = script_dir / "cmms_historical_data.json"
+    generator.to_json(str(json_file))
     
     print("\n" + "="*80)
     print("CMMS Historical Data Generation Complete!")

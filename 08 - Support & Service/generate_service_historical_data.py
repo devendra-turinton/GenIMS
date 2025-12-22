@@ -18,9 +18,16 @@ TICKETS_PER_DAY = (5, 20)
 FIELD_APPOINTMENTS_PER_WEEK = (10, 30)
 
 class ServiceDataGenerator:
-    def __init__(self, master_data_file='genims_master_data.json',
-                 crm_data_file='crm_historical_data.json'):
+    def __init__(self, master_data_file=None, crm_data_file=None):
         """Initialize with master data and CRM data"""
+        from pathlib import Path
+        
+        if master_data_file is None:
+            master_data_file = Path(__file__).parent.parent / "01 - Base Data" / "genims_master_data.json"
+        
+        if crm_data_file is None:
+            crm_data_file = Path(__file__).parent.parent / "07 - CRM" / "crm_historical_data.json"
+        
         print("Loading existing data...")
         
         with open(master_data_file, 'r') as f:
@@ -30,8 +37,8 @@ class ServiceDataGenerator:
             self.crm_data = json.load(f)
         
         self.customers = self.master_data['customers']
-        self.accounts = self.crm_data['accounts_contacts']['accounts']
-        self.contacts = self.crm_data['accounts_contacts']['contacts']
+        self.accounts = self.crm_data['accounts']
+        self.contacts = self.crm_data['contacts']
         
         # Service Data
         self.service_agents = []
@@ -546,34 +553,49 @@ class ServiceDataGenerator:
         print(f"  Service Parts: {len(self.service_parts)}")
     
     def to_json(self, output_file='service_historical_data.json'):
-        """Export to JSON"""
+        """Export to JSON with flat structure matching actual table names from genims_service schema"""
         print(f"\nExporting to JSON...")
         
         data = {
-            'metadata': {
-                'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'days_of_history': DAYS_OF_HISTORY
-            },
-            'master_data': {
-                'service_teams': self.service_teams,
-                'service_agents': self.service_agents,
-                'field_technicians': self.field_technicians,
-                'sla_definitions': self.sla_definitions,
-                'escalation_rules': self.escalation_rules,
-                'resolution_codes': self.resolution_codes,
-                'kb_categories': self.kb_categories,
-                'kb_articles': self.kb_articles[:50],  # Sample
-                'service_parts': self.service_parts[:50],  # Sample
-                'surveys': self.surveys,
-                'warranties': self.warranties
-            },
-            'operational_data': {
-                'service_tickets': self.service_tickets[:100],  # Sample
-                'ticket_comments': self.ticket_comments[:100],
-                'field_appointments': self.field_appointments[:50],
-                'warranty_claims': self.warranty_claims,
-                'rma_requests': self.rma_requests
-            }
+            # Service Tickets (Primary)
+            'service_tickets': self.service_tickets[:100],
+            'ticket_comments': self.ticket_comments[:100],
+            'ticket_attachments': [],
+            
+            # Knowledge Base
+            'kb_categories': self.kb_categories,
+            'kb_articles': self.kb_articles[:50],
+            'kb_article_ratings': [],
+            
+            # SLA & Escalation
+            'sla_definitions': self.sla_definitions,
+            'escalation_rules': self.escalation_rules,
+            'ticket_escalations': [],
+            
+            # Warranty & RMA
+            'warranty_registrations': [],
+            'warranty_claims': self.warranty_claims,
+            'rma_requests': self.rma_requests,
+            'rma_line_items': [],
+            
+            # Field Service
+            'field_service_appointments': self.field_appointments[:50],
+            'field_technicians': self.field_technicians,
+            
+            # Service Parts
+            'service_parts': self.service_parts[:50],
+            'service_parts_usage': [],
+            
+            # Surveys & Feedback
+            'customer_surveys': self.surveys,
+            'survey_responses': [],
+            'customer_feedback': [],
+            
+            # Service Organization
+            'service_teams': self.service_teams,
+            
+            # Integration & Logging
+            'service_integration_log': []
         }
         
         with open(output_file, 'w') as f:
@@ -583,9 +605,17 @@ class ServiceDataGenerator:
 
 
 if __name__ == "__main__":
+    from pathlib import Path
+    
+    # Get the directory of this script (data folder)
+    script_dir = Path(__file__).parent
+    
     generator = ServiceDataGenerator()
     generator.generate_all_data()
-    generator.to_json()
+    
+    # Export to JSON (in same folder as script)
+    json_file = script_dir / "service_historical_data.json"
+    generator.to_json(str(json_file))
     
     print("\n" + "="*80)
     print("Customer Service Historical Data Generation Complete!")

@@ -18,20 +18,32 @@ OPPORTUNITIES_PER_MONTH = (10, 25)
 CASES_PER_WEEK = (5, 15)
 
 class CRMDataGenerator:
-    def __init__(self, master_data_file='genims_master_data.json',
-                 erp_data_file='erp_historical_data.json'):
+    def __init__(self, master_data_file=None, erp_data_file=None):
         """Initialize with master data and ERP data"""
+        from pathlib import Path
+        
+        if master_data_file is None:
+            master_data_file = Path(__file__).parent.parent / "01 - Base Data" / "genims_master_data.json"
+        
+        if erp_data_file is None:
+            erp_data_file = Path(__file__).parent.parent / "04 - ERP & MES Integration" / "erp_historical_data.json"
+        
         print("Loading existing data...")
         
         with open(master_data_file, 'r') as f:
             self.master_data = json.load(f)
         
-        with open(erp_data_file, 'r') as f:
-            self.erp_data = json.load(f)
+        # Try to load ERP data, use minimal data if not available
+        try:
+            with open(erp_data_file, 'r') as f:
+                self.erp_data = json.load(f)
+        except FileNotFoundError:
+            print(f"Note: {erp_data_file} not found, using minimal product/material data")
+            self.erp_data = {'materials': [], 'products': []}
         
-        self.customers = self.master_data['customers']
-        self.materials = self.erp_data['materials']
-        self.factories = self.master_data['factories']
+        self.customers = self.master_data.get('customers', [])
+        self.materials = self.erp_data.get('materials', [])
+        self.factories = self.master_data.get('factories', [])
         
         # CRM Data
         self.sales_reps = []
@@ -564,40 +576,49 @@ class CRMDataGenerator:
         print(f"  Sales Forecasts: {len(self.forecasts)}")
     
     def to_json(self, output_file='crm_historical_data.json'):
-        """Export to JSON"""
+        """Export to JSON with flat structure matching actual table names"""
         print(f"\nExporting to JSON...")
         
         data = {
-            'metadata': {
-                'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'days_of_history': DAYS_OF_HISTORY
-            },
-            'master_data': {
-                'sales_reps': self.sales_reps,
-                'territories': self.territories,
-                'campaigns': self.campaigns
-            },
-            'accounts_contacts': {
-                'accounts': self.accounts[:50],  # Sample
-                'contacts': self.contacts[:100]  # Sample
-            },
-            'sales_pipeline': {
-                'leads': self.leads[:100],  # Sample
-                'lead_activities': self.lead_activities[:100],
-                'opportunities': self.opportunities[:100],
-                'opportunity_products': self.opp_products[:100],
-                'stage_history': self.opp_history[:50]
-            },
-            'quotations': {
-                'quotations': self.quotations[:50],
-                'quote_lines': self.quote_lines[:100]
-            },
-            'support': {
-                'cases': self.cases[:50]
-            },
-            'forecasting': {
-                'forecasts': self.forecasts
-            }
+            # Master Data
+            'sales_reps': self.sales_reps,
+            'sales_territories': self.territories,
+            
+            # Accounts & Contacts
+            'accounts': self.accounts[:50],
+            'contacts': self.contacts[:100],
+            
+            # Leads & Activities
+            'leads': self.leads[:100],
+            'lead_activities': self.lead_activities[:100],
+            'activities': [],
+            
+            # Opportunities
+            'opportunities': self.opportunities[:100],
+            'opportunity_products': self.opp_products[:100],
+            'opportunity_stage_history': self.opp_history[:50],
+            
+            # Quotations
+            'quotations': self.quotations[:50],
+            'quotation_lines': self.quote_lines[:100],
+            
+            # Cases & Notes
+            'cases': self.cases[:50],
+            'case_comments': [],
+            'notes': [],
+            'tasks': [],
+            
+            # Campaigns & Forecasting
+            'campaigns': self.campaigns,
+            'campaign_members': [],
+            'sales_forecasts': self.forecasts,
+            
+            # Contracts & Integration
+            'contracts': [],
+            'crm_integration_log': [],
+            
+            # Customer Interactions
+            'customer_interactions': []
         }
         
         with open(output_file, 'w') as f:
@@ -607,9 +628,17 @@ class CRMDataGenerator:
 
 
 if __name__ == "__main__":
+    from pathlib import Path
+    
+    # Get the directory of this script (data folder)
+    script_dir = Path(__file__).parent
+    
     generator = CRMDataGenerator()
     generator.generate_all_data()
-    generator.to_json()
+    
+    # Export to JSON (in same folder as script)
+    json_file = script_dir / "crm_historical_data.json"
+    generator.to_json(str(json_file))
     
     print("\n" + "="*80)
     print("CRM Historical Data Generation Complete!")

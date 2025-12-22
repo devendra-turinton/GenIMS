@@ -16,8 +16,12 @@ TRAINING_COURSES_COUNT = 30
 DEPARTMENTS_PER_FACTORY = 8
 
 class HCMDataGenerator:
-    def __init__(self, master_data_file='genims_master_data.json'):
+    def __init__(self, master_data_file=None):
         """Initialize with master data"""
+        if master_data_file is None:
+            from pathlib import Path
+            master_data_file = Path(__file__).parent.parent / "01 - Base Data" / "genims_master_data.json"
+        
         print("Loading existing data...")
         
         with open(master_data_file, 'r') as f:
@@ -193,10 +197,12 @@ class HCMDataGenerator:
                      'Planning', 'Engineering', 'Safety', 'HR']
         
         for factory in self.factories:
+            # Generate factory code if not present
+            factory_code = factory.get('factory_code', f"FAC-{factory['factory_id'][-4:]}")
             for dept_name in dept_names:
                 dept = {
                     'department_id': self.generate_id('DEPT', 'dept'),
-                    'department_code': f"{factory['factory_code']}-{dept_name.upper()[:4]}",
+                    'department_code': f"{factory_code}-{dept_name.upper()[:4]}",
                     'department_name': f"{dept_name} - {factory['factory_name']}",
                     'factory_id': factory['factory_id'],
                     'cost_center': f"CC-{self.counters['dept']-1:04d}",
@@ -307,10 +313,11 @@ class HCMDataGenerator:
         ]
         
         for factory in self.factories:
+            factory_code = factory.get('factory_code', f"FAC-{factory['factory_id'][-4:]}")
             for shift in shifts:
                 s = {
                     'shift_id': self.generate_id('SHIFT', 'shift'),
-                    'shift_code': f"{factory['factory_code']}-{shift['type'].upper()[:3]}",
+                    'shift_code': f"{factory_code}-{shift['type'].upper()[:3]}",
                     'shift_name': f"{shift['name']} - {factory['factory_name']}",
                     'start_time': shift['start'],
                     'end_time': shift['end'],
@@ -416,18 +423,29 @@ class HCMDataGenerator:
         print(f"Generated {len(self.employees)} employees")
     
     def assign_employee_skills(self):
-        """Assign skills to employees"""
+        """Assign skills to employees (no duplicates)"""
         print("Assigning skills to employees...")
         
+        seen = set()  # Track (employee_id, skill_id) pairs to avoid duplicates
+        
         for emp in self.employees:
-            # Assign 3-8 skills per employee
-            for _ in range(random.randint(3, 8)):
-                skill = random.choice(self.skills_catalog)
+            # Assign 3-8 unique skills per employee
+            skills_to_assign = random.sample(self.skills_catalog, min(random.randint(3, 8), len(self.skills_catalog)))
+            
+            for skill in skills_to_assign:
+                emp_id = emp['employee_id']
+                skill_id = skill['skill_id']
+                key = (emp_id, skill_id)
                 
+                # Skip if already assigned
+                if key in seen:
+                    continue
+                
+                seen.add(key)
                 emp_skill = {
                     'employee_skill_id': self.generate_id('EMPSKL', 'emp_skill'),
-                    'employee_id': emp['employee_id'],
-                    'skill_id': skill['skill_id'],
+                    'employee_id': emp_id,
+                    'skill_id': skill_id,
                     'proficiency_level': random.randint(2, 4),
                     'proficiency_name': random.choice(['intermediate', 'advanced', 'expert']),
                     'acquired_date': (datetime.now() - timedelta(days=random.randint(30, 730))).strftime('%Y-%m-%d'),
@@ -437,11 +455,14 @@ class HCMDataGenerator:
                 }
                 self.employee_skills.append(emp_skill)
         
-        print(f"Assigned {len(self.employee_skills)} skills to employees")
+        print(f"Assigned {len(self.employee_skills)} unique skills to employees")
     
     def generate_training_schedules_and_enrollments(self):
         """Generate training schedules and enroll employees"""
         print("Generating training schedules and enrollments...")
+        
+        # Track (schedule_id, employee_id) pairs to prevent duplicates
+        seen_enrollments = set()
         
         # Generate schedules for past 180 days
         for i in range(20):  # 20 training sessions
@@ -464,10 +485,17 @@ class HCMDataGenerator:
             }
             self.training_schedules.append(schedule)
             
-            # Enroll 5-15 employees
+            # Enroll 5-15 unique employees per schedule
             enrolled_count = random.randint(5, 15)
-            for _ in range(enrolled_count):
-                emp = random.choice(self.employees)
+            selected_employees = random.sample(self.employees, min(enrolled_count, len(self.employees)))
+            
+            for emp in selected_employees:
+                # Check if we already have this combination
+                enrollment_key = (schedule['schedule_id'], emp['employee_id'])
+                if enrollment_key in seen_enrollments:
+                    continue
+                
+                seen_enrollments.add(enrollment_key)
                 
                 passed = random.random() > 0.1  # 90% pass rate
                 
@@ -490,7 +518,7 @@ class HCMDataGenerator:
                 self.training_enrollments.append(enrollment)
         
         print(f"Generated {len(self.training_schedules)} training schedules")
-        print(f"Generated {len(self.training_enrollments)} training enrollments")
+        print(f"Generated {len(self.training_enrollments)} training enrollments (all unique)")
     
     def generate_certifications(self):
         """Generate employee certifications"""
@@ -697,35 +725,60 @@ class HCMDataGenerator:
         print(f"  Safety Incidents: {len(self.safety_incidents)}")
     
     def to_json(self, output_file='hcm_historical_data.json'):
-        """Export to JSON"""
+        """Export to JSON with flat structure matching actual table names"""
         print(f"\nExporting to JSON...")
         
         data = {
-            'metadata': {
-                'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'days_of_history': DAYS_OF_HISTORY
-            },
-            'organization': {
-                'departments': self.departments[:20],  # Sample
-                'job_roles': self.job_roles,
-                'positions': self.positions[:50]  # Sample
-            },
-            'workforce': {
-                'employees': self.employees[:100],  # Sample
-                'employee_skills': self.employee_skills[:100]  # Sample
-            },
-            'training': {
-                'training_courses': self.training_courses,
-                'training_schedules': self.training_schedules,
-                'training_enrollments': self.training_enrollments[:100],  # Sample
-                'certifications': self.certifications[:50]  # Sample
-            },
-            'operations': {
-                'attendance_records': self.attendance_records[:200],  # Sample
-                'leave_requests': self.leave_requests[:50],
-                'performance_reviews': self.performance_reviews[:30],
-                'safety_incidents': self.safety_incidents
-            }
+            # Organization Structure
+            'departments': self.departments[:20],
+            'job_roles': self.job_roles,
+            'positions': self.positions[:50],
+            
+            # Workforce
+            'employees': self.employees[:100],
+            'employee_employment_history': [],
+            'employee_skills': self.employee_skills[:100],
+            'employee_certifications': self.certifications[:50],
+            
+            # Assignments & Shifts
+            'employee_shifts': [],
+            'shift_schedules': [],
+            'employee_goals': [],
+            
+            # Training & Development
+            'training_courses': self.training_courses,
+            'training_schedules': self.training_schedules,
+            'training_enrollments': self.training_enrollments[:100],
+            'training_requirements': [],
+            'career_paths': [],
+            
+            # Performance & Reviews
+            'performance_reviews': self.performance_reviews[:30],
+            'performance_kpis': [],
+            'succession_planning': [],
+            'succession_candidates': [],
+            
+            # Leave & Attendance
+            'leave_types': [],
+            'leave_requests': self.leave_requests[:50],
+            'employee_leave_balances': [],
+            'attendance_records': self.attendance_records[:200],
+            
+            # Safety & Onboarding
+            'safety_incidents': self.safety_incidents,
+            'ppe_requirements': [],
+            'employee_onboarding': [],
+            'employee_onboarding_items': [],
+            'onboarding_checklists': [],
+            'onboarding_checklist_items': [],
+            'offboarding_records': [],
+            
+            # Skill Management
+            'skills_catalog': [],
+            'role_skill_requirements': [],
+            
+            # Integration & Logging
+            'hcm_integration_log': []
         }
         
         with open(output_file, 'w') as f:
@@ -735,9 +788,17 @@ class HCMDataGenerator:
 
 
 if __name__ == "__main__":
+    from pathlib import Path
+    
+    # Get the directory of this script (data folder)
+    script_dir = Path(__file__).parent
+    
     generator = HCMDataGenerator()
     generator.generate_all_data()
-    generator.to_json()
+    
+    # Export to JSON (in same folder as script)
+    json_file = script_dir / "hcm_historical_data.json"
+    generator.to_json(str(json_file))
     
     print("\n" + "="*80)
     print("HR/HCM Historical Data Generation Complete!")

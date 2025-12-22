@@ -447,7 +447,8 @@ class ERPDataGenerator:
             elif isinstance(v, (int, float)):
                 return str(v)
             else:
-                return f"'{str(v).replace(\"'\", \"''\")}'".replace('\n', ' ')
+                escaped = str(v).replace("'", "''")
+                return f"'{escaped}'".replace('\n', ' ')
         
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write("-- GenIMS ERP Historical Data\n\n")
@@ -468,23 +469,29 @@ class ERPDataGenerator:
         print(f"SQL sample written to {output_file}")
     
     def to_json(self, output_file='erp_historical_data.json'):
-        """Export to JSON"""
+        """Export to JSON with flat structure matching actual table names"""
         print(f"\nExporting to JSON...")
         
         data = {
-            'metadata': {
-                'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'days_of_data': DAYS_OF_HISTORY
-            },
+            # Materials & Suppliers
             'materials': self.materials,
             'suppliers': self.suppliers,
-            'boms': self.boms,
+            
+            # BOM - boms table doesn't exist in schema, only bom_components
             'bom_components': self.bom_components,
+            
+            # Sales Orders
             'sales_orders': self.sales_orders,
             'sales_order_lines': self.sales_order_lines,
+            
+            # Production Orders
             'production_orders': self.production_orders,
+            
+            # Purchase Orders
             'purchase_orders': self.purchase_orders,
             'purchase_order_lines': self.purchase_order_lines,
+            
+            # Inventory
             'inventory_balances': self.inventory_balances
         }
         
@@ -495,10 +502,25 @@ class ERPDataGenerator:
 
 
 if __name__ == "__main__":
-    generator = ERPDataGenerator('genims_master_data.json')
+    import os
+    from pathlib import Path
+    
+    # Get the directory of this script (data folder)
+    script_dir = Path(__file__).parent
+    
+    # Load master data from the same folder structure
+    master_data_file = script_dir.parent / "01 - Base Data" / "genims_master_data.json"
+    
+    generator = ERPDataGenerator(str(master_data_file))
     generator.generate_all_data()
-    generator.to_sql_inserts()
-    generator.to_json()
+    
+    # Export to SQL (in same folder as script)
+    sql_file = script_dir / "erp_historical_data_inserts.sql"
+    generator.to_sql_inserts(str(sql_file))
+    
+    # Export to JSON (in same folder as script)
+    json_file = script_dir / "erp_historical_data.json"
+    generator.to_json(str(json_file))
     
     print("\n" + "="*80)
     print("ERP Historical Data Generation Complete!")

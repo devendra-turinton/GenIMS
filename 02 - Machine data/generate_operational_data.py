@@ -15,9 +15,10 @@ import numpy as np
 # ============================================================================
 
 # Data generation parameters
-DAYS_OF_HISTORY = 7  # Generate 7 days of historical data
-SCADA_INTERVAL_SECONDS = 60  # SCADA samples every minute
-SENSOR_INTERVAL_SECONDS = 10  # Sensor samples every 10 seconds
+DAYS_OF_HISTORY = 1  # Generate 1 day of historical data (reduced from 7 for performance)
+SCADA_INTERVAL_SECONDS = 120  # SCADA samples every 2 minutes (increased from 60 for performance)
+SENSOR_INTERVAL_SECONDS = 120  # Sensor samples every 120 seconds (increased for performance)
+MAXIMUM_MACHINES_TO_PROCESS = 50  # Limit machines to first 50 to speed up generation
 
 # Fault injection probability
 FAULT_PROBABILITY = 0.05  # 5% of machines will have faults during the period
@@ -142,16 +143,21 @@ MACHINE_FAULT_MAPPING = {
 
 
 class OperationalDataGenerator:
-    def __init__(self, master_data_file='genims_master_data.json'):
+    def __init__(self, master_data_file=None):
         """Initialize with master data"""
+        if master_data_file is None:
+            from pathlib import Path
+            master_data_file = Path(__file__).parent.parent / "01 - Base Data" / "genims_master_data.json"
+        
         print("Loading master data...")
         with open(master_data_file, 'r') as f:
             self.master_data = json.load(f)
         
         self.factories = self.master_data['factories']
         self.lines = self.master_data['production_lines']
-        self.machines = self.master_data['machines']
-        self.sensors = self.master_data['sensors']
+        self.machines = self.master_data['machines'][:MAXIMUM_MACHINES_TO_PROCESS]  # Limit machines for performance
+        machine_ids = {m['machine_id'] for m in self.machines}
+        self.sensors = [s for s in self.master_data['sensors'] if s['machine_id'] in machine_ids]
         self.employees = self.master_data['employees']
         self.shifts = self.master_data['shifts']
         self.products = self.master_data['products']
@@ -197,7 +203,8 @@ class OperationalDataGenerator:
                 self._generate_scada_record(machine, current_time)
             
             # Generate sensor data (higher frequency)
-            if iteration % (SENSOR_INTERVAL_SECONDS // SCADA_INTERVAL_SECONDS) == 0:
+            sensor_ratio = max(1, SENSOR_INTERVAL_SECONDS // SCADA_INTERVAL_SECONDS)
+            if iteration % sensor_ratio == 0:
                 for sensor in self.sensors:
                     self._generate_sensor_record(sensor, current_time)
             
@@ -668,21 +675,12 @@ class OperationalDataGenerator:
         print(f"SQL INSERT statements written to {output_file}")
     
     def to_json(self, output_file='genims_operational_data.json'):
-        """Export data to JSON"""
+        """Export data to JSON with flat structure matching actual table names from genims_operational_data schema"""
         print(f"\nExporting data to JSON: {output_file}...")
         
         data = {
-            'metadata': {
-                'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'days_of_data': DAYS_OF_HISTORY,
-                'scada_interval_seconds': SCADA_INTERVAL_SECONDS,
-                'sensor_interval_seconds': SENSOR_INTERVAL_SECONDS,
-                'total_scada_records': len(self.scada_data),
-                'total_sensor_records': len(self.sensor_data),
-                'total_faults': len(self.faults)
-            },
-            'scada_data_sample': self.scada_data[:100],  # Sample for manageable file size
-            'sensor_data_sample': self.sensor_data[:100],
+            # Operational data - only tables that exist in schema
+            'sensor_data': self.sensor_data[:100],
             'faults': self.faults
         }
         
@@ -693,15 +691,38 @@ class OperationalDataGenerator:
 
 
 if __name__ == "__main__":
+    import os
+    from pathlib import Path
+    
+    # Get the directory of this script (data folder)
+    script_dir = Path(__file__).parent
+    
+    # Load master data from the same folder structure
+    master_data_file = script_dir.parent / "01 - Base Data" / "genims_master_data.json"
+    
     # Generate operational data
-    generator = OperationalDataGenerator('genims_master_data.json')
-    generator.generate_all_data(days=7)
+    generator = OperationalDataGenerator(str(master_data_file))
+    generator.generate_all_data(days=DAYS_OF_HISTORY)  # Use configured days
     
-    # Export to SQL
-    generator.to_sql_inserts('genims_operational_data_inserts.sql')
+    # Export to SQL (in same folder as script)
+    sql_file = script_dir / "genims_operational_data_inserts.sql"
+    generator.to_sql_inserts(str(sql_file))
     
-    # Export to JSON
-    generator.to_json('genims_operational_data.json')
+    # Export to JSON (in same folder as script)
+    json_file = script_dir / "genims_operational_data.json"
+    generator.to_json(str(json_file))
+    
+    # Generate operational data
+    generator = OperationalDataGenerator(str(master_data_file))
+    generator.generate_all_data(days=DAYS_OF_HISTORY)  # Use configured days
+    
+    # Export to SQL (in same folder as script)
+    sql_file = script_dir / "genims_operational_data_inserts.sql"
+    generator.to_sql_inserts(str(sql_file))
+    
+    # Export to JSON (in same folder as script)
+    json_file = script_dir / "genims_operational_data.json"
+    generator.to_json(str(json_file))
     
     print("\n" + "="*80)
     print("Data generation complete!")

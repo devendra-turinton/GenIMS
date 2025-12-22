@@ -993,7 +993,7 @@ CREATE INDEX idx_supplier_invoices_payment ON supplier_invoices(payment_status, 
 -- Qualification
 CREATE INDEX idx_supplier_qual_status ON supplier_qualification(qualification_status);
 CREATE INDEX idx_supplier_docs_expiry ON supplier_documents(supplier_id, expiry_date);
-CREATE INDEX idx_supplier_audits_supplier ON supplier_audits(supplier_id, audit_date);
+CREATE INDEX idx_supplier_audits_supplier ON supplier_audits(supplier_id, actual_date);
 
 -- Portal
 CREATE INDEX idx_portal_users_supplier ON supplier_portal_users(supplier_id, is_active);

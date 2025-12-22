@@ -782,7 +782,8 @@ class MESDataGenerator:
                 elif isinstance(v, (int, float)):
                     return str(v)
                 else:
-                    return f"'{str(v).replace(\"'\", \"''\")}'".replace('\n', ' ')
+                    escaped = str(v).replace("'", "''")
+                    return f"'{escaped}'".replace('\n', ' ')
             
             # Work Orders
             f.write("-- WORK ORDERS\n")
@@ -884,15 +885,26 @@ class MESDataGenerator:
 
 
 if __name__ == "__main__":
+    import os
+    from pathlib import Path
+    
+    # Get the directory of this script (data folder)
+    script_dir = Path(__file__).parent
+    
+    # Load master data from the same folder structure
+    master_data_file = script_dir.parent / "01 - Base Data" / "genims_master_data.json"
+    
     # Generate MES historical data
-    generator = MESDataGenerator('genims_master_data.json')
+    generator = MESDataGenerator(str(master_data_file))
     generator.generate_all_data()
     
-    # Export to SQL
-    generator.to_sql_inserts('mes_historical_data_inserts.sql')
+    # Export to SQL (in same folder as script)
+    sql_file = script_dir / "mes_historical_data_inserts.sql"
+    generator.to_sql_inserts(str(sql_file))
     
-    # Export to JSON
-    generator.to_json('mes_historical_data.json')
+    # Export to JSON (in same folder as script)
+    json_file = script_dir / "mes_historical_data.json"
+    generator.to_json(str(json_file))
     
     print("\n" + "="*80)
     print("MES Historical Data Generation Complete!")

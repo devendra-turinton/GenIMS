@@ -16,9 +16,16 @@ WAREHOUSES_TO_CREATE = 3
 CARRIERS_TO_CREATE = 10
 
 class WMSTMSDataGenerator:
-    def __init__(self, master_data_file='genims_master_data.json',
-                 erp_data_file='erp_historical_data.json'):
+    def __init__(self, master_data_file=None, erp_data_file=None):
         """Initialize with master data and ERP data"""
+        from pathlib import Path
+        
+        if master_data_file is None:
+            master_data_file = Path(__file__).parent.parent / "01 - Base Data" / "genims_master_data.json"
+        
+        if erp_data_file is None:
+            erp_data_file = Path(__file__).parent.parent / "04 - ERP & MES Integration" / "erp_historical_data.json"
+        
         print("Loading existing data...")
         
         with open(master_data_file, 'r') as f:
@@ -115,7 +122,7 @@ class WMSTMSDataGenerator:
                 'warehouse_name': f"{factory['factory_name']} Distribution Center",
                 'plant_id': factory['factory_id'],
                 'city': factory['city'],
-                'state': factory['state'],
+                'state': factory.get('state', factory.get('region', 'Unknown')),
                 'country': factory['country'],
                 'warehouse_type': 'distribution_center',
                 'total_area_sqm': random.randint(5000, 20000),
@@ -585,48 +592,104 @@ class WMSTMSDataGenerator:
         print(f"  Deliveries: {len(self.deliveries)}")
         print(f"  Proof of Delivery: {len(self.pod)}")
     
-    def to_json(self, output_file='wms_tms_historical_data.json'):
-        """Export to JSON"""
-        print(f"\nExporting to JSON...")
+    def to_json(self, output_file_wms='wms_historical_data.json', output_file_tms='tms_historical_data.json'):
+        """Export to JSON with separate files for WMS and TMS"""
+        print(f"\nExporting to JSON (separate WMS and TMS files)...")
         
-        data = {
-            'metadata': {
-                'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'wms_days': WMS_DAYS_OF_HISTORY,
-                'tms_days': TMS_DAYS_OF_HISTORY
-            },
-            'wms': {
-                'warehouses': self.warehouses,
-                'zones': self.zones,
-                'bins': self.bins[:100],  # Sample
-                'workers': self.warehouse_workers,
-                'receiving_tasks': self.receiving_tasks[:50],
-                'putaway_tasks': self.putaway_tasks[:50],
-                'pick_waves': self.pick_waves,
-                'picking_tasks': self.picking_tasks[:50],
-                'packing_tasks': self.packing_tasks,
-                'shipping_tasks': self.shipping_tasks
-            },
-            'tms': {
-                'carriers': self.carriers,
-                'carrier_services': self.carrier_services,
-                'shipments': self.shipments,
-                'tracking_events': self.tracking_events[:100],
-                'deliveries': self.deliveries,
-                'pod': self.pod
-            }
+        # WMS Data - Warehouse Management System
+        wms_data = {
+            # WMS - Warehouses & Zones & Aisles
+            'warehouses': self.warehouses,
+            'warehouse_zones': self.zones,
+            'storage_bins': self.bins[:100],
+            'warehouse_workers': self.warehouse_workers,
+            
+            # WMS - Inventory
+            'warehouse_inventory': self.warehouse_inventory,
+            
+            # WMS - Receiving
+            'receiving_tasks': self.receiving_tasks[:50],
+            'receiving_line_items': [],
+            'receiving_inspections': [],
+            
+            # WMS - Putaway
+            'putaway_tasks': self.putaway_tasks[:50],
+            'putaway_suggestions': [],
+            
+            # WMS - Picking & Wave
+            'pick_waves': self.pick_waves,
+            'wave_lines': self.wave_lines,
+            'picking_tasks': self.picking_tasks[:50],
+            'picking_line_items': [],
+            
+            # WMS - Packing & Shipping
+            'packing_tasks': self.packing_tasks,
+            'shipping_tasks': self.shipping_tasks,
+            
+            # WMS - Additional tables
+            'cycle_count_tasks': [],
+            'warehouse_equipment': [],
+            'warehouse_movements': [],
+            'warehouse_aisles': [],
+            'slotting_rules': []
         }
         
-        with open(output_file, 'w') as f:
-            json.dump(data, f, indent=2)
+        # TMS Data - Transportation Management System
+        tms_data = {
+            # TMS - Master Data
+            'carriers': self.carriers,
+            'carrier_services': self.carrier_services,
+            'carrier_rates': [],
+            
+            # TMS - Shipments
+            'shipments': self.shipments,
+            'shipment_lines': self.shipment_lines,
+            'shipment_packages': [],
+            'tracking_events': self.tracking_events[:100],
+            
+            # TMS - Deliveries & Routes
+            'routes': self.routes,
+            'route_stops': self.route_stops,
+            'deliveries': self.deliveries,
+            'proof_of_delivery': self.pod,
+            
+            # TMS - Returns
+            'return_orders': self.return_orders,
+            'return_order_lines': [],
+            'return_shipments': [],
+            
+            # TMS - Freight
+            'freight_invoices': [],
+            'freight_invoice_lines': [],
+            
+            # Integration & Logging
+            'wms_tms_sync_log': []
+        }
         
-        print(f"Data exported to {output_file}")
+        # Write WMS JSON
+        with open(output_file_wms, 'w') as f:
+            json.dump(wms_data, f, indent=2)
+        print(f"WMS data exported to {output_file_wms}")
+        
+        # Write TMS JSON
+        with open(output_file_tms, 'w') as f:
+            json.dump(tms_data, f, indent=2)
+        print(f"TMS data exported to {output_file_tms}")
 
 
 if __name__ == "__main__":
+    from pathlib import Path
+    
+    # Get the directory of this script (data folder)
+    script_dir = Path(__file__).parent
+    
     generator = WMSTMSDataGenerator()
     generator.generate_all_data()
-    generator.to_json()
+    
+    # Export to JSON (in same folder as script) - create separate WMS and TMS files
+    wms_json_file = script_dir / "wms_historical_data.json"
+    tms_json_file = script_dir / "tms_historical_data.json"
+    generator.to_json(str(wms_json_file), str(tms_json_file))
     
     print("\n" + "="*80)
     print("WMS + TMS Historical Data Generation Complete!")
