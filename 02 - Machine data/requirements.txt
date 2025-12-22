@@ -1,0 +1,13 @@
+# GenIMS Operational Data Ecosystem - Python Dependencies
+
+# Database connectivity
+psycopg2-binary>=2.9.0
+
+# Kafka streaming (optional but recommended)
+kafka-python>=2.0.2
+
+# Numerical operations
+numpy>=1.20.0
+
+# For data generation
+# No additional requirements beyond above

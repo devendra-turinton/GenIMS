@@ -1,0 +1,7 @@
+psycopg2-binary>=2.9.9
+kafka-python>=2.0.2
+numpy>=1.26.0
+pandas>=2.1.0
+python-dotenv>=1.0.0
+pytz>=2023.3
+

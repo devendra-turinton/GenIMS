@@ -1,0 +1,1042 @@
+[
+  {
+    "table": "companies",
+    "primary_key": "company_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for each legal entity/company",
+    "business_key": "company_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "factories",
+    "primary_key": "factory_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for each manufacturing facility",
+    "business_key": "factory_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "warehouses",
+    "primary_key": "warehouse_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for each storage facility",
+    "business_key": "warehouse_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "warehouse_zones",
+    "primary_key": "zone_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for warehouse storage zones",
+    "business_key": "zone_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "departments",
+    "primary_key": "department_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for organizational departments",
+    "business_key": "department_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "suppliers",
+    "primary_key": "supplier_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for supplier/vendor records",
+    "business_key": "supplier_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "supplier_contacts",
+    "primary_key": "contact_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for supplier contact persons",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "customers",
+    "primary_key": "customer_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for customer accounts",
+    "business_key": "customer_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "materials",
+    "primary_key": "material_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for materials and components",
+    "business_key": "material_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "products",
+    "primary_key": "product_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for finished goods products",
+    "business_key": "product_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "bill_of_materials",
+    "primary_key": "bom_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for bill of materials records",
+    "business_key": "bom_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "bom_components",
+    "primary_key": "component_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for individual BOM line items",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "employees",
+    "primary_key": "employee_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for employee records",
+    "business_key": "employee_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "production_lines",
+    "primary_key": "line_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for production lines",
+    "business_key": "line_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "machines",
+    "primary_key": "machine_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for machines and equipment",
+    "business_key": "machine_tag",
+    "indexing": "clustered"
+  },
+  {
+    "table": "leads",
+    "primary_key": "lead_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for sales leads",
+    "business_key": "lead_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "opportunities",
+    "primary_key": "opportunity_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for sales opportunities",
+    "business_key": "opportunity_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "quotes",
+    "primary_key": "quote_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for customer quotes",
+    "business_key": "quote_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "quote_lines",
+    "primary_key": "quote_line_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for quote line items",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "sales_territories",
+    "primary_key": "territory_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for sales territories",
+    "business_key": "territory_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "campaigns",
+    "primary_key": "campaign_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for marketing campaigns",
+    "business_key": "campaign_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "service_tickets",
+    "primary_key": "ticket_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for customer service tickets",
+    "business_key": "ticket_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "warranty_claims",
+    "primary_key": "claim_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for warranty claims",
+    "business_key": "claim_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "return_authorizations",
+    "primary_key": "rma_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for return merchandise authorizations",
+    "business_key": "rma_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "return_authorization_lines",
+    "primary_key": "rma_line_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for RMA line items",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "service_contracts",
+    "primary_key": "contract_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for service contracts",
+    "business_key": "contract_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "training_programs",
+    "primary_key": "program_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for training programs",
+    "business_key": "program_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "training_sessions",
+    "primary_key": "session_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for training sessions",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "performance_reviews",
+    "primary_key": "review_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for employee performance reviews",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "payroll_runs",
+    "primary_key": "payroll_run_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for payroll processing runs",
+    "business_key": "payroll_period",
+    "indexing": "clustered"
+  },
+  {
+    "table": "payroll_entries",
+    "primary_key": "entry_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for individual payroll entries",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "shift_schedules",
+    "primary_key": "schedule_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for shift schedules",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "time_attendance",
+    "primary_key": "attendance_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for time and attendance records",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "purchase_orders",
+    "primary_key": "po_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for purchase orders",
+    "business_key": "po_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "po_lines",
+    "primary_key": "line_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for purchase order lines",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "purchase_requisitions",
+    "primary_key": "requisition_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for purchase requisitions",
+    "business_key": "requisition_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "sales_orders",
+    "primary_key": "order_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for sales orders",
+    "business_key": "order_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "sales_order_lines",
+    "primary_key": "line_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for sales order lines",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "inventory_transactions",
+    "primary_key": "transaction_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for inventory movement transactions",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "inventory_balances",
+    "primary_key": "balance_id",
+    "key_type": "composite",
+    "data_type": "INT",
+    "auto_increment": false,
+    "description": "Composite key: material_id + warehouse_id + location_id",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "goods_receipts",
+    "primary_key": "receipt_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for material receipt transactions",
+    "business_key": "receipt_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "cycle_counts",
+    "primary_key": "count_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for cycle count records",
+    "business_key": "count_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "gl_accounts",
+    "primary_key": "account_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for general ledger accounts",
+    "business_key": "account_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "journal_entries",
+    "primary_key": "je_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for journal entries",
+    "business_key": "je_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "journal_entry_lines",
+    "primary_key": "je_line_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for journal entry lines",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "cost_centers",
+    "primary_key": "cost_center_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for cost centers",
+    "business_key": "cost_center_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "fiscal_periods",
+    "primary_key": "period_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for fiscal periods",
+    "business_key": "period_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "budgets",
+    "primary_key": "budget_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for budget records",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "supplier_invoices",
+    "primary_key": "invoice_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for supplier invoices",
+    "business_key": "invoice_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "invoice_lines",
+    "primary_key": "invoice_line_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for invoice lines",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "inventory_snapshots",
+    "primary_key": "snapshot_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for inventory snapshot records",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "sync_queue",
+    "primary_key": "queue_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for synchronization queue entries",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "work_orders",
+    "primary_key": "work_order_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for production work orders",
+    "business_key": "work_order_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "routings",
+    "primary_key": "routing_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for production routings",
+    "business_key": "routing_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "routing_operations",
+    "primary_key": "operation_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for routing operations",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "work_centers",
+    "primary_key": "work_center_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for work centers",
+    "business_key": "work_center_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "production_transactions",
+    "primary_key": "transaction_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for production transactions",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "material_issues",
+    "primary_key": "issue_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for material issue transactions",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "production_batches",
+    "primary_key": "batch_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for production batches",
+    "business_key": "batch_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "downtime_events",
+    "primary_key": "downtime_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for downtime events",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "inventory_locations",
+    "primary_key": "location_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for storage locations",
+    "business_key": "location_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "picking_waves",
+    "primary_key": "wave_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for picking waves",
+    "business_key": "wave_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "wave_orders",
+    "primary_key": "wave_order_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for wave-order associations",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "pick_tasks",
+    "primary_key": "pick_task_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for picking tasks",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "packing_containers",
+    "primary_key": "container_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for packing containers",
+    "business_key": "container_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "replenishment_tasks",
+    "primary_key": "task_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for replenishment tasks",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "inventory_allocations",
+    "primary_key": "allocation_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for inventory allocations",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "shipments",
+    "primary_key": "shipment_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for shipments",
+    "business_key": "shipment_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "shipment_lines",
+    "primary_key": "shipment_line_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for shipment lines",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "carriers",
+    "primary_key": "carrier_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for carriers",
+    "business_key": "carrier_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "routes",
+    "primary_key": "route_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for delivery routes",
+    "business_key": "route_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "freight_rates",
+    "primary_key": "rate_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for freight rates",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "freight_charges",
+    "primary_key": "charge_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for freight charges",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "delivery_appointments",
+    "primary_key": "appointment_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for delivery appointments",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "equipment",
+    "primary_key": "equipment_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for equipment assets",
+    "business_key": "equipment_tag",
+    "indexing": "clustered"
+  },
+  {
+    "table": "maintenance_schedules",
+    "primary_key": "schedule_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for maintenance schedules",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "maintenance_work_orders",
+    "primary_key": "work_order_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for maintenance work orders",
+    "business_key": "work_order_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "maintenance_tasks",
+    "primary_key": "task_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for maintenance tasks",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "spare_parts",
+    "primary_key": "part_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for spare parts",
+    "business_key": "part_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "parts_used",
+    "primary_key": "parts_used_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for parts usage records",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "equipment_failures",
+    "primary_key": "failure_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for equipment failure records",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "sensors",
+    "primary_key": "sensor_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for IoT sensors",
+    "business_key": "sensor_tag",
+    "indexing": "clustered"
+  },
+  {
+    "table": "sensor_readings",
+    "primary_key": "reading_id",
+    "key_type": "surrogate",
+    "data_type": "BIGINT",
+    "auto_increment": true,
+    "description": "Unique identifier for sensor readings (high volume table)",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "alert_rules",
+    "primary_key": "rule_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for alert rules",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "anomaly_detections",
+    "primary_key": "anomaly_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for anomaly detections",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "statistical_baselines",
+    "primary_key": "baseline_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for statistical baselines",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "supplier_portal_users",
+    "primary_key": "user_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for supplier portal users",
+    "business_key": "username",
+    "indexing": "clustered"
+  },
+  {
+    "table": "po_acknowledgments",
+    "primary_key": "acknowledgment_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for PO acknowledgments",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "advance_ship_notices",
+    "primary_key": "asn_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for advance ship notices",
+    "business_key": "asn_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "supplier_quality_issues",
+    "primary_key": "issue_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for supplier quality issues",
+    "business_key": "issue_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "supplier_performance_metrics",
+    "primary_key": "metric_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for supplier performance metrics",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "quality_inspections",
+    "primary_key": "inspection_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for quality inspections",
+    "business_key": "inspection_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "inspection_measurements",
+    "primary_key": "measurement_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for inspection measurements",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "non_conformances",
+    "primary_key": "ncr_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for non-conformances",
+    "business_key": "ncr_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "ncr_root_cause_analysis",
+    "primary_key": "rca_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for root cause analysis",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "five_why_analysis",
+    "primary_key": "why_step_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for 5-Why analysis steps",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "fishbone_analysis",
+    "primary_key": "fishbone_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for fishbone analysis entries",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "corrective_actions",
+    "primary_key": "capa_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for corrective actions (CAPA)",
+    "business_key": "capa_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "quality_audits",
+    "primary_key": "audit_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for quality audits",
+    "business_key": "audit_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "audit_findings",
+    "primary_key": "finding_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for audit findings",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "spc_control_charts",
+    "primary_key": "chart_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for SPC control charts",
+    "business_key": "chart_code",
+    "indexing": "clustered"
+  },
+  {
+    "table": "spc_data_points",
+    "primary_key": "data_point_id",
+    "key_type": "surrogate",
+    "data_type": "BIGINT",
+    "auto_increment": true,
+    "description": "Unique identifier for SPC data points (high volume table)",
+    "business_key": null,
+    "indexing": "clustered"
+  },
+  {
+    "table": "calibration_records",
+    "primary_key": "calibration_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for calibration records",
+    "business_key": "calibration_number",
+    "indexing": "clustered"
+  },
+  {
+    "table": "customer_complaints",
+    "primary_key": "complaint_id",
+    "key_type": "surrogate",
+    "data_type": "INT",
+    "auto_increment": true,
+    "description": "Unique identifier for customer complaints",
+    "business_key": "complaint_number",
+    "indexing": "clustered"
+  }
+]
