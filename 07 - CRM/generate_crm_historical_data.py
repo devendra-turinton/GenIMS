@@ -9,6 +9,10 @@ import json
 from datetime import datetime, timedelta
 from typing import List, Dict
 
+# Import PRIMARY KEY generator utility
+import sys
+from pathlib import Path
+
 # Configuration
 DAYS_OF_HISTORY = 180
 SALES_REPS_COUNT = 15
@@ -26,9 +30,10 @@ class CRMDataGenerator:
             master_data_file = Path(__file__).parent.parent / "01 - Base Data" / "genims_master_data.json"
         
         if erp_data_file is None:
-            erp_data_file = Path(__file__).parent.parent / "04 - ERP & MES Integration" / "erp_historical_data.json"
+            erp_data_file = Path(__file__).parent.parent / "04 - ERP & MES Integration" / "genims_erp_data.json"
         
-        print("Loading existing data...")
+        print(f"Loading master data from {master_data_file}...")
+        print(f"Loading ERP data from {erp_data_file}...")
         
         with open(master_data_file, 'r') as f:
             self.master_data = json.load(f)
@@ -557,6 +562,207 @@ class CRMDataGenerator:
         print(f"\nAccounts & Contacts:")
         print(f"  Accounts: {len(self.accounts)}")
         print(f"  Contacts: {len(self.contacts)}")
+    # ========================================================================
+    # EMPTY TABLE GENERATORS
+    # ========================================================================
+    
+    def _generate_activities(self):
+        """Generate activities"""
+        print("Generating activities...")
+        activities = []
+        start_date = datetime.now() - timedelta(days=180)
+        
+        for i in range(35):
+            activity = {
+                'activity_id': self.generate_id('ACT', 'activity'),
+                'activity_number': f"ACT-{self.counters['activity']-1:05d}",
+                'activity_type': random.choice(['call', 'email', 'meeting', 'task']),
+                'activity_date': (start_date + timedelta(days=random.randint(0, 180))).strftime('%Y-%m-%d'),
+                'subject': f"Activity {i+1}",
+                'description': f"Details for activity {i+1}",
+                'assigned_to': random.choice(self.sales_reps)['sales_rep_id'] if self.sales_reps else None,
+                'account_id': random.choice(self.accounts)['account_id'] if self.accounts else None,
+                'contact_id': random.choice(self.contacts)['contact_id'] if self.contacts else None,
+                'status': random.choice(['completed', 'pending', 'cancelled']),
+                'priority': random.choice(['high', 'medium', 'low']),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            activities.append(activity)
+        
+        print(f"Generated {len(activities)} activities")
+        return activities
+
+    def _generate_case_comments(self):
+        """Generate case comments"""
+        print("Generating case comments...")
+        comments = []
+        
+        for i in range(40):
+            comment = {
+                'comment_id': self.generate_id('CCOM', 'activity'),
+                'case_id': self.cases[i % len(self.cases)]['case_id'] if self.cases else None,
+                'comment_text': f"Case update comment {i+1}",
+                'is_public': random.choice([True, False]),
+                'created_by': random.choice(self.sales_reps)['sales_rep_id'] if self.sales_reps else None,
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            comments.append(comment)
+        
+        print(f"Generated {len(comments)} case comments")
+        return comments
+
+    def _generate_notes(self):
+        """Generate notes"""
+        print("Generating notes...")
+        notes = []
+        
+        for i in range(45):
+            note = {
+                'note_id': self.generate_id('NOTE', 'activity'),
+                'note_type': random.choice(['account', 'contact', 'opportunity', 'case']),
+                'related_to_id': random.choice(self.accounts)['account_id'] if self.accounts else None,
+                'note_date': datetime.now().strftime('%Y-%m-%d'),
+                'note_text': f"Important note {i+1} for customer",
+                'author': random.choice(self.sales_reps)['sales_rep_id'] if self.sales_reps else None,
+                'is_confidential': random.choice([True, False]),
+                'priority': random.choice(['high', 'medium', 'low']),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            notes.append(note)
+        
+        print(f"Generated {len(notes)} notes")
+        return notes
+
+    def _generate_tasks(self):
+        """Generate tasks"""
+        print("Generating tasks...")
+        tasks = []
+        
+        for i in range(50):
+            task = {
+                'task_id': self.generate_id('TSK', 'activity'),
+                'task_number': f"TSK-{i+1:06d}",
+                'subject': f"Task {i+1}",
+                'description': f"Description for task {i+1}",
+                'related_to_type': random.choice(['lead', 'account', 'opportunity', 'case']),
+                'related_to_id': random.choice(self.accounts)['account_id'] if self.accounts else None,
+                'task_type': random.choice(['follow_up', 'send_quote', 'schedule_demo', 'contract_review']),
+                'priority': random.choice(['urgent', 'high', 'medium', 'low']),
+                'task_status': random.choice(['not_started', 'in_progress', 'completed', 'cancelled']),
+                'due_date': (datetime.now() + timedelta(days=random.randint(1, 30))).strftime('%Y-%m-%d'),
+                'assigned_to': random.choice(self.sales_reps)['sales_rep_id'] if self.sales_reps else None,
+                'reminder_enabled': True,
+                'created_by': random.choice(self.sales_reps)['sales_rep_id'] if self.sales_reps else None,
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            tasks.append(task)
+        
+        print(f"Generated {len(tasks)} tasks")
+        return tasks
+
+    def _generate_campaign_members(self):
+        """Generate campaign members"""
+        print("Generating campaign members...")
+        members = []
+        
+        for campaign in self.campaigns:
+            for i in range(random.randint(20, 50)):
+                member = {
+                    'member_id': self.generate_id('CMEM', 'activity'),
+                    'campaign_id': campaign['campaign_id'],
+                    'contact_id': random.choice(self.contacts)['contact_id'] if self.contacts else None,
+                    'account_id': random.choice(self.accounts)['account_id'] if self.accounts else None,
+                    'join_date': campaign['start_date'],
+                    'response_status': random.choice(['not_responded', 'responded', 'converted', 'bounced']),
+                    'response_date': None if random.random() > 0.7 else campaign['end_date'],
+                    'engagement_score': round(random.uniform(0, 100), 2),
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                members.append(member)
+        
+        print(f"Generated {len(members)} campaign members")
+        return members
+
+    def _generate_contracts(self):
+        """Generate contracts"""
+        print("Generating contracts...")
+        contracts = []
+        
+        for i, account in enumerate(self.accounts[:25]):
+            contract = {
+                'contract_id': self.generate_id('CONT', 'activity'),
+                'contract_number': f"CONT-{i+1:06d}",
+                'contract_name': f"Service Contract for {account.get('account_name', f'Account {i+1}')}",
+                'account_id': account['account_id'],
+                'contract_type': random.choice(['sales', 'service', 'maintenance', 'subscription']),
+                'contract_start_date': (datetime.now() - timedelta(days=random.randint(30, 365))).strftime('%Y-%m-%d'),
+                'contract_end_date': (datetime.now() + timedelta(days=random.randint(30, 365))).strftime('%Y-%m-%d'),
+                'contract_term_months': random.randint(12, 60),
+                'contract_status': random.choice(['draft', 'signed', 'active', 'expired']),
+                'contract_value': round(random.uniform(10000, 100000), 2),
+                'billing_frequency': random.choice(['one_time', 'monthly', 'quarterly', 'annually']),
+                'auto_renewal': random.choice([True, False]),
+                'contract_owner': random.choice(self.sales_reps)['sales_rep_id'] if self.sales_reps else None,
+                'created_by': random.choice(self.sales_reps)['sales_rep_id'] if self.sales_reps else None,
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            contracts.append(contract)
+        
+        print(f"Generated {len(contracts)} contracts")
+        return contracts
+
+    def _generate_crm_integration_log(self):
+        """Generate CRM integration logs"""
+        print("Generating CRM integration logs...")
+        logs = []
+        start_date = datetime.now() - timedelta(days=180)
+        
+        for i in range(40):
+            log = {
+                'log_id': self.generate_id('ILOG', 'activity'),
+                'sync_date': (start_date + timedelta(days=random.randint(0, 180))).strftime('%Y-%m-%d'),
+                'sync_time': f"{random.randint(0, 23):02d}:{random.randint(0, 59):02d}:00",
+                'source_system': random.choice(['ERP', 'Marketing', 'API', 'Portal']),
+                'target_system': 'CRM',
+                'operation_type': random.choice(['sync', 'update', 'create']),
+                'record_type': random.choice(['lead', 'account', 'opportunity', 'contact']),
+                'record_count': random.randint(1, 50),
+                'status': random.choice(['success', 'success', 'success', 'failed']),
+                'error_message': None if random.random() > 0.1 else 'API timeout',
+                'created_at': (start_date + timedelta(days=random.randint(0, 180))).strftime('%Y-%m-%d %H:%M:%S')
+            }
+            logs.append(log)
+        
+        print(f"Generated {len(logs)} CRM integration logs")
+        return logs
+
+    def _generate_customer_interactions(self):
+        """Generate customer interactions"""
+        print("Generating customer interactions...")
+        interactions = []
+        start_date = datetime.now() - timedelta(days=180)
+        
+        for i in range(50):
+            interaction = {
+                'interaction_id': self.generate_id('INTER', 'interaction'),
+                'interaction_type': random.choice(['phone', 'email', 'meeting', 'chat', 'social']),
+                'interaction_date': (start_date + timedelta(days=random.randint(0, 180))).strftime('%Y-%m-%d'),
+                'interaction_time': f"{random.randint(8, 18):02d}:{random.randint(0, 59):02d}:00",
+                'contact_id': random.choice(self.contacts)['contact_id'] if self.contacts else None,
+                'account_id': random.choice(self.accounts)['account_id'] if self.accounts else None,
+                'subject': f"Customer interaction {i+1}",
+                'description': f"Details of interaction",
+                'duration_minutes': random.randint(5, 60) if random.random() > 0.3 else None,
+                'outcome': random.choice(['positive', 'neutral', 'negative']),
+                'next_action': 'Follow up required',
+                'created_by': random.choice(self.sales_reps)['sales_rep_id'] if self.sales_reps else None,
+                'created_at': (start_date + timedelta(days=random.randint(0, 180))).strftime('%Y-%m-%d %H:%M:%S')
+            }
+            interactions.append(interaction)
+        
+        print(f"Generated {len(interactions)} customer interactions")
+        return interactions
+
         
         print(f"\nSales Pipeline:")
         print(f"  Leads: {len(self.leads)}")
@@ -579,6 +785,16 @@ class CRMDataGenerator:
         """Export to JSON with flat structure matching actual table names"""
         print(f"\nExporting to JSON...")
         
+        # Generate data for empty tables
+        activities = self._generate_activities()
+        case_comments = self._generate_case_comments()
+        notes = self._generate_notes()
+        tasks = self._generate_tasks()
+        campaign_members = self._generate_campaign_members()
+        contracts = self._generate_contracts()
+        crm_integration_log = self._generate_crm_integration_log()
+        customer_interactions = self._generate_customer_interactions()
+        
         data = {
             # Master Data
             'sales_reps': self.sales_reps,
@@ -591,7 +807,7 @@ class CRMDataGenerator:
             # Leads & Activities
             'leads': self.leads[:100],
             'lead_activities': self.lead_activities[:100],
-            'activities': [],
+            'activities': activities,
             
             # Opportunities
             'opportunities': self.opportunities[:100],
@@ -604,21 +820,21 @@ class CRMDataGenerator:
             
             # Cases & Notes
             'cases': self.cases[:50],
-            'case_comments': [],
-            'notes': [],
-            'tasks': [],
+            'case_comments': case_comments,
+            'notes': notes,
+            'tasks': tasks,
             
             # Campaigns & Forecasting
             'campaigns': self.campaigns,
-            'campaign_members': [],
+            'campaign_members': campaign_members,
             'sales_forecasts': self.forecasts,
             
             # Contracts & Integration
-            'contracts': [],
-            'crm_integration_log': [],
+            'contracts': contracts,
+            'crm_integration_log': crm_integration_log,
             
             # Customer Interactions
-            'customer_interactions': []
+            'customer_interactions': customer_interactions
         }
         
         with open(output_file, 'w') as f:
@@ -637,7 +853,7 @@ if __name__ == "__main__":
     generator.generate_all_data()
     
     # Export to JSON (in same folder as script)
-    json_file = script_dir / "crm_historical_data.json"
+    json_file = script_dir / "genims_crm_data.json"
     generator.to_json(str(json_file))
     
     print("\n" + "="*80)

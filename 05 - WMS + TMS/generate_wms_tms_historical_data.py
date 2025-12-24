@@ -9,6 +9,10 @@ import json
 from datetime import datetime, timedelta
 from typing import List, Dict
 
+# Import PRIMARY KEY generator utility
+import sys
+from pathlib import Path
+
 # Configuration
 WMS_DAYS_OF_HISTORY = 30
 TMS_DAYS_OF_HISTORY = 60
@@ -24,9 +28,10 @@ class WMSTMSDataGenerator:
             master_data_file = Path(__file__).parent.parent / "01 - Base Data" / "genims_master_data.json"
         
         if erp_data_file is None:
-            erp_data_file = Path(__file__).parent.parent / "04 - ERP & MES Integration" / "erp_historical_data.json"
+            erp_data_file = Path(__file__).parent.parent / "04 - ERP & MES Integration" / "genims_erp_data.json"
         
-        print("Loading existing data...")
+        print(f"Loading master data from {master_data_file}...")
+        print(f"Loading ERP data from {erp_data_file}...")
         
         with open(master_data_file, 'r') as f:
             self.master_data = json.load(f)
@@ -72,7 +77,7 @@ class WMSTMSDataGenerator:
             'receiving': 1, 'putaway': 1, 'wave': 1, 'picking': 1,
             'packing': 1, 'shipping': 1, 'worker': 1,
             'carrier': 1, 'service': 1, 'shipment': 1, 'tracking': 1,
-            'route': 1, 'delivery': 1, 'pod': 1, 'return': 1
+            'route': 1, 'delivery': 1, 'pod': 1, 'return': 1, 'aisle': 1, 'slot': 1
         }
         
         print(f"Loaded: {len(self.materials)} materials, {len(self.sales_orders)} sales orders")
@@ -568,6 +573,458 @@ class WMSTMSDataGenerator:
         }
         self.pod.append(pod)
     
+    # ========================================================================
+    # WMS EMPTY TABLE GENERATORS
+    # ========================================================================
+    
+    def _generate_warehouse_inventory(self):
+        """Generate warehouse inventory records"""
+        print("Generating warehouse inventory...")
+        inventory = []
+        
+        for i, material in enumerate(self.materials[:50]):
+            inv = {
+                'inventory_id': self.generate_id('INV', 'wh_inv'),
+                'warehouse_id': random.choice(self.warehouses)['warehouse_id'],
+                'bin_id': random.choice(self.bins)['bin_id'] if self.bins else f"BIN-{random.randint(1, 100):06d}",
+                'material_id': material.get('material_id'),
+                'quantity_on_hand': random.randint(100, 1000),
+                'reserved_quantity': random.randint(0, 200),
+                'available_quantity': random.randint(50, 500),
+                'quantity_damaged': random.randint(0, 20),
+                'uom': material.get('uom', 'EA'),
+                'lot_number': f"LOT-{random.randint(100000, 999999)}",
+                'expiry_date': (datetime.now() + timedelta(days=random.randint(30, 730))).strftime('%Y-%m-%d'),
+                'last_count_date': (datetime.now() - timedelta(days=random.randint(1, 30))).strftime('%Y-%m-%d'),
+                'value': round(random.uniform(1000, 50000), 2),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            inventory.append(inv)
+        
+        print(f"Generated {len(inventory)} warehouse inventory records")
+        return inventory
+
+    def _generate_wave_lines(self):
+        """Generate wave lines (items in a wave)"""
+        print("Generating wave lines...")
+        lines = []
+        
+        for wave in self.pick_waves[:30]:
+            for i in range(random.randint(5, 15)):
+                line = {
+                    'wave_line_id': self.generate_id('WL', 'picking'),
+                    'wave_id': wave['wave_id'],
+                    'sales_order_id': random.choice(self.sales_orders).get('sales_order_id') if self.sales_orders else None,
+                    'material_id': random.choice(self.materials).get('material_id') if self.materials else None,
+                    'line_number': i + 1,
+                    'quantity_required': random.randint(10, 100),
+                    'quantity_picked': random.randint(10, 100),
+                    'pick_location': f"STG-A{random.randint(1, 5):02d}-L{random.randint(1, 3)}-P{random.randint(1, 4):02d}",
+                    'status': random.choice(['pending', 'in_progress', 'completed']),
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                lines.append(line)
+        
+        print(f"Generated {len(lines)} wave lines")
+        return lines
+
+    def _generate_cycle_count_tasks(self):
+        """Generate cycle count tasks"""
+        print("Generating cycle count tasks...")
+        tasks = []
+        
+        zones = [z for z in self.zones if z['zone_type'] == 'storage']
+        
+        for i in range(25):
+            task = {
+                'cycle_count_id': self.generate_id('CC', 'packing'),
+                'task_number': f"CCT-{str(i+1).zfill(6)}",
+                'warehouse_id': random.choice(self.warehouses)['warehouse_id'],
+                'zone_id': random.choice(zones)['zone_id'] if zones else None,
+                'count_date': (datetime.now() - timedelta(days=random.randint(1, 30))).strftime('%Y-%m-%d'),
+                'assigned_to': random.choice(self.warehouse_workers)['worker_id'] if self.warehouse_workers else None,
+                'status': random.choice(['completed', 'in_progress', 'pending']),
+                'variance_pct': round(random.uniform(0, 5), 2),
+                'items_counted': random.randint(50, 500),
+                'discrepancies': random.randint(0, 20),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            tasks.append(task)
+        
+        print(f"Generated {len(tasks)} cycle count tasks")
+        return tasks
+
+    def _generate_warehouse_equipment(self):
+        """Generate warehouse equipment"""
+        print("Generating warehouse equipment...")
+        equipment = []
+        
+        equipment_types = ['forklift', 'pallet_jack', 'conveyor', 'rack', 'scanner', 'scale']
+        
+        for warehouse in self.warehouses:
+            for eq_type in equipment_types:
+                eq = {
+                    'equipment_id': self.generate_id('EQ', 'shipping'),
+                    'equipment_code': f"EQ-{self.counters['shipping']-1:05d}",
+                    'warehouse_id': warehouse['warehouse_id'],
+                    'equipment_type': eq_type,
+                    'description': f"{eq_type.replace('_', ' ').title()} Unit",
+                    'model_number': f"MDL-{random.randint(1000, 9999)}",
+                    'serial_number': f"SN{random.randint(100000, 999999)}",
+                    'purchase_date': (datetime.now() - timedelta(days=random.randint(365, 1825))).strftime('%Y-%m-%d'),
+                    'last_maintenance_date': (datetime.now() - timedelta(days=random.randint(1, 90))).strftime('%Y-%m-%d'),
+                    'status': random.choice(['operational', 'maintenance', 'retired']),
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                equipment.append(eq)
+        
+        print(f"Generated {len(equipment)} warehouse equipment")
+        return equipment
+
+    def _generate_warehouse_movements(self):
+        """Generate warehouse movements"""
+        print("Generating warehouse movements...")
+        movements = []
+        start_date = datetime.now() - timedelta(days=30)
+        
+        for i in range(45):
+            mov = {
+                'movement_id': self.generate_id('MOV', 'shipping'),
+                'movement_number': f"MOV-{str(i+1).zfill(6)}",
+                'warehouse_id': random.choice(self.warehouses)['warehouse_id'],
+                'movement_date': (start_date + timedelta(days=random.randint(0, 30))).strftime('%Y-%m-%d'),
+                'from_location': f"STG-A{random.randint(1, 5):02d}-L{random.randint(1, 3)}-P{random.randint(1, 4):02d}",
+                'to_location': f"STG-A{random.randint(1, 5):02d}-L{random.randint(1, 3)}-P{random.randint(1, 4):02d}",
+                'material_id': random.choice(self.materials).get('material_id') if self.materials else None,
+                'quantity': random.randint(10, 100),
+                'movement_type': random.choice(['replenishment', 'consolidation', 'adjustment', 'return']),
+                'performed_by': random.choice(self.warehouse_workers)['worker_id'] if self.warehouse_workers else None,
+                'reason': 'Stock optimization',
+                'created_at': (start_date + timedelta(days=random.randint(0, 30))).strftime('%Y-%m-%d %H:%M:%S')
+            }
+            movements.append(mov)
+        
+        print(f"Generated {len(movements)} warehouse movements")
+        return movements
+
+    def _generate_warehouse_aisles(self):
+        """Generate warehouse aisles"""
+        print("Generating warehouse aisles...")
+        aisles = []
+        
+        for warehouse in self.warehouses:
+            zones = [z for z in self.zones if z['warehouse_id'] == warehouse['warehouse_id'] and z['zone_type'] == 'storage']
+            for zone in zones:
+                for aisle_num in range(1, 6):
+                    aisle = {
+                        'aisle_id': self.generate_id('AISLE', 'zone'),
+                        'warehouse_id': warehouse['warehouse_id'],
+                        'zone_id': zone['zone_id'],
+                        'aisle_code': f"{zone['zone_code']}-A{aisle_num:02d}",
+                        'aisle_number': aisle_num,
+                        'aisle_length_m': random.uniform(20, 50),
+                        'aisle_width_m': random.uniform(2, 4),
+                        'levels': random.choice([2, 3, 4, 5]),
+                        'positions_per_level': random.choice([4, 5, 6]),
+                        'aisle_type': random.choice(['pallet', 'shelving', 'flow']),
+                        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    aisles.append(aisle)
+        
+        print(f"Generated {len(aisles)} warehouse aisles")
+        return aisles
+
+    def _generate_slotting_rules(self):
+        """Generate slotting rules"""
+        print("Generating slotting rules...")
+        rules = []
+        
+        for i in range(30):
+            rule = {
+                'rule_id': self.generate_id('SLOT', 'slot'),
+                'material_id': random.choice(self.materials).get('material_id') if self.materials else None,
+                'warehouse_id': random.choice(self.warehouses)['warehouse_id'],
+                'rule_name': f"Slotting Rule {i+1}",
+                'velocity_class': random.choice(['A', 'B', 'C']),
+                'optimal_location': f"STG-A{random.randint(1, 5):02d}-L{random.randint(1, 3)}-P{random.randint(1, 4):02d}",
+                'min_stock_level': random.randint(50, 200),
+                'max_stock_level': random.randint(500, 1000),
+                'rule_status': 'active',
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            rules.append(rule)
+        
+        print(f"Generated {len(rules)} slotting rules")
+        return rules
+
+    # ========================================================================
+    # TMS EMPTY TABLE GENERATORS
+    # ========================================================================
+    
+    def _generate_carrier_rates(self):
+        """Generate carrier rates"""
+        print("Generating carrier rates...")
+        rates = []
+        
+        for carrier in self.carriers:
+            for service in self.carrier_services:
+                if service.get('carrier_id') == carrier['carrier_id']:
+                    for zone in range(1, 4):
+                        rate = {
+                            'rate_id': self.generate_id('RATE', 'carrier'),
+                            'carrier_id': carrier['carrier_id'],
+                            'service_id': service.get('service_id'),
+                            'zone': zone,
+                            'rate_type': random.choice(['weight_based', 'zone_based', 'flat']),
+                            'min_weight_kg': random.randint(0, 10),
+                            'max_weight_kg': random.randint(100, 500),
+                            'rate_per_unit': round(random.uniform(10, 100), 2),
+                            'currency': 'USD',
+                            'effective_date': datetime.now().strftime('%Y-%m-%d'),
+                            'expiry_date': (datetime.now() + timedelta(days=365)).strftime('%Y-%m-%d'),
+                            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        }
+                        rates.append(rate)
+        
+        print(f"Generated {len(rates)} carrier rates")
+        return rates
+
+    def _generate_shipment_lines(self):
+        """Generate shipment lines"""
+        print("Generating shipment lines...")
+        lines = []
+        
+        for shipment in self.shipments[:40]:
+            for i in range(random.randint(1, 5)):
+                line = {
+                    'shipment_line_id': self.generate_id('SHL', 'shipment'),
+                    'shipment_id': shipment['shipment_id'],
+                    'sales_order_id': shipment.get('sales_order_id'),
+                    'material_id': random.choice(self.materials).get('material_id') if self.materials else None,
+                    'line_number': i + 1,
+                    'quantity': random.randint(10, 100),
+                    'uom': 'EA',
+                    'weight_kg': round(random.uniform(1, 50), 2),
+                    'volume_cbm': round(random.uniform(0.01, 1), 4),
+                    'status': random.choice(['packed', 'in_transit', 'delivered']),
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                lines.append(line)
+        
+        print(f"Generated {len(lines)} shipment lines")
+        return lines
+
+    def _generate_shipment_packages(self):
+        """Generate shipment packages"""
+        print("Generating shipment packages...")
+        packages = []
+        
+        for shipment in self.shipments[:35]:
+            for i in range(random.randint(1, 3)):
+                pkg = {
+                    'package_id': self.generate_id('PKG', 'shipping'),
+                    'shipment_id': shipment['shipment_id'],
+                    'package_number': i + 1,
+                    'package_type': random.choice(['carton', 'pallet', 'container']),
+                    'length_cm': random.randint(20, 100),
+                    'width_cm': random.randint(20, 100),
+                    'height_cm': random.randint(20, 100),
+                    'weight_kg': round(random.uniform(5, 100), 2),
+                    'contents': json.dumps([f"Item {j+1}" for j in range(random.randint(1, 5))]),
+                    'seal_number': f"SEAL-{random.randint(100000, 999999)}",
+                    'package_status': random.choice(['packed', 'labeled', 'shipped']),
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                packages.append(pkg)
+        
+        print(f"Generated {len(packages)} shipment packages")
+        return packages
+
+    def _generate_routes(self):
+        """Generate routes"""
+        print("Generating routes...")
+        routes = []
+        
+        for i in range(25):
+            route = {
+                'route_id': self.generate_id('ROUTE', 'route'),
+                'route_number': f"RT-{i+1:06d}",
+                'route_date': (datetime.now() - timedelta(days=random.randint(0, 30))).strftime('%Y-%m-%d'),
+                'planned_start_time': f"{random.randint(6, 20):02d}:00:00",
+                'planned_end_time': f"{random.randint(6, 20):02d}:00:00",
+                'origin_city': random.choice(['New Delhi', 'Mumbai', 'Bangalore', 'Chennai', 'Kolkata']),
+                'destination_city': random.choice(['New Delhi', 'Mumbai', 'Bangalore', 'Chennai', 'Kolkata']),
+                'distance_km': round(random.uniform(50, 2000), 2),
+                'estimated_duration_hours': round(random.uniform(2, 48), 1),
+                'frequency': random.choice(['daily', 'twice_weekly', 'weekly']),
+                'carrier_id': random.choice(self.carriers)['carrier_id'],
+                'route_status': 'active',
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            routes.append(route)
+        
+        print(f"Generated {len(routes)} routes")
+        return routes
+
+    def _generate_route_stops(self):
+        """Generate route stops"""
+        print("Generating route stops...")
+        stops = []
+        
+        for route in self.routes:
+            for i in range(random.randint(3, 8)):
+                stop = {
+                    'stop_id': self.generate_id('STOP', 'delivery'),
+                    'route_id': route['route_id'],
+                    'stop_sequence': i + 1,
+                    'stop_city': random.choice(['New Delhi', 'Gurgaon', 'Noida', 'Mumbai', 'Pune']),
+                    'stop_address': f"Address {i+1}",
+                    'delivery_customer_id': random.choice(self.customers).get('customer_id') if self.customers else None,
+                    'stop_type': random.choice(['pickup', 'delivery', 'both']),
+                    'planned_arrival_time': f"{random.randint(6, 20):02d}:00:00",
+                    'status': random.choice(['pending', 'completed']),
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                stops.append(stop)
+        
+        print(f"Generated {len(stops)} route stops")
+        return stops
+
+    def _generate_return_orders(self):
+        """Generate return orders"""
+        print("Generating return orders...")
+        returns = []
+        start_date = datetime.now() - timedelta(days=90)
+        
+        for i in range(30):
+            ret = {
+                'return_order_id': self.generate_id('RET', 'return'),
+                'return_number': f"RET-{datetime.now().strftime('%Y%m%d')}-{i+1:04d}",
+                'original_shipment_id': random.choice(self.shipments)['shipment_id'] if self.shipments else None,
+                'customer_id': random.choice(self.customers).get('customer_id') if self.customers else None,
+                'return_date': (start_date + timedelta(days=random.randint(0, 90))).strftime('%Y-%m-%d'),
+                'return_reason': random.choice(['defective', 'damaged', 'wrong_item', 'customer_request']),
+                'return_status': random.choice(['initiated', 'in_transit', 'received', 'processed']),
+                'refund_amount': round(random.uniform(1000, 50000), 2),
+                'created_at': (start_date + timedelta(days=random.randint(0, 90))).strftime('%Y-%m-%d %H:%M:%S')
+            }
+            returns.append(ret)
+        
+        print(f"Generated {len(returns)} return orders")
+        return returns
+
+    def _generate_return_order_lines(self):
+        """Generate return order lines"""
+        print("Generating return order lines...")
+        lines = []
+        
+        for i in range(35):
+            line = {
+                'return_line_id': self.generate_id('RLN', 'return'),
+                'return_order_id': self.return_orders[i % len(self.return_orders)]['return_order_id'] if self.return_orders else None,
+                'sales_order_line_id': None,
+                'material_id': random.choice(self.materials).get('material_id') if self.materials else None,
+                'quantity_returned': random.randint(5, 50),
+                'reason_description': random.choice(['Defective unit', 'Wrong color', 'Damaged in transit']),
+                'condition': random.choice(['unopened', 'opened', 'used', 'damaged']),
+                'inspection_result': random.choice(['pass', 'fail']),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            lines.append(line)
+        
+        print(f"Generated {len(lines)} return order lines")
+        return lines
+
+    def _generate_return_shipments(self):
+        """Generate return shipments"""
+        print("Generating return shipments...")
+        shipments = []
+        
+        for i in range(20):
+            ship = {
+                'return_shipment_id': self.generate_id('RSHIP', 'return'),
+                'return_order_id': self.return_orders[i % len(self.return_orders)]['return_order_id'] if self.return_orders else None,
+                'shipment_date': (datetime.now() - timedelta(days=random.randint(1, 30))).strftime('%Y-%m-%d'),
+                'expected_delivery_date': (datetime.now() + timedelta(days=random.randint(5, 15))).strftime('%Y-%m-%d'),
+                'actual_delivery_date': None,
+                'carrier_id': random.choice(self.carriers)['carrier_id'],
+                'tracking_number': f"TRK-{random.randint(100000000, 999999999)}",
+                'shipment_status': random.choice(['in_transit', 'delivered']),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            shipments.append(ship)
+        
+        print(f"Generated {len(shipments)} return shipments")
+        return shipments
+
+    def _generate_freight_invoices(self):
+        """Generate freight invoices"""
+        print("Generating freight invoices...")
+        invoices = []
+        
+        for i in range(25):
+            inv = {
+                'freight_invoice_id': self.generate_id('FRT', 'shipment'),
+                'invoice_number': f"FRT-{random.randint(100000, 999999)}",
+                'shipment_id': random.choice(self.shipments)['shipment_id'] if self.shipments else None,
+                'carrier_id': random.choice(self.carriers)['carrier_id'],
+                'invoice_date': datetime.now().strftime('%Y-%m-%d'),
+                'amount': round(random.uniform(1000, 50000), 2),
+                'currency': 'USD',
+                'status': random.choice(['pending', 'approved', 'paid']),
+                'payment_date': None if random.random() > 0.7 else datetime.now().strftime('%Y-%m-%d'),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            invoices.append(inv)
+        
+        print(f"Generated {len(invoices)} freight invoices")
+        return invoices
+
+    def _generate_freight_invoice_lines(self):
+        """Generate freight invoice lines"""
+        print("Generating freight invoice lines...")
+        lines = []
+        
+        for i in range(40):
+            line = {
+                'invoice_line_id': self.generate_id('FIL', 'shipment'),
+                'freight_invoice_id': None,
+                'charge_type': random.choice(['transportation', 'handling', 'surcharge', 'tax']),
+                'description': f"Freight charge {i+1}",
+                'quantity': random.randint(1, 10),
+                'unit_price': round(random.uniform(100, 5000), 2),
+                'amount': round(random.uniform(100, 50000), 2),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            lines.append(line)
+        
+        print(f"Generated {len(lines)} freight invoice lines")
+        return lines
+
+    def _generate_wms_tms_sync_log(self):
+        """Generate WMS-TMS sync logs"""
+        print("Generating WMS-TMS sync logs...")
+        logs = []
+        start_date = datetime.now() - timedelta(days=60)
+        
+        for i in range(50):
+            log = {
+                'sync_log_id': self.generate_id('SYNC', 'pod'),
+                'sync_date': (start_date + timedelta(days=random.randint(0, 60))).strftime('%Y-%m-%d'),
+                'sync_time': f"{random.randint(0, 23):02d}:{random.randint(0, 59):02d}:00",
+                'source_system': random.choice(['WMS', 'TMS']),
+                'target_system': random.choice(['TMS', 'WMS']),
+                'record_type': random.choice(['shipment', 'inventory', 'delivery', 'return']),
+                'record_count': random.randint(1, 100),
+                'status': random.choice(['success', 'success', 'success', 'failed']),
+                'error_message': None if random.random() > 0.1 else 'Connection timeout',
+                'created_at': (start_date + timedelta(days=random.randint(0, 60))).strftime('%Y-%m-%d %H:%M:%S')
+            }
+            logs.append(log)
+        
+        print(f"Generated {len(logs)} WMS-TMS sync logs")
+        return logs
+
     def _print_summary(self):
         print(f"\n{'='*80}")
         print(f"WMS + TMS Data Generation Complete!")
@@ -596,6 +1053,30 @@ class WMSTMSDataGenerator:
         """Export to JSON with separate files for WMS and TMS"""
         print(f"\nExporting to JSON (separate WMS and TMS files)...")
         
+        # Generate WMS empty table data
+        warehouse_inventory = self._generate_warehouse_inventory()
+        wave_lines = self._generate_wave_lines()
+        cycle_count_tasks = self._generate_cycle_count_tasks()
+        warehouse_equipment = self._generate_warehouse_equipment()
+        warehouse_movements = self._generate_warehouse_movements()
+        warehouse_aisles = self._generate_warehouse_aisles()
+        slotting_rules = self._generate_slotting_rules()
+        
+        # Generate TMS empty table data
+        carrier_rates = self._generate_carrier_rates()
+        shipment_lines = self._generate_shipment_lines()
+        shipment_packages = self._generate_shipment_packages()
+        routes = self._generate_routes()
+        self.routes = routes  # Store routes for route_stops generation
+        route_stops = self._generate_route_stops()
+        return_orders = self._generate_return_orders()
+        self.return_orders = return_orders  # Store return_orders for dependent tables
+        return_order_lines = self._generate_return_order_lines()
+        return_shipments = self._generate_return_shipments()
+        freight_invoices = self._generate_freight_invoices()
+        freight_invoice_lines = self._generate_freight_invoice_lines()
+        wms_tms_sync_log = self._generate_wms_tms_sync_log()
+        
         # WMS Data - Warehouse Management System
         wms_data = {
             # WMS - Warehouses & Zones & Aisles
@@ -605,33 +1086,29 @@ class WMSTMSDataGenerator:
             'warehouse_workers': self.warehouse_workers,
             
             # WMS - Inventory
-            'warehouse_inventory': self.warehouse_inventory,
+            'warehouse_inventory': warehouse_inventory,
             
             # WMS - Receiving
             'receiving_tasks': self.receiving_tasks[:50],
-            'receiving_line_items': [],
-            'receiving_inspections': [],
             
             # WMS - Putaway
             'putaway_tasks': self.putaway_tasks[:50],
-            'putaway_suggestions': [],
             
             # WMS - Picking & Wave
             'pick_waves': self.pick_waves,
-            'wave_lines': self.wave_lines,
+            'wave_lines': wave_lines,
             'picking_tasks': self.picking_tasks[:50],
-            'picking_line_items': [],
             
             # WMS - Packing & Shipping
             'packing_tasks': self.packing_tasks,
             'shipping_tasks': self.shipping_tasks,
             
             # WMS - Additional tables
-            'cycle_count_tasks': [],
-            'warehouse_equipment': [],
-            'warehouse_movements': [],
-            'warehouse_aisles': [],
-            'slotting_rules': []
+            'cycle_count_tasks': cycle_count_tasks,
+            'warehouse_equipment': warehouse_equipment,
+            'warehouse_movements': warehouse_movements,
+            'warehouse_aisles': warehouse_aisles,
+            'slotting_rules': slotting_rules
         }
         
         # TMS Data - Transportation Management System
@@ -639,31 +1116,31 @@ class WMSTMSDataGenerator:
             # TMS - Master Data
             'carriers': self.carriers,
             'carrier_services': self.carrier_services,
-            'carrier_rates': [],
+            'carrier_rates': carrier_rates,
             
             # TMS - Shipments
             'shipments': self.shipments,
-            'shipment_lines': self.shipment_lines,
-            'shipment_packages': [],
+            'shipment_lines': shipment_lines,
+            'shipment_packages': shipment_packages,
             'tracking_events': self.tracking_events[:100],
             
             # TMS - Deliveries & Routes
-            'routes': self.routes,
-            'route_stops': self.route_stops,
+            'routes': routes,
+            'route_stops': route_stops,
             'deliveries': self.deliveries,
             'proof_of_delivery': self.pod,
             
             # TMS - Returns
-            'return_orders': self.return_orders,
-            'return_order_lines': [],
-            'return_shipments': [],
+            'return_orders': return_orders,
+            'return_order_lines': return_order_lines,
+            'return_shipments': return_shipments,
             
             # TMS - Freight
-            'freight_invoices': [],
-            'freight_invoice_lines': [],
+            'freight_invoices': freight_invoices,
+            'freight_invoice_lines': freight_invoice_lines,
             
             # Integration & Logging
-            'wms_tms_sync_log': []
+            'wms_tms_sync_log': wms_tms_sync_log
         }
         
         # Write WMS JSON
@@ -687,8 +1164,8 @@ if __name__ == "__main__":
     generator.generate_all_data()
     
     # Export to JSON (in same folder as script) - create separate WMS and TMS files
-    wms_json_file = script_dir / "wms_historical_data.json"
-    tms_json_file = script_dir / "tms_historical_data.json"
+    wms_json_file = script_dir / "genims_wms_data.json"
+    tms_json_file = script_dir / "genims_tms_data.json"
     generator.to_json(str(wms_json_file), str(tms_json_file))
     
     print("\n" + "="*80)

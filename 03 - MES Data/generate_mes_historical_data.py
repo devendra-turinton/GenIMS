@@ -8,6 +8,8 @@ import json
 from datetime import datetime, timedelta, time
 from typing import List, Dict, Tuple
 import string
+import sys
+from pathlib import Path
 
 # ============================================================================
 # CONFIGURATION
@@ -45,20 +47,27 @@ CONSUMABLES = [
 
 
 class MESDataGenerator:
-    def __init__(self, master_data_file='genims_master_data.json'):
+    def __init__(self, master_data_file=None):
         """Initialize with master data"""
-        print("Loading master data...")
+        from pathlib import Path
+        
+        if master_data_file is None:
+            master_data_file = Path(__file__).parent.parent / "01 - Base Data" / "genims_master_data.json"
+        
+        print(f"Loading master data from {master_data_file}...")
         with open(master_data_file, 'r') as f:
             self.master_data = json.load(f)
         
         self.factories = self.master_data['factories']
-        self.lines = self.master_data['production_lines']
-        self.machines = self.master_data['machines']
         self.employees = self.master_data['employees']
-        self.shifts = self.master_data['shifts']
         self.products = self.master_data['products']
         self.customers = self.master_data['customers']
-        self.line_product_mapping = self.master_data['line_product_mapping']
+        
+        # MES-generated master data (generated during __init__)
+        self.lines = []
+        self.machines = []
+        self.shifts = []
+        self.line_product_mapping = []
         
         # MES data storage
         self.work_orders = []
@@ -86,9 +95,42 @@ class MESDataGenerator:
         
         print(f"Loaded: {len(self.products)} products, {len(self.lines)} lines, {len(self.employees)} employees")
     
-    def generate_id(self, prefix: str, counter: int) -> str:
-        """Generate unique ID"""
-        return f"{prefix}-{str(counter).zfill(6)}"
+    def generate_id(self, prefix: str, counter_key: str) -> str:
+        """Generate unique ID with auto-increment"""
+        if counter_key == 'work_orders':
+            id_val = f"{prefix}-{str(self.wo_counter).zfill(6)}"
+            self.wo_counter += 1
+        elif counter_key == 'operations':
+            id_val = f"{prefix}-{str(self.op_counter).zfill(6)}"
+            self.op_counter += 1
+        elif counter_key == 'material_transactions':
+            id_val = f"{prefix}-{str(self.mat_counter).zfill(6)}"
+            self.mat_counter += 1
+        elif counter_key == 'inspections':
+            id_val = f"{prefix}-{str(self.insp_counter).zfill(6)}"
+            self.insp_counter += 1
+        elif counter_key == 'defects':
+            id_val = f"{prefix}-{str(self.defect_counter).zfill(6)}"
+            self.defect_counter += 1
+        elif counter_key == 'labor_transactions':
+            id_val = f"{prefix}-{str(self.labor_counter).zfill(6)}"
+            self.labor_counter += 1
+        elif counter_key == 'downtime_records':
+            id_val = f"{prefix}-{str(self.downtime_counter).zfill(6)}"
+            self.downtime_counter += 1
+        elif counter_key == 'changeovers':
+            id_val = f"{prefix}-{str(self.changeover_counter).zfill(6)}"
+            self.changeover_counter += 1
+        elif counter_key == 'equipment_batch_records':
+            id_val = f"{prefix}-{str(self.ebr_counter).zfill(6)}"
+            self.ebr_counter += 1
+        elif counter_key == 'schedules':
+            id_val = f"{prefix}-{str(self.schedule_counter).zfill(6)}"
+            self.schedule_counter += 1
+        else:
+            id_val = f"{prefix}-{str(self.wo_counter).zfill(6)}"
+            self.wo_counter += 1
+        return id_val
     
     def random_date(self, start: datetime, end: datetime) -> datetime:
         """Generate random datetime between start and end"""
@@ -121,10 +163,16 @@ class MESDataGenerator:
     
     def get_operators_for_shift(self, line_id: str, shift_name: str) -> List[Dict]:
         """Get operators for line and shift"""
-        return [e for e in self.employees 
-                if e['line_id'] == line_id 
-                and e['shift'] == shift_name 
-                and e['role'] == 'operator']
+        # Get all employees from the factory that have 'operator' role, or pick from active employees
+        operators = [e for e in self.employees 
+                     if e.get('role') == 'operator' 
+                     and e.get('status') == 'active']
+        
+        # If no operators found, return all active employees (fallback)
+        if not operators:
+            operators = [e for e in self.employees if e.get('status') == 'active']
+        
+        return operators
     
     def generate_work_orders(self, start_date: datetime, days: int):
         """Generate work orders for the period"""
@@ -157,7 +205,8 @@ class MESDataGenerator:
                 planned_start = current_date.replace(hour=start_hour, minute=random.randint(0, 59))
                 
                 # Duration based on quantity and cycle time
-                cycle_time = product['standard_cycle_time_seconds']
+                # If product doesn't have standard_cycle_time, generate one based on complexity
+                cycle_time = product.get('standard_cycle_time_seconds', random.randint(30, 300))
                 estimated_minutes = (planned_qty * cycle_time) / 60
                 setup_time = random.randint(30, 90)
                 total_minutes = int(estimated_minutes + setup_time)
@@ -241,7 +290,7 @@ class MESDataGenerator:
                 
                 # Create work order
                 work_order = {
-                    'work_order_id': self.generate_id('WO', self.wo_counter),
+                    'work_order_id': self.generate_id('WO', 'work_orders'),
                     'work_order_number': f"WO-{current_date.strftime('%Y%m%d')}-{self.wo_counter:04d}",
                     'product_id': product_id,
                     'customer_id': customer_id,
@@ -341,10 +390,16 @@ class MESDataGenerator:
             line_machines = [m for m in self.machines if m['line_id'] == work_order['line_id']]
             machine = random.choice(line_machines) if line_machines else None
             
-            # Get operator
-            shift = self.get_shift_for_time(work_order['factory_id'], datetime.strptime(work_order['actual_start_time'], '%Y-%m-%d %H:%M:%S'))
-            operators = self.get_operators_for_shift(work_order['line_id'], shift['shift_name'])
-            operator = random.choice(operators) if operators else None
+            # Get operator and shift (only if work order has actual start time)
+            shift = None
+            operator = None
+            if work_order['actual_start_time']:
+                shift = self.get_shift_for_time(work_order['factory_id'], datetime.strptime(work_order['actual_start_time'], '%Y-%m-%d %H:%M:%S'))
+                operators = self.get_operators_for_shift(work_order['line_id'], shift.get('shift_name', 'General'))
+                operator = random.choice(operators) if operators else None
+            else:
+                # Default shift if no actual start time
+                shift = self.shifts[0] if self.shifts else {'shift_id': 'SHF-000001', 'shift_name': 'General'}
             
             # Timing
             if work_order['actual_start_time']:
@@ -356,8 +411,11 @@ class MESDataGenerator:
                 op_end = None
                 op_duration = None
             
+            planned_duration = random.randint(30, 120)
+            planned_setup = random.randint(10, 30)
+            
             operation = {
-                'operation_id': self.generate_id('OP', self.op_counter),
+                'operation_id': self.generate_id('OP', 'operations'),
                 'work_order_id': work_order['work_order_id'],
                 'operation_sequence': seq,
                 'operation_code': f"OP-{seq:02d}",
@@ -366,8 +424,10 @@ class MESDataGenerator:
                 'machine_id': machine['machine_id'] if machine else None,
                 'work_center_code': f"WC-{work_order['line_id'][-3:]}",
                 'planned_quantity': work_order['planned_quantity'],
-                'planned_duration_minutes': random.randint(30, 120),
-                'planned_setup_time_minutes': random.randint(10, 30),
+                'planned_duration_minutes': planned_duration,
+                'planned_setup_time_minutes': planned_setup,
+                'planned_hours': round((planned_duration + planned_setup) / 60, 2),
+                'setup_hours': round(planned_setup / 60, 2),
                 'standard_time_per_unit_seconds': round(random.uniform(30, 180), 2),
                 'planned_start_time': None,
                 'planned_end_time': None,
@@ -378,10 +438,11 @@ class MESDataGenerator:
                 'actual_duration_minutes': op_duration,
                 'actual_setup_time_minutes': random.randint(10, 30) if op_start else None,
                 'status': 'completed' if work_order['status'] == 'completed' else 'in_progress',
+                'operation_status': 'completed' if work_order['status'] == 'completed' else 'in_progress',
                 'operator_id': operator['employee_id'] if operator else None,
                 'shift_id': shift['shift_id'],
                 'labor_hours': round(op_duration / 60, 2) if op_duration else None,
-                'requires_inspection': seq == len(selected_ops),  # Final operation requires inspection
+                'requires_inspection': seq == len(selected_ops),
                 'inspection_status': 'passed' if work_order['status'] == 'completed' else 'pending',
                 'inspection_timestamp': op_end.strftime('%Y-%m-%d %H:%M:%S') if op_end else None,
                 'inspector_id': None,
@@ -434,25 +495,36 @@ class MESDataGenerator:
             # Transaction date
             trans_date = datetime.strptime(work_order['actual_start_time'], '%Y-%m-%d %H:%M:%S') if work_order['actual_start_time'] else datetime.now()
             
+            supplier_id = f"SUP-{random.randint(1001, 2000)}" if mat_type == 'raw_material' else None
+            issued_by_emp = random.choice([e['employee_id'] for e in self.employees] if self.employees else ['EMP-000001'])
+            
             transaction = {
-                'transaction_id': self.generate_id('MAT', self.mat_counter),
+                'transaction_id': self.generate_id('MT', 'material_transactions'),
                 'transaction_type': 'issue',
                 'transaction_date': trans_date.strftime('%Y-%m-%d %H:%M:%S'),
                 'work_order_id': work_order['work_order_id'],
                 'operation_id': None,
                 'material_code': material_code,
                 'material_name': mat_name,
+                'material_description': f"{mat_name} - {mat_type.replace('_', ' ').title()}",
                 'material_type': mat_type,
+                'quantity_issued': quantity,
                 'quantity': quantity,
+                'quantity_returned': 0,
                 'unit_of_measure': unit,
                 'lot_number': f"MAT-LOT-{random.randint(10000, 99999)}",
                 'batch_number': f"MAT-BATCH-{random.randint(1000, 9999)}",
                 'serial_number': None,
                 'expiry_date': (trans_date + timedelta(days=180)).strftime('%Y-%m-%d'),
+                'supplier_id': supplier_id,
                 'supplier_lot_number': f"SUP-{random.randint(10000, 99999)}",
                 'from_location': 'WAREHOUSE-A',
                 'to_location': f"LINE-{work_order['line_id'][-3:]}",
                 'warehouse_location': f"BIN-{random.choice(['A', 'B', 'C'])}-{random.randint(1, 50):02d}",
+                'line_id': work_order['line_id'],
+                'factory_id': work_order['factory_id'],
+                'issued_at': trans_date.strftime('%Y-%m-%d %H:%M:%S'),
+                'issued_by': issued_by_emp,
                 'unit_cost': round(random.uniform(1, 50), 4),
                 'total_cost': round(quantity * random.uniform(1, 50), 2),
                 'quality_status': 'approved',
@@ -460,10 +532,11 @@ class MESDataGenerator:
                 'certificate_of_analysis': f"COA-{random.randint(10000, 99999)}" if mat_type == 'raw_material' else None,
                 'parent_lot_number': None,
                 'consumed_by_lot_number': work_order['lot_number'],
-                'performed_by': random.choice([e['employee_id'] for e in self.employees if e['role'] == 'operator']),
+                'performed_by': issued_by_emp,
                 'requires_documentation': mat_type == 'raw_material',
                 'documentation_complete': True,
-                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             
             self.material_transactions.append(transaction)
@@ -506,20 +579,32 @@ class MESDataGenerator:
                 major = random.randint(0, 2)
                 minor = defects - critical - major
             
+            sample_inspected = random.randint(5, 20)
+            samples_passed = int(sample_inspected * (0.95 if inspection_passed else 0.7))
+            samples_failed = sample_inspected - samples_passed
+            pass_rate = (samples_passed / sample_inspected * 100) if sample_inspected > 0 else 0
+            
             inspection = {
-                'inspection_id': self.generate_id('INSP', self.insp_counter),
+                'inspection_id': self.generate_id('INS', 'inspections'),
                 'inspection_type': insp_type,
                 'inspection_date': insp_date.strftime('%Y-%m-%d %H:%M:%S'),
                 'work_order_id': work_order['work_order_id'],
                 'operation_id': None,
                 'product_id': work_order['product_id'],
-                'sample_size': random.randint(5, 20),
+                'sample_size': sample_inspected,
+                'samples_inspected': sample_inspected,
+                'samples_passed': samples_passed,
+                'samples_failed': samples_failed,
+                'pass_rate_percentage': round(pass_rate, 2),
                 'lot_number': work_order['lot_number'],
                 'batch_number': work_order['batch_number'],
                 'serial_number': None,
                 'inspector_id': inspector['employee_id'],
                 'shift_id': self.get_shift_for_time(work_order['factory_id'], insp_date)['shift_id'],
+                'line_id': work_order['line_id'],
+                'factory_id': work_order['factory_id'],
                 'inspection_result': result,
+                'inspection_status': 'passed' if inspection_passed else 'failed',
                 'defects_found': defects,
                 'critical_defects': critical,
                 'major_defects': major,
@@ -537,7 +622,8 @@ class MESDataGenerator:
                 'approved_by': None,
                 'approved_at': None,
                 'notes': 'Standard inspection completed' if inspection_passed else 'Issues found - see NCR',
-                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             
             self.quality_inspections.append(inspection)
@@ -553,29 +639,39 @@ class MESDataGenerator:
         for _ in range(num_defects):
             defect_time = datetime.strptime(work_order['actual_start_time'], '%Y-%m-%d %H:%M:%S') + timedelta(hours=random.randint(1, 4))
             
+            root_cause_desc = random.choice(['Material defect', 'Machine misalignment', 'Process deviation', 'Operator error', 'Environmental factor'])
+            detected_qty = random.randint(1, 10)
+            
             defect = {
-                'defect_id': self.generate_id('DEF', self.defect_counter),
+                'defect_id': self.generate_id('DEF', 'defects'),
                 'defect_code': f"D-{random.randint(100, 999)}",
                 'defect_category': random.choice(defect_categories),
+                'defect_type': random.choice(defect_categories),
                 'defect_description': 'Component out of specification tolerance',
                 'defect_severity': random.choice(defect_severities),
+                'severity': random.choice(defect_severities),
                 'detected_date': defect_time.strftime('%Y-%m-%d %H:%M:%S'),
                 'work_order_id': work_order['work_order_id'],
                 'operation_id': None,
                 'inspection_id': None,
                 'product_id': work_order['product_id'],
+                'line_id': work_order['line_id'],
+                'factory_id': work_order['factory_id'],
                 'lot_number': work_order['lot_number'],
-                'quantity_affected': random.randint(1, 10),
+                'quantity_affected': detected_qty,
+                'detected_quantity': detected_qty,
                 'detected_by': random.choice([e['employee_id'] for e in self.employees if e['role'] in ['operator', 'quality_inspector']]),
                 'detection_method': random.choice(['visual', 'measurement', 'testing']),
                 'root_cause_category': random.choice(['material', 'machine', 'method', 'man', 'measurement', 'environment']),
-                'root_cause_description': 'Root cause analysis in progress',
+                'root_cause': root_cause_desc,
+                'root_cause_description': root_cause_desc,
                 'root_cause_analysis_complete': False,
                 'corrective_action': 'Adjust process parameters',
                 'preventive_action': 'Implement additional checks',
                 'action_owner': random.choice([e['employee_id'] for e in self.employees if e['role'] in ['supervisor', 'engineer']]),
                 'action_due_date': (defect_time + timedelta(days=7)).strftime('%Y-%m-%d'),
                 'action_completed': False,
+                'resolved_date': None,
                 'scrap_cost': round(random.uniform(100, 1000), 2),
                 'rework_cost': round(random.uniform(50, 500), 2),
                 'total_cost': round(random.uniform(150, 1500), 2),
@@ -611,33 +707,43 @@ class MESDataGenerator:
             duration = random.randint(120, 480)  # 2-8 hours
             clock_out = clock_in + timedelta(minutes=duration)
             
+            hours_worked = round(duration / 60, 2)
+            hourly_rt = round(random.uniform(15, 35), 2)
+            labor_cost = round(hours_worked * hourly_rt, 2)
+            
             labor = {
-                'labor_transaction_id': self.generate_id('LAB', self.labor_counter),
+                'labor_transaction_id': self.generate_id('LT', 'labor_transactions'),
                 'transaction_date': clock_in.strftime('%Y-%m-%d %H:%M:%S'),
                 'employee_id': operator['employee_id'],
                 'shift_id': shift['shift_id'],
                 'work_order_id': work_order['work_order_id'],
                 'operation_id': None,
-                'activity_code': 'DIRECT',
-                'activity_type': 'direct_labor',
+                'line_id': work_order['line_id'],
+                'factory_id': work_order['factory_id'],
                 'clock_in_time': clock_in.strftime('%Y-%m-%d %H:%M:%S'),
+                'start_time': clock_in.strftime('%Y-%m-%d %H:%M:%S'),
                 'clock_out_time': clock_out.strftime('%Y-%m-%d %H:%M:%S') if work_order['status'] == 'completed' else None,
+                'end_time': clock_out.strftime('%Y-%m-%d %H:%M:%S') if work_order['status'] == 'completed' else None,
                 'duration_minutes': duration if work_order['status'] == 'completed' else None,
                 'break_time_minutes': 30,
                 'quantity_produced': int(work_order['produced_quantity'] / num_operators) if work_order['status'] == 'completed' else None,
                 'quantity_rejected': int(work_order['rejected_quantity'] / num_operators) if work_order['status'] == 'completed' else None,
                 'standard_hours': round(duration / 60, 2),
                 'actual_hours': round(duration / 60, 2) if work_order['status'] == 'completed' else None,
+                'hours_worked': hours_worked,
+                'labor_type': 'direct',
                 'efficiency_percentage': round(random.uniform(85, 110), 2) if work_order['status'] == 'completed' else None,
-                'hourly_rate': round(random.uniform(15, 35), 2),
-                'labor_cost': round((duration / 60) * random.uniform(15, 35), 2) if work_order['status'] == 'completed' else None,
+                'hourly_rate': hourly_rt,
+                'labor_cost': labor_cost if work_order['status'] == 'completed' else None,
+                'total_labor_cost': labor_cost if work_order['status'] == 'completed' else None,
                 'overtime_hours': 0,
                 'overtime_cost': 0,
                 'approved': work_order['status'] == 'completed',
                 'approved_by': None,
                 'approved_at': None,
                 'notes': None,
-                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             
             self.labor_transactions.append(labor)
@@ -645,19 +751,27 @@ class MESDataGenerator:
     
     def _generate_schedule_entry(self, work_order: Dict):
         """Generate production schedule entry"""
+        planned_runtime = int((datetime.strptime(work_order['planned_end_date'], '%Y-%m-%d %H:%M:%S') - datetime.strptime(work_order['planned_start_date'], '%Y-%m-%d %H:%M:%S')).total_seconds() / 3600)
+        planned_downtime = random.randint(0, int(planned_runtime * 0.2))
+        
         schedule = {
-            'schedule_id': self.generate_id('SCH', self.schedule_counter),
+            'schedule_id': self.generate_id('SCH', 'schedules'),
             'schedule_date': datetime.strptime(work_order['planned_start_date'], '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d'),
             'schedule_week': datetime.strptime(work_order['planned_start_date'], '%Y-%m-%d %H:%M:%S').isocalendar()[1],
             'shift_id': self.get_shift_for_time(work_order['factory_id'], datetime.strptime(work_order['planned_start_date'], '%Y-%m-%d %H:%M:%S'))['shift_id'],
             'line_id': work_order['line_id'],
             'factory_id': work_order['factory_id'],
             'work_order_id': work_order['work_order_id'],
+            'product_id': work_order['product_id'],
+            'planned_product_id': work_order['product_id'],
             'operation_id': None,
             'sequence_number': self.schedule_counter,
             'planned_start_time': work_order['planned_start_date'],
             'planned_end_time': work_order['planned_end_date'],
             'planned_quantity': work_order['planned_quantity'],
+            'planned_production_units': work_order['planned_quantity'],
+            'planned_runtime_hours': planned_runtime,
+            'planned_downtime_hours': planned_downtime,
             'priority': work_order['priority'],
             'customer_due_date': None,
             'material_available': True,
@@ -681,19 +795,28 @@ class MESDataGenerator:
     
     def _generate_ebr(self, work_order: Dict, product: Dict):
         """Generate electronic batch record"""
+        batch_qty = work_order['produced_quantity']
+        batch_dt = datetime.strptime(work_order['actual_start_time'], '%Y-%m-%d %H:%M:%S')
+        
         ebr = {
-            'ebr_id': self.generate_id('EBR', self.ebr_counter),
+            'ebr_id': self.generate_id('EBR', 'equipment_batch_records'),
+            'batch_id': work_order['batch_number'],
             'batch_number': work_order['batch_number'],
+            'batch_date': batch_dt.strftime('%Y-%m-%d'),
+            'batch_quantity': batch_qty,
             'product_id': work_order['product_id'],
+            'material_id': f"MAT-{random.randint(1001, 5000):05d}",
             'work_order_id': work_order['work_order_id'],
-            'batch_size': work_order['produced_quantity'],
+            'batch_size': batch_qty,
             'formula_id': f"FORM-{random.randint(100, 999)}",
             'formula_version': f"v{random.randint(1, 5)}.{random.randint(0, 9)}",
-            'manufacturing_date': datetime.strptime(work_order['actual_start_time'], '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d'),
+            'manufacturing_date': batch_dt.strftime('%Y-%m-%d'),
             'expiration_date': work_order['expiry_date'],
             'retest_date': (datetime.strptime(work_order['expiry_date'], '%Y-%m-%d') - timedelta(days=30)).strftime('%Y-%m-%d'),
             'factory_id': work_order['factory_id'],
             'manufacturing_area': f"AREA-{work_order['line_id'][-3:]}",
+            'status': 'approved',
+            'quality_status': 'approved',
             'record_status': 'approved',
             'prepared_by': random.choice([e['employee_id'] for e in self.employees if e['role'] in ['operator', 'supervisor']]),
             'prepared_at': work_order['actual_end_time'],
@@ -725,6 +848,87 @@ class MESDataGenerator:
         self.electronic_batch_records.append(ebr)
         self.ebr_counter += 1
     
+    
+    def generate_production_lines(self):
+        """Generate production lines for each factory"""
+        print("Generating production lines...")
+        for factory in self.factories:
+            for i in range(3):  # 3 lines per factory
+                line = {
+                    'line_id': self.generate_id('LINE', 'work_orders'),
+                    'factory_id': factory['factory_id'],
+                    'line_name': f"{factory['factory_name']} - Line {i+1}",
+                    'line_code': f"L{i+1}",
+                    'capacity': random.randint(100, 500),
+                    'status': 'active'
+                }
+                self.lines.append(line)
+        print(f"Generated {len(self.lines)} production lines")
+    
+    def generate_machines(self):
+        """Generate machines for each line"""
+        print("Generating machines...")
+        for line in self.lines:
+            for i in range(4):  # 4 machines per line
+                machine = {
+                    'machine_id': self.generate_id('MCH', 'work_orders'),
+                    'line_id': line['line_id'],
+                    'machine_name': f"{line['line_name']} - Machine {i+1}",
+                    'machine_type': random.choice(['stamping', 'assembly', 'testing', 'packaging']),
+                    'status': 'operational'
+                }
+                self.machines.append(machine)
+        print(f"Generated {len(self.machines)} machines")
+    
+    def generate_shifts(self):
+        """Generate shifts for each factory"""
+        print("Generating shifts...")
+        shift_types = ['morning', 'afternoon', 'night']
+        shift_hours = {
+            'morning': (6, 14),
+            'afternoon': (14, 22),
+            'night': (22, 6)
+        }
+        
+        for factory in self.factories:
+            for shift_type in shift_types:
+                shift = {
+                    'shift_id': self.generate_id('SHF', 'work_orders'),
+                    'factory_id': factory['factory_id'],
+                    'shift_name': f"{shift_type.title()} Shift",
+                    'shift_code': shift_type[:3].upper(),
+                    'start_time': f"{shift_hours[shift_type][0]:02d}:00",
+                    'end_time': f"{shift_hours[shift_type][1]:02d}:00",
+                    'days_of_week': 'mon,tue,wed,thu,fri,sat,sun',
+                    'status': 'active'
+                }
+                self.shifts.append(shift)
+        print(f"Generated {len(self.shifts)} shifts")
+    
+    def generate_line_product_mapping(self):
+        """Generate mapping of products that can be produced on each line"""
+        print("Generating line-product mappings...")
+        
+        # Each line can produce 3-5 different products
+        for line in self.lines:
+            num_products = random.randint(3, min(5, len(self.products)))
+            line_products = random.sample(self.products, num_products)
+            
+            for product in line_products:
+                mapping = {
+                    'mapping_id': self.generate_id('MAP', 'work_orders'),
+                    'factory_id': line['factory_id'],
+                    'line_id': line['line_id'],
+                    'product_id': product['product_id'],
+                    'min_batch_size': random.randint(10, 50),
+                    'max_batch_size': random.randint(100, 500),
+                    'setup_time_minutes': random.randint(15, 120),
+                    'changeover_time_minutes': random.randint(30, 180)
+                }
+                self.line_product_mapping.append(mapping)
+        
+        print(f"Generated {len(self.line_product_mapping)} line-product mappings")
+    
     def generate_all_data(self):
         """Generate all MES historical data"""
         start_date = datetime.now() - timedelta(days=DAYS_OF_HISTORY)
@@ -734,6 +938,12 @@ class MESDataGenerator:
         print(f"Start: {start_date.strftime('%Y-%m-%d')}")
         print(f"End: {datetime.now().strftime('%Y-%m-%d')}")
         print(f"{'='*80}\n")
+        
+        # Generate master data first
+        self.generate_production_lines()
+        self.generate_machines()
+        self.generate_shifts()
+        self.generate_line_product_mapping()
         
         # Generate work orders and related data
         self.generate_work_orders(start_date, DAYS_OF_HISTORY)
@@ -852,22 +1062,14 @@ class MESDataGenerator:
         print(f"SQL INSERT statements written to {output_file}")
     
     def to_json(self, output_file='mes_historical_data.json'):
-        """Export data to JSON"""
+        """Export data to JSON with all schema tables"""
         print(f"\nExporting data to JSON: {output_file}...")
         
+        # Generate missing tables
+        changeover_events = self._generate_changeover_events()
+        downtime_events = self._generate_downtime_events()
+        
         data = {
-            'metadata': {
-                'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'days_of_data': DAYS_OF_HISTORY,
-                'total_work_orders': len(self.work_orders),
-                'total_operations': len(self.work_order_operations),
-                'total_material_transactions': len(self.material_transactions),
-                'total_quality_inspections': len(self.quality_inspections),
-                'total_defects': len(self.defects),
-                'total_labor_transactions': len(self.labor_transactions),
-                'total_schedule_entries': len(self.production_schedule),
-                'total_ebrs': len(self.electronic_batch_records)
-            },
             'work_orders': self.work_orders,
             'work_order_operations': self.work_order_operations,
             'material_transactions': self.material_transactions,
@@ -875,13 +1077,89 @@ class MESDataGenerator:
             'defects': self.defects,
             'labor_transactions': self.labor_transactions,
             'production_schedule': self.production_schedule,
-            'electronic_batch_records': self.electronic_batch_records
+            'electronic_batch_records': self.electronic_batch_records,
+            'changeover_events': changeover_events,
+            'downtime_events': downtime_events
         }
         
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
         
         print(f"Data exported to {output_file}")
+    
+    def _generate_changeover_events(self):
+        """Generate changeover event records"""
+        changeover_events = []
+        for i in range(25):
+            start_time = datetime.now() - timedelta(days=random.randint(0, 30), hours=random.randint(0, 23))
+            end_time = start_time + timedelta(minutes=random.randint(15, 120))
+            duration_mins = random.randint(15, 120)
+            
+            changeover_events.append({
+                'changeover_id': self.generate_id('CHG', 'changeovers'),
+                'line_id': random.choice([pl['line_id'] for pl in self.lines[:10]]) if self.lines else 'L-001',
+                'machine_id': f"MACH-{random.randint(1, 50):06d}",
+                'changeover_type': random.choice(['product_change', 'tool_change', 'adjustment', 'quality_setup']),
+                'from_product_id': random.choice([p['product_id'] for p in self.products[:10]]) if self.products else 'P-001',
+                'to_product_id': random.choice([p['product_id'] for p in self.products[:10]]) if self.products else 'P-001',
+                'from_work_order_id': f"WO-{random.randint(1000, 9999)}",
+                'to_work_order_id': f"WO-{random.randint(1000, 9999)}",
+                'changeover_start': start_time.strftime('%Y-%m-%d %H:%M:%S'),
+                'changeover_end': end_time.strftime('%Y-%m-%d %H:%M:%S'),
+                'planned_duration_minutes': duration_mins,
+                'actual_duration_minutes': duration_mins + random.randint(-5, 15),
+                'teardown_time_minutes': random.randint(5, 30),
+                'setup_time_minutes': random.randint(10, 60),
+                'adjustment_time_minutes': random.randint(0, 20),
+                'trial_run_time_minutes': random.randint(5, 15),
+                'first_good_part_time': start_time.strftime('%Y-%m-%d %H:%M:%S'),
+                'parts_produced_during_setup': random.randint(5, 50),
+                'parts_scrapped_during_setup': random.randint(0, 20),
+                'supervisor_id': f"EMP-{random.randint(1, 100):06d}",
+                'operator_ids': f"EMP-{random.randint(1, 100):06d},EMP-{random.randint(1, 100):06d}",
+                'first_piece_inspection_passed': random.choice([True, False]),
+                'quality_approval_by': f"EMP-{random.randint(1, 100):06d}",
+                'target_changeover_time_minutes': duration_mins,
+                'improvement_opportunity': random.choice(['reduce_teardown', 'reduce_setup', 'parallel_operations', None]),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            })
+        return changeover_events
+    
+    def _generate_downtime_events(self):
+        """Generate downtime event records"""
+        downtime_events = []
+        downtime_reasons = ['equipment_failure', 'material_shortage', 'quality_issue', 'tooling_problem', 'maintenance', 'scheduling']
+        for i in range(20):
+            start_time = datetime.now() - timedelta(days=random.randint(0, 30), hours=random.randint(0, 23))
+            duration_minutes = random.randint(10, 480)
+            end_time = start_time + timedelta(minutes=duration_minutes)
+            
+            downtime_events.append({
+                'downtime_id': self.generate_id('DT', 'downtime_records'),
+                'machine_id': f"MACH-{random.randint(1, 50):06d}",
+                'line_id': random.choice([pl['line_id'] for pl in self.lines[:10]]) if self.lines else 'L-001',
+                'factory_id': random.choice([pl['factory_id'] for pl in self.lines[:10]]) if self.lines else 'FAC-001',
+                'downtime_start': start_time.strftime('%Y-%m-%d %H:%M:%S'),
+                'downtime_end': end_time.strftime('%Y-%m-%d %H:%M:%S'),
+                'duration_minutes': duration_minutes,
+                'downtime_type': random.choice(['planned_maintenance', 'unplanned_breakdown', 'operator_error', 'material_shortage', 'quality_hold']),
+                'downtime_category': random.choice(['mechanical', 'electrical', 'hydraulic', 'software', 'material', 'operator']),
+                'downtime_reason': random.choice(downtime_reasons),
+                'root_cause_category': random.choice(['equipment_failure', 'material_issue', 'operator_error', 'maintenance', 'setup', 'quality']),
+                'root_cause_code': f"RC-{random.randint(1000, 9999)}",
+                'root_cause_description': f"Root cause {random.randint(1, 100)}",
+                'is_planned': random.choice([True, False]),
+                'responsible_person_id': f"EMP-{random.randint(1, 100):06d}",
+                'responsible_department': random.choice(['Maintenance', 'Production', 'Quality', 'Engineering']),
+                'impact_description': f"Production impact: {random.randint(10, 100)} units affected",
+                'impact_production_units': random.randint(0, 500),
+                'impact_quality_rejects': random.randint(0, 50),
+                'recovery_notes': f"Downtime resolution {7001+i}",
+                'resolution_notes': f"Downtime resolution {7001+i}",
+                'status': random.choice(['resolved', 'investigating', 'escalated']),
+                'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            })
+        return downtime_events
 
 
 if __name__ == "__main__":
@@ -902,8 +1180,8 @@ if __name__ == "__main__":
     sql_file = script_dir / "mes_historical_data_inserts.sql"
     generator.to_sql_inserts(str(sql_file))
     
-    # Export to JSON (in same folder as script)
-    json_file = script_dir / "mes_historical_data.json"
+    # Export to JSON (in same folder as script) - use correct genims name
+    json_file = script_dir / "genims_mes_data.json"
     generator.to_json(str(json_file))
     
     print("\n" + "="*80)

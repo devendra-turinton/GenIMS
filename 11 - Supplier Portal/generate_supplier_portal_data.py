@@ -10,9 +10,28 @@ from datetime import datetime, timedelta
 from typing import List, Dict
 
 class SupplierPortalDataGenerator:
-    def __init__(self):
+    def __init__(self, master_data_file=None, erp_data_file=None):
         """Initialize data generator"""
-        print("Initializing Supplier Portal Data Generator...")
+        from pathlib import Path
+        
+        if master_data_file is None:
+            master_data_file = Path(__file__).parent.parent / "01 - Base Data" / "genims_master_data.json"
+        
+        if erp_data_file is None:
+            erp_data_file = Path(__file__).parent.parent / "04 - ERP & MES Integration" / "genims_erp_data.json"
+        
+        print(f"Loading master data from {master_data_file}...")
+        print(f"Loading ERP data from {erp_data_file}...")
+        
+        with open(master_data_file, 'r') as f:
+            master_data = json.load(f)
+        
+        try:
+            with open(erp_data_file, 'r') as f:
+                erp_data = json.load(f)
+        except FileNotFoundError:
+            print(f"Note: ERP data not found, using minimal data")
+            erp_data = {'materials': []}
         
         # Data structures
         self.rfq_headers = []
@@ -39,11 +58,11 @@ class SupplierPortalDataGenerator:
         self.purchase_requisitions = []
         self.req_lines = []
         
-        # Reference data (would come from existing tables)
-        self.suppliers = [f'SUPPLIER-{i:06d}' for i in range(1, 21)]  # 20 suppliers
-        self.materials = [f'MATERIAL-{i:06d}' for i in range(1, 101)]  # 100 materials
-        self.employees = [f'EMP-{i:06d}' for i in range(1, 51)]  # 50 employees
-        self.purchase_orders = [f'PO-{i:06d}' for i in range(1, 201)]  # 200 POs
+        # Reference data from loaded files
+        self.suppliers = erp_data.get('suppliers', [])  # Get suppliers from ERP data
+        self.materials = erp_data.get('materials', [])
+        self.employees = master_data.get('employees', [])
+        self.purchase_orders = erp_data.get('purchase_orders', [])
         
         # Counters
         self.counters = {
@@ -172,58 +191,60 @@ class SupplierPortalDataGenerator:
                 line['estimated_total'] = line['quantity'] * line['target_price']
                 self.rfq_lines.append(line)
             
-            # Invite 3-5 suppliers
-            invited_suppliers = random.sample(self.suppliers, random.randint(3, 5))
-            for supplier_id in invited_suppliers:
-                invitation = {
-                    'rfq_supplier_id': self.generate_id('RFQSUP', 'rfq'),
-                    'rfq_id': rfq['rfq_id'],
-                    'supplier_id': supplier_id,
-                    'invited_date': rfq_date.strftime('%Y-%m-%d %H:%M:%S'),
-                    'response_status': random.choice(['responded', 'viewed', 'pending', 'declined']),
-                    'created_at': rfq_date.strftime('%Y-%m-%d %H:%M:%S')
-                }
-                self.rfq_suppliers.append(invitation)
-                
-                # Generate response if supplier responded
-                if invitation['response_status'] == 'responded':
-                    response_date = rfq_date + timedelta(days=random.randint(1, 14))
-                    
-                    response = {
-                        'response_id': self.generate_id('RFQRESP', 'rfq_response'),
-                        'response_number': f'QT-{datetime.now().year}-{self.counters["rfq_response"]:05d}',
+            # Invite 3-5 suppliers (min 3 to avoid sample error)
+            num_suppliers = min(len(self.suppliers), random.randint(3, 5))
+            if num_suppliers > 0:
+                invited_suppliers = random.sample(self.suppliers, num_suppliers)
+                for supplier_id in invited_suppliers:
+                    invitation = {
+                        'rfq_supplier_id': self.generate_id('RFQSUP', 'rfq'),
                         'rfq_id': rfq['rfq_id'],
                         'supplier_id': supplier_id,
-                        'response_date': response_date.strftime('%Y-%m-%d %H:%M:%S'),
-                        'valid_until_date': (response_date + timedelta(days=30)).strftime('%Y-%m-%d'),
-                        'payment_terms': random.choice(['30 days', '60 days', '90 days']),
-                        'response_status': random.choice(['submitted', 'shortlisted', 'awarded']),
-                        'created_at': response_date.strftime('%Y-%m-%d %H:%M:%S')
+                        'invited_date': rfq_date.strftime('%Y-%m-%d %H:%M:%S'),
+                        'response_status': random.choice(['responded', 'viewed', 'pending', 'declined']),
+                        'created_at': rfq_date.strftime('%Y-%m-%d %H:%M:%S')
                     }
+                    self.rfq_suppliers.append(invitation)
                     
-                    # Generate response lines
-                    total_quoted = 0
-                    for line in [l for l in self.rfq_lines if l['rfq_id'] == rfq['rfq_id']]:
-                        # Quote slightly higher or lower than target
-                        variance = random.uniform(-0.15, 0.25)
-                        unit_price = line['target_price'] * (1 + variance)
+                    # Generate response if supplier responded
+                    if invitation['response_status'] == 'responded':
+                        response_date = rfq_date + timedelta(days=random.randint(1, 14))
                         
-                        resp_line = {
-                            'response_line_id': self.generate_id('RESPLINE', 'response_line'),
-                            'response_id': response['response_id'],
-                            'rfq_line_id': line['line_id'],
-                            'line_number': line['line_number'],
-                            'unit_price': round(unit_price, 4),
-                            'total_price': round(unit_price * line['quantity'], 2),
-                            'lead_time_days': random.randint(15, 60),
-                            'meets_specifications': random.random() > 0.1,  # 90% meet specs
+                        response = {
+                            'response_id': self.generate_id('RFQRESP', 'rfq_response'),
+                            'response_number': f'QT-{datetime.now().year}-{self.counters["rfq_response"]:05d}',
+                            'rfq_id': rfq['rfq_id'],
+                            'supplier_id': supplier_id,
+                            'response_date': response_date.strftime('%Y-%m-%d %H:%M:%S'),
+                            'valid_until_date': (response_date + timedelta(days=30)).strftime('%Y-%m-%d'),
+                            'payment_terms': random.choice(['30 days', '60 days', '90 days']),
+                            'response_status': random.choice(['submitted', 'shortlisted', 'awarded']),
                             'created_at': response_date.strftime('%Y-%m-%d %H:%M:%S')
                         }
-                        self.rfq_response_lines.append(resp_line)
-                        total_quoted += resp_line['total_price']
-                    
-                    response['total_quoted_value'] = round(total_quoted, 2)
-                    self.rfq_responses.append(response)
+                        
+                        # Generate response lines
+                        total_quoted = 0
+                        for line in [l for l in self.rfq_lines if l['rfq_id'] == rfq['rfq_id']]:
+                            # Quote slightly higher or lower than target
+                            variance = random.uniform(-0.15, 0.25)
+                            unit_price = line['target_price'] * (1 + variance)
+                            
+                            resp_line = {
+                                'response_line_id': self.generate_id('RESPLINE', 'response_line'),
+                                'response_id': response['response_id'],
+                                'rfq_line_id': line['line_id'],
+                                'line_number': line['line_number'],
+                                'unit_price': round(unit_price, 4),
+                                'total_price': round(unit_price * line['quantity'], 2),
+                                'lead_time_days': random.randint(15, 60),
+                                'meets_specifications': random.random() > 0.1,  # 90% meet specs
+                                'created_at': response_date.strftime('%Y-%m-%d %H:%M:%S')
+                            }
+                            self.rfq_response_lines.append(resp_line)
+                            total_quoted += resp_line['total_price']
+                        
+                        response['total_quoted_value'] = round(total_quoted, 2)
+                        self.rfq_responses.append(response)
         
         print(f"Generated {len(self.rfq_headers)} RFQs, {len(self.rfq_lines)} lines")
         print(f"  {len(self.rfq_suppliers)} supplier invitations")
@@ -287,7 +308,8 @@ class SupplierPortalDataGenerator:
         print("Generating supplier performance metrics...")
         
         # Last 6 months of data for each supplier
-        for supplier_id in self.suppliers:
+        for supplier in self.suppliers:
+            supplier_id = supplier['supplier_id']
             for months_ago in range(6):
                 metric_date = datetime.now() - timedelta(days=30 * months_ago)
                 metric_period = metric_date.strftime('%Y-%m')
@@ -581,7 +603,8 @@ class SupplierPortalDataGenerator:
         print("Generating supplier portal users...")
         
         # 1-3 users per supplier
-        for supplier_id in self.suppliers:
+        for supplier in self.suppliers:
+            supplier_id = supplier['supplier_id']
             num_users = random.randint(1, 3)
             
             for i in range(num_users):
@@ -650,61 +673,185 @@ class SupplierPortalDataGenerator:
         """Export to JSON with flat structure matching actual table names"""
         print(f"\nExporting to JSON...")
         
+        # Generate missing tables
+        supplier_communications = self._generate_supplier_communications()
+        audit_findings = self._generate_audit_findings()
+        quote_comparison = self._generate_quote_comparison()
+        supplier_notifications = self._generate_supplier_notifications()
+        supplier_rating_history = self._generate_supplier_rating_history()
+        three_way_match_log = self._generate_three_way_match_log()
+        supplier_portal_integration_log = self._generate_supplier_portal_integration_log()
+        
         data = {
-            # Master Data
-            'suppliers': [],
-            'supplier_contacts': [],
-            
-            # Purchase Requisitions
-            'requisition_headers': self.purchase_requisitions[:20],
-            'requisition_lines': self.req_lines[:50],
-            
-            # RFQ Management
+            # RFQ Management - 5 tables
             'rfq_headers': self.rfq_headers,
             'rfq_lines': self.rfq_lines[:50],
             'rfq_suppliers': self.rfq_suppliers[:30],
             'rfq_responses': self.rfq_responses[:20],
             'rfq_response_lines': self.rfq_response_lines[:50],
             
-            # Supplier Contracts
+            # Supplier Contracts - 2 tables
             'supplier_contracts': self.supplier_contracts,
             'contract_pricing': self.contract_pricing[:30],
-            'contract_terms': [],
-            'contract_amendments': [],
             
-            # Performance Management
+            # Performance Management - 3 tables
             'supplier_performance_metrics': self.performance_metrics[:30],
             'supplier_scorecards': self.scorecards[:30],
-            'scorecard_items': [],
-            'performance_audit_log': [],
+            'supplier_audits': self.supplier_audits,
             
-            # Invoicing & Payments
+            # Invoicing & Payments - 2 tables
             'supplier_invoices': self.supplier_invoices,
-            'invoice_line_items': self.invoice_lines[:50],
-            'invoice_tax_lines': [],
-            'three_way_matches': self.three_way_matches[:30],
-            'payment_records': [],
+            'supplier_invoice_lines': self.invoice_lines[:50],
             
-            # Supplier Qualification
+            # Supplier Qualification - 1 table
             'supplier_qualification': self.qualification_records,
-            'qualification_audits': self.supplier_audits,
+            
+            # Supplier Management - 2 tables
             'supplier_documents': self.supplier_documents[:20],
-            'document_categories': [],
+            'supplier_communications': supplier_communications,
             
-            # Portal & Access
-            'portal_users': self.portal_users[:30],
-            'user_roles': [],
-            'user_permissions': [],
-            'portal_activity_log': [],
+            # Portal Users - 1 table
+            'supplier_portal_users': self.portal_users[:30],
             
-            # Integration & Logging
-            'supplier_portal_integration_log': []
+            # Purchase Requisitions - 2 tables
+            'purchase_requisitions': self.purchase_requisitions[:20],
+            'purchase_requisition_lines': self.req_lines[:50],
+            
+            # Additional tables from schema
+            'audit_findings': audit_findings,
+            'quote_comparison': quote_comparison,
+            'supplier_notifications': supplier_notifications,
+            'supplier_rating_history': supplier_rating_history,
+            'three_way_match_log': three_way_match_log,
+            'supplier_portal_integration_log': supplier_portal_integration_log
         }
         
         with open(output_file, 'w') as f:
             json.dump(data, f, indent=2)
         
         print(f"Data exported to {output_file}")
+    
+    def _generate_supplier_communications(self):
+        """Generate supplier communication records"""
+        from datetime import datetime, timedelta
+        communications = []
+        for i in range(20):
+            communications.append({
+                'communication_id': f"COMM-{i+1}",
+                'supplier_id': random.choice(self.master_data['suppliers'] if hasattr(self, 'master_data') else [{'supplier_id': f'SUP-{j:04d}'} for j in range(1, 31)])['supplier_id'],
+                'created_at': (datetime.now() - timedelta(days=random.randint(0, 30))).strftime('%Y-%m-%d'),
+                'communication_type': random.choice(['email', 'phone', 'meeting', 'message']),
+                'subject': f"Communication {i+1}",
+                'message': f"Message content for communication {i+1}",
+                'sender_id': f"EMP-{random.randint(1, 50):06d}",
+                'status': random.choice(['sent', 'received', 'read', 'responded'])
+            })
+        return communications
+    
+    def _generate_audit_findings(self):
+        """Generate audit findings for supplier audits"""
+        findings = []
+        for i in range(25):
+            findings.append({
+                'audit_finding_id': f"AUDFIND-{i+1}",
+                'supplier_audit_id': f"SUPP-AUDIT-{random.randint(1, 10):04d}",
+                'finding_type': random.choice(['critical', 'major', 'minor', 'observation']),
+                'finding_description': f"Audit finding {i+1}",
+                'root_cause': f"Root cause analysis {i+1}",
+                'corrective_action': f"Corrective action for finding",
+                'target_closure_date': (datetime.now() + timedelta(days=random.randint(7, 90))).strftime('%Y-%m-%d'),
+                'actual_closure_date': (datetime.now() + timedelta(days=random.randint(1, 60))).strftime('%Y-%m-%d') if random.random() > 0.3 else None,
+                'status': random.choice(['open', 'in_progress', 'closed', 'pending_verification'])
+            })
+        return findings
+    
+    def _generate_quote_comparison(self):
+        """Generate quote comparison records"""
+        comparisons = []
+        for i in range(15):
+            comparisons.append({
+                'quote_comparison_id': f"QUOTCOMP-{i+1}",
+                'rfq_id': f"RFQ-{random.randint(1, 20):04d}",
+                'supplier_1_id': f"SUP-{random.randint(1, 30):04d}",
+                'supplier_2_id': f"SUP-{random.randint(1, 30):04d}",
+                'supplier_3_id': f"SUP-{random.randint(1, 30):04d}",
+                'comparison_date': (datetime.now() - timedelta(days=random.randint(0, 30))).strftime('%Y-%m-%d'),
+                'winner_supplier_id': f"SUP-{random.randint(1, 30):04d}",
+                'selection_reason': random.choice(['price', 'quality', 'delivery', 'combination']),
+                'notes': f"Quote comparison analysis {i+1}"
+            })
+        return comparisons
+    
+    def _generate_supplier_notifications(self):
+        """Generate supplier notification records"""
+        notifications = []
+        for i in range(25):
+            notifications.append({
+                'notification_id': f"NOTIF-{i+1}",
+                'supplier_id': f"SUP-{random.randint(1, 30):04d}",
+                'notification_type': random.choice(['order_status', 'payment', 'performance', 'quality', 'document']),
+                'notification_date': (datetime.now() - timedelta(days=random.randint(0, 7))).strftime('%Y-%m-%d'),
+                'notification_subject': f"Notification {i+1}",
+                'notification_message': f"Notification message content",
+                'read_status': random.choice(['unread', 'read']),
+                'priority': random.choice(['low', 'medium', 'high', 'urgent'])
+            })
+        return notifications
+    
+    def _generate_supplier_rating_history(self):
+        """Generate supplier rating history records"""
+        ratings = []
+        for i in range(30):
+            ratings.append({
+                'rating_history_id': f"RATEHIST-{i+1}",
+                'supplier_id': f"SUP-{random.randint(1, 30):04d}",
+                'rating_date': (datetime.now() - timedelta(days=random.randint(0, 90))).strftime('%Y-%m-%d'),
+                'overall_rating': round(random.uniform(2, 5), 1),
+                'quality_rating': round(random.uniform(2, 5), 1),
+                'delivery_rating': round(random.uniform(2, 5), 1),
+                'price_rating': round(random.uniform(2, 5), 1),
+                'service_rating': round(random.uniform(2, 5), 1),
+                'comments': f"Rating review {i+1}",
+                'rated_by_employee_id': f"EMP-{random.randint(1, 50):06d}"
+            })
+        return ratings
+    
+    def _generate_three_way_match_log(self):
+        """Generate three-way match log records (PO, Invoice, Receipt matching)"""
+        matches = []
+        for i in range(30):
+            status = random.choice(['matched', 'variance', 'blocked', 'exception'])
+            matches.append({
+                'three_way_match_id': f"3WM-{i+1}",
+                'purchase_order_id': f"PO-{random.randint(1000, 5000):05d}",
+                'supplier_invoice_id': f"INV-{random.randint(1000, 5000):05d}",
+                'goods_receipt_id': f"GR-{random.randint(1000, 5000):05d}",
+                'match_date': (datetime.now() - timedelta(days=random.randint(0, 30))).strftime('%Y-%m-%d'),
+                'po_amount': round(random.uniform(1000, 100000), 2),
+                'invoice_amount': round(random.uniform(1000, 100000), 2),
+                'variance_percent': round(random.uniform(-5, 5), 2),
+                'match_status': status,
+                'resolution': f"Resolution for match {i+1}" if status == 'exception' else 'None',
+                'resolved_date': (datetime.now() - timedelta(days=random.randint(0, 7))).strftime('%Y-%m-%d') if status == 'matched' else None
+            })
+        return matches
+    
+    def _generate_supplier_portal_integration_log(self):
+        """Generate supplier portal integration log records"""
+        logs = []
+        for i in range(25):
+            logs.append({
+                'integration_log_id': f"SUPPINTEG-{i+1}",
+                'sync_timestamp': (datetime.now() - timedelta(hours=random.randint(0, 168))).isoformat(),
+                'sync_type': random.choice(['order', 'invoice', 'shipment', 'performance', 'document']),
+                'source_system': 'Supplier Portal',
+                'target_system': random.choice(['ERP', 'Procurement', 'Finance']),
+                'records_synced': random.randint(5, 100),
+                'status': random.choice(['success', 'partial', 'failed']),
+                'error_message': 'None' if random.random() > 0.2 else f"Sync error {random.randint(1000, 9999)}",
+                'notes': f"Integration sync {i+1}"
+            })
+        return logs
 
 
 if __name__ == "__main__":

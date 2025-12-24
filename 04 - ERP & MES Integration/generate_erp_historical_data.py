@@ -9,6 +9,10 @@ import json
 from datetime import datetime, timedelta
 from typing import List, Dict
 
+# Import PRIMARY KEY generator utility
+import sys
+from pathlib import Path
+
 # Configuration
 DAYS_OF_HISTORY = 90
 MATERIALS_TO_CREATE = 200  # Raw materials, components, finished goods
@@ -17,9 +21,14 @@ SALES_ORDERS_PER_DAY = (3, 8)
 PURCHASE_ORDERS_PER_DAY = (2, 5)
 
 class ERPDataGenerator:
-    def __init__(self, master_data_file='genims_master_data.json'):
+    def __init__(self, master_data_file=None):
         """Initialize with master data"""
-        print("Loading master data...")
+        from pathlib import Path
+        
+        if master_data_file is None:
+            master_data_file = Path(__file__).parent.parent / "01 - Base Data" / "genims_master_data.json"
+        
+        print(f"Loading master data from {master_data_file}...")
         with open(master_data_file, 'r') as f:
             self.master_data = json.load(f)
         
@@ -472,13 +481,32 @@ class ERPDataGenerator:
         """Export to JSON with flat structure matching actual table names"""
         print(f"\nExporting to JSON...")
         
+        # Generate missing data tables
+        bill_of_materials = self._generate_bill_of_materials()
+        routing = self._generate_routing()
+        routing_operations = self._generate_routing_operations()
+        work_centers = self._generate_work_centers()
+        purchase_requisitions = self._generate_purchase_requisitions()
+        purchase_requisition_lines = self._generate_purchase_requisition_lines()
+        inventory_transactions = self._generate_inventory_transactions()
+        goods_receipts = self._generate_goods_receipts()
+        mrp_runs = self._generate_mrp_runs()
+        mrp_elements = self._generate_mrp_elements()
+        inspection_plans = self._generate_inspection_plans()
+        inspection_characteristics = self._generate_inspection_characteristics()
+        cost_centers = self._generate_cost_centers()
+        general_ledger = self._generate_general_ledger()
+        erp_mes_sync_log = self._generate_erp_mes_sync_log()
+        
         data = {
             # Materials & Suppliers
             'materials': self.materials,
             'suppliers': self.suppliers,
-            
-            # BOM - boms table doesn't exist in schema, only bom_components
+            'bill_of_materials': bill_of_materials,
             'bom_components': self.bom_components,
+            'routing': routing,
+            'routing_operations': routing_operations,
+            'work_centers': work_centers,
             
             # Sales Orders
             'sales_orders': self.sales_orders,
@@ -487,18 +515,338 @@ class ERPDataGenerator:
             # Production Orders
             'production_orders': self.production_orders,
             
-            # Purchase Orders
+            # Purchase Orders & Requisitions
             'purchase_orders': self.purchase_orders,
             'purchase_order_lines': self.purchase_order_lines,
+            'purchase_requisitions': purchase_requisitions,
+            'purchase_requisition_lines': purchase_requisition_lines,
             
-            # Inventory
-            'inventory_balances': self.inventory_balances
+            # Inventory & Goods
+            'inventory_balances': self.inventory_balances,
+            'inventory_transactions': inventory_transactions,
+            'goods_receipts': goods_receipts,
+            
+            # MRP & Planning
+            'mrp_runs': mrp_runs,
+            'mrp_elements': mrp_elements,
+            
+            # Quality & Inspection
+            'inspection_plans': inspection_plans,
+            'inspection_characteristics': inspection_characteristics,
+            
+            # Cost & Finance
+            'cost_centers': cost_centers,
+            'general_ledger': general_ledger,
+            
+            # Integration
+            'erp_mes_sync_log': erp_mes_sync_log
         }
         
         with open(output_file, 'w') as f:
             json.dump(data, f, indent=2)
         
         print(f"Data exported to {output_file}")
+    
+    def _generate_bill_of_materials(self):
+        """Generate BOM records"""
+        boms = []
+        for i, product in enumerate(self.products[:15]):
+            created_dt = (datetime.now() - timedelta(days=random.randint(60, 365)))
+            valid_from_dt = (datetime.now() - timedelta(days=random.randint(30, 180)))
+            
+            boms.append({
+                'bom_id': f"BOM-{2001+i}",
+                'product_id': product['product_id'],
+                'bom_number': f"BOM-{product['product_code']}",
+                'version': '1.0',
+                'status': 'active',
+                'valid_from': valid_from_dt.strftime('%Y-%m-%d'),
+                'created_date': created_dt.strftime('%Y-%m-%d'),
+                'notes': f"BOM for {product['product_id']}"
+            })
+        return boms
+    
+    def _generate_routing(self):
+        """Generate routing records"""
+        routings = []
+        for i in range(10):
+            valid_from_dt = (datetime.now() - timedelta(days=random.randint(30, 180)))
+            
+            routings.append({
+                'routing_id': f"ROUTE-{3001+i}",
+                'routing_number': f"ROUT-{3001+i}",
+                'product_id': random.choice(self.products)['product_id'],
+                'routing_code': f"ROUT-{3001+i}",
+                'routing_status': 'active',
+                'valid_from': valid_from_dt.strftime('%Y-%m-%d'),
+                'version': '1.0',
+                'notes': f"Manufacturing routing {3001+i}"
+            })
+        return routings
+    
+    def _generate_routing_operations(self):
+        """Generate routing operation records"""
+        operations = []
+        for i in range(30):
+            labor_hrs = round(random.uniform(0.5, 4), 2)
+            duration_hrs = round(random.uniform(0.5, 8), 2)
+            op_num = random.randint(1, 50)
+            
+            operations.append({
+                'operation_number': op_num,
+                'routing_operation_id': f"ROUTOP-{4001+i}",
+                'routing_id': f"ROUTE-{3001+random.randint(0, 9)}",
+                'operation_sequence': random.randint(10, 100),
+                'operation_code': f"OP-{op_num:02d}",
+                'operation_description': f"Operation step {random.randint(1, 10)}",
+                'estimated_duration_hours': duration_hrs,
+                'work_center_id': f"WC-{5001+random.randint(0, 9)}",
+                'labor_hours': labor_hrs
+            })
+        return operations
+    
+    def _generate_work_centers(self):
+        """Generate work center records"""
+        work_centers = []
+        for i in range(10):
+            work_centers.append({
+                'work_center_id': f"WC-{5001+i}",
+                'work_center_code': f"WC-{5001+i}",
+                'work_center_name': f"Work Center {i+1}",
+                'factory_id': random.choice(self.factories)['factory_id'],
+                'department': random.choice(['Assembly', 'Machining', 'Welding', 'Painting', 'Testing']),
+                'capacity_units_per_hour': random.randint(50, 500),
+                'work_center_type': 'production',
+                'status': 'active'
+            })
+        return work_centers
+    
+    def _generate_purchase_requisitions(self):
+        """Generate purchase requisition records"""
+        prereqs = []
+        for i in range(15):
+            req_dt = (datetime.now() - timedelta(days=random.randint(0, 30)))
+            needed_dt = (datetime.now() + timedelta(days=random.randint(7, 60)))
+            
+            prereqs.append({
+                'purchase_requisition_id': f"PREREQ-{6001+i}",
+                'requisition_number': f"PREQ-{6001+i}",
+                'requisition_id': f"PREQ-{random.randint(100001, 999999)}",
+                'requisition_code': f"PREREQ-{6001+i}",
+                'requisition_date': req_dt.strftime('%Y-%m-%d'),
+                'required_date': needed_dt.strftime('%Y-%m-%d'),
+                'requested_by_employee_id': f"EMP-{random.randint(1, 100):06d}",
+                'needed_date': needed_dt.strftime('%Y-%m-%d'),
+                'status': random.choice(['draft', 'submitted', 'approved', 'rejected']),
+                'priority': random.choice(['low', 'medium', 'high', 'urgent']),
+                'notes': f"Purchase requisition {6001+i}"
+            })
+        return prereqs
+    
+    def _generate_purchase_requisition_lines(self):
+        """Generate purchase requisition line records"""
+        lines = []
+        for i in range(50):
+            req_qty = random.randint(50, 1000)
+            unit_price = round(random.uniform(10, 1000), 2)
+            delivery_dt = (datetime.now() + timedelta(days=random.randint(7, 60)))
+            
+            lines.append({
+                'purchase_requisition_line_id': f"PREQL-{7001+i}",
+                'requisition_id': f"PREQ-{6001+random.randint(0, 14)}",
+                'requisition_line_id': f"PREQL-{random.randint(100001, 999999)}",
+                'line_number': random.randint(1, 10),
+                'purchase_requisition_id': f"PREREQ-{6001+random.randint(0, 14)}",
+                'material_id': random.choice(self.materials)['material_id'],
+                'quantity': req_qty,
+                'requested_quantity': req_qty,
+                'delivery_date': delivery_dt.strftime('%Y-%m-%d'),
+                'unit_of_measure': 'PCS',
+                'estimated_unit_price': unit_price,
+                'notes': f"Line for requisition item"
+            })
+        return lines
+    
+    def _generate_inventory_transactions(self):
+        """Generate inventory transaction records"""
+        transactions = []
+        for i in range(40):
+            trans_dt = (datetime.now() - timedelta(days=random.randint(0, 60)))
+            qty = random.randint(-500, 1000)
+            
+            transactions.append({
+                'inventory_transaction_id': f"INVTRANS-{8001+i}",
+                'transaction_id': f"INVTR-{random.randint(100001, 999999)}",
+                'transaction_code': f"INVTRANS-{8001+i}",
+                'transaction_date': trans_dt.isoformat(),
+                'document_date': trans_dt.strftime('%Y-%m-%d'),
+                'posting_date': trans_dt.strftime('%Y-%m-%d'),
+                'movement_type': random.choice(['receipt', 'issue', 'adjustment', 'return']),
+                'material_id': random.choice(self.materials)['material_id'],
+                'unit_of_measure': 'PCS',
+                'warehouse_location': f"LOC-{random.randint(100, 500)}",
+                'transaction_type': random.choice(['receipt', 'issue', 'adjustment', 'return']),
+                'quantity': qty,
+                'reference_document': f"REF-{random.randint(1000, 9999)}",
+                'notes': f"Inventory transaction {8001+i}"
+            })
+        return transactions
+    
+    def _generate_goods_receipts(self):
+        """Generate goods receipt records"""
+        receipts = []
+        for i in range(20):
+            receipt_dt = (datetime.now() - timedelta(days=random.randint(0, 30)))
+            receipt_tm = f"{random.randint(8, 17):02d}:{random.randint(0, 59):02d}:00"
+            qty = random.randint(100, 5000)
+            
+            receipts.append({
+                'goods_receipt_id': f"GOODSRC-{9001+i}",
+                'gr_number': f"GR-{9001+i}",
+                'gr_date': receipt_dt.strftime('%Y-%m-%d'),
+                'posting_date': receipt_dt.strftime('%Y-%m-%d'),
+                'material_id': random.choice(self.materials)['material_id'],
+                'quantity_received': qty,
+                'unit_of_measure': 'PCS',
+                'goods_receipt_code': f"GOODSRC-{9001+i}",
+                'purchase_order_id': random.choice(self.purchase_orders)['purchase_order_id'] if self.purchase_orders else f"PO-{random.randint(1001, 1020)}",
+                'receipt_date': receipt_dt.strftime('%Y-%m-%d'),
+                'receipt_time': receipt_tm,
+                'received_by_employee_id': f"EMP-{random.randint(1, 100):06d}",
+                'status': random.choice(['pending_inspection', 'inspected', 'accepted', 'rejected']),
+                'total_weight_kg': round(random.uniform(10, 10000), 2),
+                'notes': f"Goods receipt {9001+i}"
+            })
+        return receipts
+    
+    def _generate_mrp_runs(self):
+        """Generate MRP run records"""
+        mrp_runs = []
+        for i in range(10):
+            run_dt = (datetime.now() - timedelta(days=random.randint(0, 30)))
+            
+            mrp_runs.append({
+                'mrp_run_id': f"MRP-RUN-{10001+i}",
+                'run_number': f"RUN-{10001+i}",
+                'planning_date': run_dt.strftime('%Y-%m-%d'),
+                'run_date': run_dt.strftime('%Y-%m-%d'),
+                'planning_horizon_days': random.randint(30, 180),
+                'status': random.choice(['completed', 'in_progress', 'scheduled']),
+                'total_demands': random.randint(100, 1000),
+                'planned_orders': random.randint(50, 500),
+                'notes': f"MRP run {10001+i}"
+            })
+        return mrp_runs
+    
+    def _generate_mrp_elements(self):
+        """Generate MRP element records"""
+        elements = []
+        for i in range(50):
+            planned_order_dt = (datetime.now() + timedelta(days=random.randint(1, 60)))
+            
+            elements.append({
+                'mrp_element_id': f"MRPELEM-{11001+i}",
+                'plant_id': f"PLANT-{random.randint(1, 5)}",
+                'element_type': random.choice(['demand', 'supply', 'receipt', 'order']),
+                'element_date': planned_order_dt.strftime('%Y-%m-%d'),
+                'mrp_run_id': f"MRP-RUN-{10001+random.randint(0, 9)}",
+                'material_id': random.choice(self.materials)['material_id'],
+                'gross_requirement': random.randint(100, 5000),
+                'scheduled_receipt': random.randint(0, 4000),
+                'available_inventory': random.randint(0, 3000),
+                'net_requirement': random.randint(0, 3000),
+                'planned_order_quantity': random.randint(100, 3000),
+                'planned_order_date': planned_order_dt.strftime('%Y-%m-%d'),
+                'lead_time_days': random.randint(1, 30)
+            })
+        return elements
+    
+    def _generate_inspection_plans(self):
+        """Generate inspection plan records"""
+        plans = []
+        for i, material in enumerate(self.materials[:20]):
+            plans.append({
+                'inspection_plan_id': f"INSP-{12001+i}",
+                'plan_number': f"PLAN-{12001+i}",
+                'material_id': material['material_id'],
+                'inspection_type': random.choice(['incoming', 'in_process', 'final']),
+                'sampling_method': random.choice(['100%', '5%', '10%', 'AQL']),
+                'aql_percent': round(random.uniform(0.5, 5), 1),
+                'status': 'active',
+                'created_date': (datetime.now() - timedelta(days=random.randint(30, 365))).strftime('%Y-%m-%d')
+            })
+        return plans
+    
+    def _generate_inspection_characteristics(self):
+        """Generate inspection characteristic records"""
+        characteristics = []
+        for i in range(40):
+            characteristics.append({
+                'inspection_characteristic_id': f"INSPCHAR-{13001+i}",
+                'inspection_plan_id': f"INSP-{12001+random.randint(0, 19)}",
+                'characteristic_name': f"Characteristic {random.randint(1, 50)}",
+                'specification_lower': round(random.uniform(0, 50), 2),
+                'specification_upper': round(random.uniform(50, 100), 2),
+                'measurement_unit': random.choice(['mm', 'kg', 'sec', '%', 'ohms']),
+                'inspection_method': random.choice(['visual', 'measurement', 'functional', 'attribute'])
+            })
+        return characteristics
+    
+    def _generate_cost_centers(self):
+        """Generate cost center records"""
+        cost_centers = []
+        for i in range(15):
+            cost_centers.append({
+                'cost_center_id': f"CC-{14001+i}",
+                'cost_center_code': f"CC-{14001+i}",
+                'cost_center_name': f"Cost Center {i+1}",
+                'factory_id': random.choice(self.factories)['factory_id'],
+                'cost_type': random.choice(['manufacturing', 'service', 'administrative', 'sales']),
+                'department': f"Dept-{i+1}",
+                'manager_employee_id': f"EMP-{random.randint(1, 50):06d}",
+                'budget_amount': round(random.uniform(100000, 1000000), 2),
+                'status': 'active'
+            })
+        return cost_centers
+    
+    def _generate_general_ledger(self):
+        """Generate general ledger entries"""
+        entries = []
+        for i in range(100):
+            entry_dt = (datetime.now() - timedelta(days=random.randint(0, 90)))
+            entries.append({
+                'gl_entry_id': f"GL-{15001+i}",
+                'posting_date': entry_dt.strftime('%Y-%m-%d'),
+                'document_date': entry_dt.strftime('%Y-%m-%d'),
+                'company_code': f"COMP-{random.randint(1, 5):03d}",
+                'gl_account': f"{random.randint(1000, 9999)}",
+                'account_description': f"GL Account {random.randint(1000, 9999)}",
+                'entry_date': entry_dt.strftime('%Y-%m-%d'),
+                'debit_amount': round(random.uniform(0, 10000), 2) if random.random() > 0.5 else 0,
+                'credit_amount': round(random.uniform(0, 10000), 2) if random.random() > 0.5 else 0,
+                'description': f"GL entry {15001+i}",
+                'cost_center_id': f"CC-{14001+random.randint(0, 14)}",
+                'reference_document': f"DOC-{random.randint(1000, 9999)}"
+            })
+        return entries
+    
+    def _generate_erp_mes_sync_log(self):
+        """Generate ERP-MES sync log records"""
+        sync_logs = []
+        for i in range(30):
+            sync_logs.append({
+                'sync_log_id': f"SYNC-{16001+i}",
+                'sync_id': f"SYNC-{random.randint(100001, 999999)}",
+                'sync_timestamp': (datetime.now() - timedelta(hours=random.randint(0, 168))).isoformat(),
+                'sync_type': random.choice(['production_orders', 'material_movements', 'quality_data', 'labor_data']),
+                'source_system': 'MES',
+                'target_system': 'ERP',
+                'records_synced': random.randint(10, 500),
+                'status': random.choice(['success', 'partial', 'failed']),
+                'error_message': 'None' if random.random() > 0.2 else f"Sync error {random.randint(1000, 9999)}",
+                'notes': f"Sync operation {16001+i}"
+            })
+        return sync_logs
 
 
 if __name__ == "__main__":
@@ -519,7 +867,7 @@ if __name__ == "__main__":
     generator.to_sql_inserts(str(sql_file))
     
     # Export to JSON (in same folder as script)
-    json_file = script_dir / "erp_historical_data.json"
+    json_file = script_dir / "genims_erp_data.json"
     generator.to_json(str(json_file))
     
     print("\n" + "="*80)

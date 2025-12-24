@@ -9,6 +9,10 @@ import json
 from datetime import datetime, timedelta
 from typing import List, Dict
 
+# Import PRIMARY KEY generator utility
+import sys
+from pathlib import Path
+
 # Configuration
 DAYS_OF_HISTORY = 180
 EMPLOYEES_PER_FACTORY = 50
@@ -18,11 +22,12 @@ DEPARTMENTS_PER_FACTORY = 8
 class HCMDataGenerator:
     def __init__(self, master_data_file=None):
         """Initialize with master data"""
+        from pathlib import Path
+        
         if master_data_file is None:
-            from pathlib import Path
             master_data_file = Path(__file__).parent.parent / "01 - Base Data" / "genims_master_data.json"
         
-        print("Loading existing data...")
+        print(f"Loading master data from {master_data_file}...")
         
         with open(master_data_file, 'r') as f:
             self.master_data = json.load(f)
@@ -63,7 +68,8 @@ class HCMDataGenerator:
             'cert': 1, 'review': 1, 'goal': 1, 'shift': 1,
             'emp_shift': 1, 'attend': 1, 'leave_type': 1,
             'balance': 1, 'leave_req': 1, 'checklist': 1,
-            'onboard': 1, 'incident': 1
+            'onboard': 1, 'incident': 1, 'path': 1, 'plan': 1,
+            'kpi': 1, 'item': 1, 'offboard': 1, 'tech': 1
         }
         
         print(f"Loaded: {len(self.factories)} factories")
@@ -98,6 +104,7 @@ class HCMDataGenerator:
         self.generate_training_schedules_and_enrollments()
         self.generate_certifications()
         self.assign_employee_shifts()
+        self.generate_employee_onboarding()  # Generate and store onboarding records
         
         # Historical Operations (180 days)
         start_date = datetime.now() - timedelta(days=DAYS_OF_HISTORY)
@@ -580,6 +587,25 @@ class HCMDataGenerator:
         
         print(f"Assigned {len(self.employee_shifts)} shifts")
     
+    def generate_employee_onboarding(self):
+        """Generate employee onboarding records"""
+        print("Generating employee onboarding records...")
+        
+        for employee in self.employees[:40]:
+            record = {
+                'onboarding_id': self.generate_id('OB', 'onboard'),
+                'employee_id': employee['employee_id'],
+                'onboarding_start_date': employee['hire_date'],
+                'onboarding_end_date': (datetime.strptime(employee['hire_date'], '%Y-%m-%d') + timedelta(days=random.randint(30, 90))).strftime('%Y-%m-%d'),
+                'onboarding_manager_id': random.choice(self.employees)['employee_id'] if len(self.employees) > 1 else None,
+                'status': random.choice(['in_progress', 'completed']),
+                'completion_pct': random.randint(50, 100),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            self.employee_onboarding.append(record)
+        
+        print(f"Generated {len(self.employee_onboarding)} employee onboarding records")
+    
     # ========================================================================
     # HISTORICAL OPERATIONS
     # ========================================================================
@@ -699,6 +725,489 @@ class HCMDataGenerator:
         
         print(f"Generated {len(self.safety_incidents)} safety incidents")
     
+    # ========================================================================
+    # EMPTY TABLE GENERATORS
+    # ========================================================================
+    
+    def _generate_employment_history(self):
+        """Generate employee employment history"""
+        print("Generating employee employment history...")
+        history = []
+        
+        for employee in self.employees[:50]:
+            hist = {
+                'history_id': self.generate_id('EH', 'hist'),
+                'employee_id': employee['employee_id'],
+                'change_type': random.choice(['promotion', 'transfer', 'demotion']),
+                'previous_position_id': random.choice([p['position_id'] for p in self.positions[:10]]) if self.positions else None,
+                'previous_department_id': random.choice([d['department_id'] for d in self.departments[:3]]) if self.departments else None,
+                'new_position_id': random.choice([p['position_id'] for p in self.positions[:10]]) if self.positions else None,
+                'new_department_id': random.choice([d['department_id'] for d in self.departments[:3]]) if self.departments else None,
+                'effective_date': (datetime.now() - timedelta(days=random.randint(30, 365))).strftime('%Y-%m-%d'),
+                'reason': random.choice(['Performance', 'Reorganization', 'Personal request']),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            history.append(hist)
+        
+        print(f"Generated {len(history)} employment history records")
+        return history
+
+    def _generate_employee_shifts(self):
+        """Generate employee shift assignments"""
+        print("Generating employee shifts...")
+        shifts = []
+        
+        for employee in self.employees[:60]:
+            shift = {
+                'employee_shift_id': self.generate_id('ES', 'emp_shift'),
+                'employee_id': employee['employee_id'],
+                'shift_schedule_id': random.choice(self.shift_schedules)['shift_id'] if self.shift_schedules else None,
+                'effective_date': employee.get('hire_date', datetime.now().strftime('%Y-%m-%d')),
+                'shift_start_date': (datetime.now() - timedelta(days=random.randint(30, 180))).strftime('%Y-%m-%d'),
+                'shift_type': random.choice(['day', 'evening', 'night', 'rotating']),
+                'status': 'active',
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            shifts.append(shift)
+        
+        print(f"Generated {len(shifts)} employee shift assignments")
+        return shifts
+
+    def _generate_shift_schedules(self):
+        """Generate shift schedules"""
+        print("Generating shift schedules...")
+        schedules = []
+        
+        shift_types = ['day', 'evening', 'night']
+        counter = 0
+        
+        for factory in self.factories:
+            for shift_type in shift_types:
+                counter += 1
+                sched = {
+                    'schedule_id': self.generate_id('SS', 'shift'),
+                    'shift_code': f"SH{counter:04d}",
+                    'factory_id': factory['factory_id'],
+                    'schedule_name': f"{shift_type.title()} Shift - {factory['factory_name']}",
+                    'shift_type': shift_type,
+                    'start_time': {'day': '08:00', 'evening': '16:00', 'night': '00:00'}.get(shift_type, '08:00'),
+                    'end_time': {'day': '16:00', 'evening': '00:00', 'night': '08:00'}.get(shift_type, '16:00'),
+                    'break_duration_minutes': 60,
+                    'employees_count': random.randint(20, 100),
+                    'schedule_status': 'active',
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                schedules.append(sched)
+        
+        print(f"Generated {len(schedules)} shift schedules")
+        return schedules
+
+    def _generate_employee_goals(self):
+        """Generate employee goals"""
+        print("Generating employee goals...")
+        goals = []
+        start_date_base = datetime.now() - timedelta(days=180)
+        
+        for employee in self.employees[:70]:
+            for i in range(random.randint(1, 3)):
+                goal_start = start_date_base + timedelta(days=random.randint(0, 180))
+                goal = {
+                    'goal_id': self.generate_id('GOAL', 'goal'),
+                    'employee_id': employee['employee_id'],
+                    'goal_type': random.choice(['performance', 'development', 'behavioral']),
+                    'goal_title': f"Goal {i+1} for employee",
+                    'goal_description': f"Detailed goal description {i+1}",
+                    'start_date': goal_start.strftime('%Y-%m-%d'),
+                    'target_date': (goal_start + timedelta(days=random.randint(90, 180))).strftime('%Y-%m-%d'),
+                    'goal_status': random.choice(['in_progress', 'completed', 'on_hold']),
+                    'progress_pct': random.randint(0, 100),
+                    'manager_id': random.choice(self.employees)['employee_id'] if len(self.employees) > 1 else None,
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                goals.append(goal)
+        
+        print(f"Generated {len(goals)} employee goals")
+        return goals
+
+    def _generate_training_requirements(self):
+        """Generate training requirements"""
+        print("Generating training requirements...")
+        requirements = []
+        
+        for role in self.job_roles[:20]:
+            for i in range(random.randint(2, 4)):
+                req = {
+                    'requirement_id': self.generate_id('TR', 'req'),
+                    'job_role_id': role['role_id'],
+                    'training_course_id': random.choice(self.training_courses)['course_id'] if self.training_courses else None,
+                    'requirement_type': random.choice(['mandatory', 'recommended', 'optional']),
+                    'training_hours': random.randint(4, 40),
+                    'completion_deadline_months': random.randint(3, 12),
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                requirements.append(req)
+        
+        print(f"Generated {len(requirements)} training requirements")
+        return requirements
+
+    def _generate_career_paths(self):
+        """Generate career paths"""
+        print("Generating career paths...")
+        paths = []
+        counter = 0
+        
+        for i, role in enumerate(self.job_roles[:15]):
+            counter += 1
+            path = {
+                'path_id': self.generate_id('CP', 'path'),
+                'path_code': f"CP{counter:04d}",
+                'path_name': f"Career Path for {role['role_name']}",
+                'from_role_id': role['role_id'],
+                'to_role_id': random.choice(self.job_roles)['role_id'] if len(self.job_roles) > 1 else role['role_id'],
+                'experience_required_years': random.randint(1, 5),
+                'skills_required': json.dumps([random.choice(self.skills_catalog)['skill_name'] for _ in range(random.randint(2, 4))]) if self.skills_catalog else '[]',
+                'path_status': 'active',
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            paths.append(path)
+        
+        print(f"Generated {len(paths)} career paths")
+        return paths
+
+    def _generate_succession_planning(self):
+        """Generate succession planning records"""
+        print("Generating succession planning...")
+        plans = []
+        
+        for role in self.job_roles[:10]:
+            plan = {
+                'plan_id': self.generate_id('SP', 'plan'),
+                'position_id': random.choice([p['position_id'] for p in self.positions[:10]]) if self.positions else None,
+                'job_role_id': role['role_id'],
+                'role_name': role['role_name'],
+                'current_holder_id': random.choice(self.employees)['employee_id'] if self.employees else None,
+                'succession_risk_level': random.choice(['low', 'medium', 'high']),
+                'critical_skills': json.dumps(['Leadership', 'Technical expertise', 'Industry knowledge']),
+                'contingency_plan': 'Documented plan available',
+                'plan_status': 'active',
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            plans.append(plan)
+        
+        print(f"Generated {len(plans)} succession planning records")
+        return plans
+
+    def _generate_succession_candidates(self):
+        """Generate succession candidates"""
+        print("Generating succession candidates...")
+        candidates = []
+        
+        for i in range(30):
+            candidate = {
+                'candidate_id': self.generate_id('SC', 'shift'),
+                'plan_id': None,
+                'employee_id': random.choice(self.employees)['employee_id'] if self.employees else None,
+                'readiness_level': random.choice(['ready_now', 'ready_in_1_year', 'ready_in_3_years']),
+                'readiness_score': round(random.uniform(0.5, 1.0), 2),
+                'development_plan': 'In progress',
+                'mentoring_plan': 'Assigned to senior manager' if random.random() > 0.5 else None,
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            candidates.append(candidate)
+        
+        print(f"Generated {len(candidates)} succession candidates")
+        return candidates
+
+    def _generate_leave_types(self):
+        """Generate leave types"""
+        print("Generating leave types...")
+        types = []
+        
+        leave_categories = ['annual', 'sick', 'unpaid', 'maternity', 'sabbatical', 'study']
+        
+        for category in leave_categories:
+            leave_type = {
+                'leave_type_id': self.generate_id('LT', 'leave_type'),
+                'leave_type_code': category.upper()[:3],
+                'leave_type_name': category.replace('_', ' ').title() + ' Leave',
+                'description': f"Company policy for {category} leave",
+                'annual_entitlement_days': random.choice([0, 5, 10, 15, 20, 30]),
+                'requires_approval': random.choice([True, False]),
+                'carryover_allowed': category not in ['maternity', 'unpaid'],
+                'carryover_limit_days': random.choice([0, 3, 5, 10]),
+                'is_active': True,
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            types.append(leave_type)
+        
+        print(f"Generated {len(types)} leave types")
+        return types
+
+    def _generate_employee_leave_balances(self):
+        """Generate employee leave balances"""
+        print("Generating employee leave balances...")
+        balances = []
+        current_year = datetime.now().year
+        
+        for employee in self.employees[:80]:
+            for leave_type in self.leave_types[:4]:
+                balance = {
+                    'balance_id': self.generate_id('LB', 'balance'),
+                    'employee_id': employee['employee_id'],
+                    'leave_type_id': leave_type['leave_type_id'],
+                    'leave_year': current_year,
+                    'opening_balance': leave_type.get('annual_entitlement_days', 0),
+                    'leaves_taken': random.randint(0, 10),
+                    'leaves_pending': random.randint(0, 5),
+                    'closing_balance': random.randint(0, 20),
+                    'last_updated': datetime.now().strftime('%Y-%m-%d'),
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                balances.append(balance)
+        
+        print(f"Generated {len(balances)} employee leave balances")
+        return balances
+
+    def _generate_ppe_requirements(self):
+        """Generate PPE requirements"""
+        print("Generating PPE requirements...")
+        requirements = []
+        
+        ppe_items = ['Safety Helmet', 'Safety Glasses', 'Hand Gloves', 'Safety Shoes', 'Respirator', 'Safety Vest']
+        
+        for role in self.job_roles[:15]:
+            for ppe in random.sample(ppe_items, random.randint(2, 4)):
+                req = {
+                    'ppe_requirement_id': self.generate_id('PPE', 'balance'),
+                    'job_role_id': role['role_id'],
+                    'ppe_item_name': ppe,
+                    'ppe_category': 'Personal Protective Equipment',
+                    'is_mandatory': random.choice([True, True, False]),
+                    'replacement_frequency_months': random.choice([6, 12, 24]),
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                requirements.append(req)
+        
+        print(f"Generated {len(requirements)} PPE requirements")
+        return requirements
+
+    def _generate_employee_onboarding(self):
+        """Generate employee onboarding records"""
+        print("Generating employee onboarding...")
+        onboarding = []
+        
+        for employee in self.employees[:40]:
+            record = {
+                'onboarding_id': self.generate_id('OB', 'onboard'),
+                'employee_id': employee['employee_id'],
+                'onboarding_start_date': employee['hire_date'],
+                'onboarding_end_date': (datetime.strptime(employee['hire_date'], '%Y-%m-%d') + timedelta(days=random.randint(30, 90))).strftime('%Y-%m-%d'),
+                'onboarding_manager_id': random.choice(self.employees)['employee_id'] if len(self.employees) > 1 else None,
+                'status': random.choice(['in_progress', 'completed']),
+                'completion_pct': random.randint(50, 100),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            onboarding.append(record)
+        
+        print(f"Generated {len(onboarding)} employee onboarding records")
+        return onboarding
+
+    def _generate_employee_onboarding_items(self):
+        """Generate employee onboarding items"""
+        print("Generating employee onboarding items...")
+        items = []
+        
+        onboarding_tasks = [
+            'IT Equipment Setup',
+            'Office Tour',
+            'Department Introduction',
+            'Policy Training',
+            'System Access Setup',
+            'Benefits Enrollment',
+            'Safety Training',
+            'Mentor Assignment'
+        ]
+        
+        onboarding_records = self.onboarding_history[:40] if hasattr(self, 'onboarding_history') else []
+        
+        for i, onboarding_rec in enumerate(onboarding_records[:40]):
+            for task in random.sample(onboarding_tasks, random.randint(4, 6)):
+                item = {
+                    'item_id': self.generate_id('OBI', 'item'),
+                    'onboarding_id': onboarding_rec['onboarding_id'],
+                    'task_description': task,
+                    'assigned_to': random.choice(self.employees)['employee_id'] if self.employees else None,
+                    'due_date': (datetime.now() + timedelta(days=random.randint(1, 30))).strftime('%Y-%m-%d'),
+                    'completion_date': None if random.random() > 0.7 else datetime.now().strftime('%Y-%m-%d'),
+                    'status': random.choice(['pending', 'completed']),
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                items.append(item)
+        
+        print(f"Generated {len(items)} employee onboarding items")
+        return items
+
+    def _generate_onboarding_checklists(self):
+        """Generate onboarding checklists"""
+        print("Generating onboarding checklists...")
+        checklists = []
+        counter = 0
+        
+        for role in self.job_roles[:10]:
+            counter += 1
+            checklist = {
+                'checklist_id': self.generate_id('OCL', 'checklist'),
+                'checklist_code': f"OCL{counter:04d}",
+                'job_role_id': role['role_id'],
+                'checklist_name': f"Onboarding Checklist for {role['role_name']}",
+                'description': f"Standard onboarding checklist",
+                'total_items': random.randint(10, 20),
+                'checklist_status': 'active',
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            checklists.append(checklist)
+        
+        print(f"Generated {len(checklists)} onboarding checklists")
+        return checklists
+
+    def _generate_onboarding_checklist_items(self):
+        """Generate onboarding checklist items"""
+        print("Generating onboarding checklist items...")
+        items = []
+        
+        checklist_items = [
+            'Complete tax forms',
+            'Sign employment agreement',
+            'IT equipment provisioning',
+            'Access badge issuance',
+            'Orientation session',
+            'Department training',
+            'System training',
+            'Safety training',
+            'Benefits orientation'
+        ]
+        
+        checklists = self.onboarding_checklists[:10] if hasattr(self, 'onboarding_checklists') else []
+        
+        for checklist in checklists:
+            for idx, item_desc in enumerate(random.sample(checklist_items, random.randint(5, 7))):
+                cli = {
+                    'item_id': self.generate_id('OCLI', 'item'),
+                    'item_title': item_desc,
+                    'checklist_id': checklist['checklist_id'],
+                    'item_sequence': idx + 1,
+                    'item_description': item_desc,
+                    'responsible_department': random.choice(['HR', 'IT', 'Operations', 'Safety']),
+                    'estimated_days': random.randint(1, 10),
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                items.append(cli)
+        
+        print(f"Generated {len(items)} onboarding checklist items")
+        return items
+
+    def _generate_offboarding_records(self):
+        """Generate offboarding records"""
+        print("Generating offboarding records...")
+        records = []
+        
+        # Get a subset of employees for offboarding
+        offboarding_employees = random.sample(self.employees, min(15, len(self.employees)))
+        
+        for employee in offboarding_employees:
+            offboarding_date = datetime.now() - timedelta(days=random.randint(30, 180))
+            final_date = offboarding_date - timedelta(days=random.randint(5, 30))
+            
+            record = {
+                'offboarding_id': self.generate_id('OFF', 'offboard'),
+                'employee_id': employee['employee_id'],
+                'offboarding_date': offboarding_date.strftime('%Y-%m-%d'),
+                'resignation_date': (offboarding_date - timedelta(days=random.randint(15, 60))).strftime('%Y-%m-%d'),
+                'last_working_date': final_date.strftime('%Y-%m-%d'),
+                'reason_for_leaving': random.choice(['Resignation', 'Retirement', 'Termination', 'Transfer']),
+                'status': random.choice(['in_progress', 'completed']),
+                'completion_pct': random.randint(50, 100),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            records.append(record)
+        
+        print(f"Generated {len(records)} offboarding records")
+        return records
+
+    def _generate_role_skill_requirements(self):
+        """Generate role skill requirements"""
+        print("Generating role skill requirements...")
+        requirements = []
+        
+        for role in self.job_roles[:20]:
+            for skill in random.sample(self.skills_catalog, min(3, len(self.skills_catalog))):
+                req = {
+                    'requirement_id': self.generate_id('RSR', 'balance'),
+                    'job_role_id': role['role_id'],
+                    'skill_id': skill['skill_id'],
+                    'proficiency_level': random.choice(['beginner', 'intermediate', 'advanced', 'expert']),
+                    'is_mandatory': random.choice([True, True, False]),
+                    'validation_method': random.choice(['certification', 'assessment', 'experience']),
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                requirements.append(req)
+        
+        print(f"Generated {len(requirements)} role skill requirements")
+        return requirements
+
+    def _generate_hcm_integration_log(self):
+        """Generate HCM integration logs"""
+        print("Generating HCM integration logs...")
+        logs = []
+        start_date = datetime.now() - timedelta(days=180)
+        
+        for i in range(45):
+            log = {
+                'log_id': self.generate_id('HLOG', 'balance'),
+                'sync_date': (start_date + timedelta(days=random.randint(0, 180))).strftime('%Y-%m-%d'),
+                'sync_time': f"{random.randint(0, 23):02d}:{random.randint(0, 59):02d}:00",
+                'source_system': random.choice(['Payroll', 'ERP', 'API', 'HRIS']),
+                'target_system': 'HCM',
+                'operation_type': random.choice(['sync', 'update', 'create']),
+                'record_type': random.choice(['employee', 'payroll', 'leave', 'attendance']),
+                'record_count': random.randint(1, 100),
+                'status': random.choice(['success', 'success', 'success', 'failed']),
+                'error_message': None if random.random() > 0.1 else 'Data validation error',
+                'created_at': (start_date + timedelta(days=random.randint(0, 180))).strftime('%Y-%m-%d %H:%M:%S')
+            }
+            logs.append(log)
+        
+        print(f"Generated {len(logs)} HCM integration logs")
+        return logs
+
+    def _generate_performance_kpis(self):
+        """Generate performance KPIs"""
+        print("Generating performance KPIs...")
+        kpis = []
+        counter = 0
+        
+        for employee in self.employees[:60]:
+            counter += 1
+            kpi = {
+                'kpi_id': self.generate_id('KPI', 'kpi'),
+                'kpi_name': f"Performance Metrics {counter}",
+                'kpi_code': f"KPI{counter:04d}",
+                'employee_id': employee['employee_id'],
+                'kpi_period': datetime.now().year,
+                'kpi_quarter': (datetime.now().month - 1) // 3 + 1,
+                'productivity_score': round(random.uniform(60, 100), 2),
+                'quality_score': round(random.uniform(70, 100), 2),
+                'attendance_score': round(random.uniform(75, 100), 2),
+                'safety_score': round(random.uniform(80, 100), 2),
+                'compliance_score': round(random.uniform(75, 100), 2),
+                'overall_rating': random.choice(['Excellent', 'Good', 'Satisfactory', 'Needs Improvement']),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            kpis.append(kpi)
+        
+        print(f"Generated {len(kpis)} performance KPIs")
+        return kpis
+
     def _print_summary(self):
         print(f"\n{'='*80}")
         print(f"HR/HCM Data Generation Complete!")
@@ -728,6 +1237,20 @@ class HCMDataGenerator:
         """Export to JSON with flat structure matching actual table names"""
         print(f"\nExporting to JSON...")
         
+        # Generate data for missing/empty tables (those not populated in generate_all_data)
+        employment_history = self._generate_employment_history()
+        employee_goals = self._generate_employee_goals()
+        career_paths = self._generate_career_paths()
+        succession_planning = self._generate_succession_planning()
+        succession_candidates = self._generate_succession_candidates()
+        employee_leave_balances = self._generate_employee_leave_balances()
+        ppe_requirements = self._generate_ppe_requirements()
+        employee_onboarding_items = self._generate_employee_onboarding_items()
+        onboarding_checklist_items = self._generate_onboarding_checklist_items()
+        offboarding_records = self._generate_offboarding_records()
+        role_skill_requirements = self._generate_role_skill_requirements()
+        hcm_integration_log = self._generate_hcm_integration_log()
+        
         data = {
             # Organization Structure
             'departments': self.departments[:20],
@@ -736,49 +1259,49 @@ class HCMDataGenerator:
             
             # Workforce
             'employees': self.employees[:100],
-            'employee_employment_history': [],
+            'employee_employment_history': employment_history,
             'employee_skills': self.employee_skills[:100],
             'employee_certifications': self.certifications[:50],
             
             # Assignments & Shifts
-            'employee_shifts': [],
-            'shift_schedules': [],
-            'employee_goals': [],
+            'employee_shifts': self._generate_employee_shifts(),
+            'shift_schedules': self.shift_schedules,
+            'employee_goals': employee_goals,
             
             # Training & Development
             'training_courses': self.training_courses,
             'training_schedules': self.training_schedules,
             'training_enrollments': self.training_enrollments[:100],
-            'training_requirements': [],
-            'career_paths': [],
+            'training_requirements': self._generate_training_requirements(),
+            'career_paths': career_paths,
             
             # Performance & Reviews
             'performance_reviews': self.performance_reviews[:30],
-            'performance_kpis': [],
-            'succession_planning': [],
-            'succession_candidates': [],
+            'performance_kpis': self._generate_performance_kpis(),
+            'succession_planning': succession_planning,
+            'succession_candidates': succession_candidates,
             
             # Leave & Attendance
-            'leave_types': [],
+            'leave_types': self._generate_leave_types(),
             'leave_requests': self.leave_requests[:50],
-            'employee_leave_balances': [],
+            'employee_leave_balances': employee_leave_balances,
             'attendance_records': self.attendance_records[:200],
             
             # Safety & Onboarding
             'safety_incidents': self.safety_incidents,
-            'ppe_requirements': [],
-            'employee_onboarding': [],
-            'employee_onboarding_items': [],
-            'onboarding_checklists': [],
-            'onboarding_checklist_items': [],
-            'offboarding_records': [],
+            'ppe_requirements': ppe_requirements,
+            'employee_onboarding': self.employee_onboarding,
+            'employee_onboarding_items': employee_onboarding_items,
+            'onboarding_checklists': self.onboarding_checklists,
+            'onboarding_checklist_items': onboarding_checklist_items,
+            'offboarding_records': offboarding_records,
             
             # Skill Management
-            'skills_catalog': [],
-            'role_skill_requirements': [],
+            'skills_catalog': self.skills_catalog,
+            'role_skill_requirements': role_skill_requirements,
             
             # Integration & Logging
-            'hcm_integration_log': []
+            'hcm_integration_log': hcm_integration_log
         }
         
         with open(output_file, 'w') as f:
