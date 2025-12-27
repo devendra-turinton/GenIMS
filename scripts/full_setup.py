@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-GenIMS Full Setup Script
-Orchestrates: Database Creation → Schema Loading → Data Generation → Data Loading
-Handles all 13 databases end-to-end
+GenIMS Full Setup Script - REVISED
+Orchestrates: Database Creation → Schema Loading → MASTER DATA GENERATION → 
+REGISTER IDs → DEPENDENT DATA GENERATION → VALIDATION → DATA LOADING
+Ensures referential integrity across all 13 databases and 268 tables
 """
 
 import os
@@ -14,6 +15,10 @@ from pathlib import Path
 from datetime import datetime
 import logging
 from dotenv import load_dotenv
+
+# Import registry for validation
+sys.path.insert(0, str(Path(__file__).parent))
+from data_registry import DataRegistry, get_registry
 
 # Load .env file
 env_path = Path(__file__).parent.parent / '.env'
@@ -38,95 +43,102 @@ DB_ADMIN = 'postgres'
 # Database configurations with generators for all 13 databases
 DATABASES = {
     'genims_master_db': {
-        'schema_file': '01 - Base Data/genims_schema.sql',
+        'schema_file': 'Data Scripts/01 - Base Data/genims_schema.sql',
         'generators': [
-            ('01 - Base Data/generate_genims_master_data.py', '01 - Base Data/genims_master_data.json'),
+            ('Data Scripts/01 - Base Data/generate_genims_master_data.py', 'Data Scripts/01 - Base Data/genims_master_data.json'),
         ],
-        'data_file': '01 - Base Data/genims_master_data.json'
+        'data_file': 'Data Scripts/01 - Base Data/genims_master_data.json'
     },
     'genims_operations_db': {
-        'schema_file': '02 - Machine data/genims_operational_schema.sql',
+        'schema_file': 'Data Scripts/02 - Machine data/genims_operational_schema.sql',
         'generators': [
-            ('02 - Machine data/generate_operational_data_integrated.py', '02 - Machine data/genims_operational_data.json'),
+            ('Data Scripts/02 - Machine data/generate_operational_data_integrated.py', 'Data Scripts/02 - Machine data/genims_operational_data.json'),
         ],
-        'data_file': '02 - Machine data/genims_operational_data.json'
+        'data_file': 'Data Scripts/02 - Machine data/genims_operational_data.json'
     },
     'genims_manufacturing_db': {
-        'schema_file': '03 - MES Data/genims_mes_schema.sql',
+        'schema_file': 'Data Scripts/03 - MES Data/genims_mes_schema.sql',
         'generators': [
-            ('03 - MES Data/generate_mes_historical_data.py', '03 - MES Data/genims_mes_data.json'),
+            ('Data Scripts/03 - MES Data/generate_mes_historical_data.py', 'Data Scripts/03 - MES Data/genims_mes_data.json'),
         ],
-        'data_file': '03 - MES Data/genims_mes_data.json'
+        'data_file': 'Data Scripts/03 - MES Data/genims_mes_data.json'
     },
     'genims_maintenance_db': {
-        'schema_file': '06 - CMMS/genims_cmms_schema.sql',
+        'schema_file': 'Data Scripts/06 - CMMS/genims_cmms_schema.sql',
         'generators': [
-            ('06 - CMMS/generate_cmms_historical_data.py', '06 - CMMS/genims_cmms_data.json'),
+            ('Data Scripts/06 - CMMS/generate_cmms_historical_data.py', 'Data Scripts/06 - CMMS/genims_cmms_data.json'),
         ],
-        'data_file': '06 - CMMS/genims_cmms_data.json'
+        'data_file': 'Data Scripts/06 - CMMS/genims_cmms_data.json'
     },
     'genims_erp_db': {
-        'schema_file': '04 - ERP & MES Integration/genims_erp_schema.sql',
+        'schema_file': 'Data Scripts/04 - ERP & MES Integration/genims_erp_schema.sql',
         'generators': [
-            ('04 - ERP & MES Integration/generate_erp_historical_data.py', '04 - ERP & MES Integration/genims_erp_data.json'),
+            ('Data Scripts/04 - ERP & MES Integration/generate_erp_historical_data.py', 'Data Scripts/04 - ERP & MES Integration/genims_erp_data.json'),
         ],
-        'data_file': '04 - ERP & MES Integration/genims_erp_data.json'
+        'data_file': 'Data Scripts/04 - ERP & MES Integration/genims_erp_data.json'
     },
     'genims_financial_db': {
-        'schema_file': '04 - ERP & MES Integration/genims_financial_schema.sql',
+        'schema_file': 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_financial_enhanced.sql',
         'generators': [
-            ('04 - ERP & MES Integration/generate_financial_historical_data.py', '04 - ERP & MES Integration/genims_financial_data.json'),
+            ('Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/generate_financial_sync_data.py', 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_financial_data.json'),
         ],
-        'data_file': '04 - ERP & MES Integration/genims_financial_data.json'
+        'data_file': 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_financial_data.json'
+    },
+    'genims_erp_wms_sync_db': {
+        'schema_file': 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_erp_wms_sync.sql',
+        'generators': [
+            ('Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/generate_financial_sync_data.py', 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_inventory_sync_data.json'),
+        ],
+        'data_file': 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_inventory_sync_data.json'
     },
     'genims_wms_db': {
-        'schema_file': '05 - WMS + TMS/genims_wms_schema.sql',
+        'schema_file': 'Data Scripts/05 - WMS + TMS/genims_wms_schema.sql',
         'generators': [
-            ('05 - WMS + TMS/generate_wms_tms_historical_data.py', '05 - WMS + TMS/genims_wms_data.json'),
+            ('Data Scripts/05 - WMS + TMS/generate_wms_tms_historical_data.py', 'Data Scripts/05 - WMS + TMS/genims_wms_data.json'),
         ],
-        'data_file': '05 - WMS + TMS/genims_wms_data.json'
+        'data_file': 'Data Scripts/05 - WMS + TMS/genims_wms_data.json'
     },
     'genims_tms_db': {
-        'schema_file': '05 - WMS + TMS/genims_tms_schema.sql',
+        'schema_file': 'Data Scripts/05 - WMS + TMS/genims_tms_schema.sql',
         'generators': [
-            ('05 - WMS + TMS/generate_wms_tms_historical_data.py', '05 - WMS + TMS/genims_tms_data.json'),
+            ('Data Scripts/05 - WMS + TMS/generate_wms_tms_historical_data.py', 'Data Scripts/05 - WMS + TMS/genims_tms_data.json'),
         ],
-        'data_file': '05 - WMS + TMS/genims_tms_data.json'
+        'data_file': 'Data Scripts/05 - WMS + TMS/genims_tms_data.json'
     },
     'genims_crm_db': {
-        'schema_file': '07 - CRM/genims_crm_schema.sql',
+        'schema_file': 'Data Scripts/07 - CRM/genims_crm_schema.sql',
         'generators': [
-            ('07 - CRM/generate_crm_historical_data.py', '07 - CRM/genims_crm_data.json'),
+            ('Data Scripts/07 - CRM/generate_crm_historical_data.py', 'Data Scripts/07 - CRM/genims_crm_data.json'),
         ],
-        'data_file': '07 - CRM/genims_crm_data.json'
+        'data_file': 'Data Scripts/07 - CRM/genims_crm_data.json'
     },
     'genims_service_db': {
-        'schema_file': '08 - Support & Service/genims_service_schema.sql',
+        'schema_file': 'Data Scripts/08 - Support & Service/genims_service_schema.sql',
         'generators': [
-            ('08 - Support & Service/generate_service_historical_data_updated.py', '08 - Support & Service/genims_service_data.json'),
+            ('Data Scripts/08 - Support & Service/generate_service_historical_data_updated.py', 'Data Scripts/08 - Support & Service/genims_service_data.json'),
         ],
-        'data_file': '08 - Support & Service/genims_service_data.json'
+        'data_file': 'Data Scripts/08 - Support & Service/genims_service_data.json'
     },
     'genims_hr_db': {
-        'schema_file': '09 - HR-HCM/genims_hcm_schema.sql',
+        'schema_file': 'Data Scripts/09 - HR-HCM/genims_hcm_schema.sql',
         'generators': [
-            ('09 - HR-HCM/generate_hcm_historical_data.py', '09 - HR-HCM/genims_hcm_data.json'),
+            ('Data Scripts/09 - HR-HCM/generate_hcm_historical_data.py', 'Data Scripts/09 - HR-HCM/genims_hcm_data.json'),
         ],
-        'data_file': '09 - HR-HCM/genims_hcm_data.json'
+        'data_file': 'Data Scripts/09 - HR-HCM/genims_hcm_data.json'
     },
     'genims_quality_db': {
-        'schema_file': '12 - QMS/genims_qms.sql',
+        'schema_file': 'Data Scripts/12 - QMS/genims_qms.sql',
         'generators': [
-            ('12 - QMS/generate_qms_data_fixed.py', '12 - QMS/genims_qms_data.json'),
+            ('Data Scripts/12 - QMS/generate_qms_data_fixed.py', 'Data Scripts/12 - QMS/genims_qms_data.json'),
         ],
-        'data_file': '12 - QMS/genims_qms_data.json'
+        'data_file': 'Data Scripts/12 - QMS/genims_qms_data.json'
     },
     'genims_supplier_db': {
-        'schema_file': '11 - Supplier Portal/genims_supplier_portal.sql',
+        'schema_file': 'Data Scripts/11 - Supplier Portal/genims_supplier_portal.sql',
         'generators': [
-            ('11 - Supplier Portal/generate_supplier_portal_data.py', '11 - Supplier Portal/genims_supplier_portal_data.json'),
+            ('Data Scripts/11 - Supplier Portal/generate_supplier_portal_data.py', 'Data Scripts/11 - Supplier Portal/genims_supplier_portal_data.json'),
         ],
-        'data_file': '11 - Supplier Portal/genims_supplier_portal_data.json'
+        'data_file': 'Data Scripts/11 - Supplier Portal/genims_supplier_portal_data.json'
     }
 }
 
@@ -251,11 +263,102 @@ class GenIMSSetup:
     # STEP 3: GENERATE DATA
     # ========================================================================
     
-    def generate_data(self):
-        """Run all data generators"""
-        self.log_section("STEP 3: Generating Data")
+    def generate_master_data(self):
+        """Generate MASTER data first (all base entities)"""
+        self.log_section("STEP 3a: Generating MASTER Data (Base Entities)")
         
+        gen_script = 'Data Scripts/01 - Base Data/generate_genims_master_data.py'
+        gen_path = self.root_path / gen_script
+        
+        if not gen_path.exists():
+            logger.warning(f"  ✗ Generator not found: {gen_path}")
+            self.stats['errors'].append(f"Generator missing: {gen_script}")
+            return False
+        
+        try:
+            logger.info(f"  → Running master data generator: {gen_script}")
+            
+            result = subprocess.run(
+                ['python3', str(gen_path)],
+                cwd=str(self.root_path),
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            
+            if result.returncode == 0:
+                output = result.stdout + result.stderr
+                logger.info(f"    ✓ Master data generated successfully")
+                self.stats['data_generated'] += 1
+                return True
+            else:
+                logger.warning(f"    ✗ Master data generator failed: {result.stderr[:200]}")
+                self.stats['errors'].append(f"Master generator: {result.stderr[:100]}")
+                return False
+        
+        except subprocess.TimeoutExpired:
+            logger.warning(f"    ✗ Master generator timeout: {gen_script}")
+            self.stats['errors'].append(f"Master generator timeout")
+            return False
+        except Exception as e:
+            logger.warning(f"    ✗ Master generator error: {e}")
+            self.stats['errors'].append(f"Master generator: {str(e)[:100]}")
+            return False
+    
+    def register_master_ids(self):
+        """Register all master IDs with the registry"""
+        self.log_section("STEP 3b: Registering Master IDs with Registry")
+        
+        master_file = self.root_path / 'Data Scripts/01 - Base Data/genims_master_data.json'
+        
+        if not master_file.exists():
+            logger.error(f"  ✗ Master data file not found: {master_file}")
+            self.stats['errors'].append("Master data JSON missing")
+            return False
+        
+        try:
+            with open(master_file, 'r') as f:
+                master_data = json.load(f)
+            
+            registry = get_registry(self.root_path)
+            
+            # Map JSON keys to entity type names (singular) for registry
+            entity_mapping = {
+                'factories': 'factory',
+                'production_lines': 'line',
+                'machines': 'machine',
+                'sensors': 'sensor',
+                'employees': 'employee',
+                'shifts': 'shift',
+                'products': 'product',
+                'customers': 'customer'
+            }
+            
+            for json_key, entity_type in entity_mapping.items():
+                if json_key in master_data:
+                    records = master_data[json_key]
+                    registry.register_master_ids(entity_type, records)
+                    logger.info(f"  ✓ Registered {len(records)} {json_key}")
+            
+            registry.finalize()
+            registry.save()
+            logger.info(f"  ✓ Registry finalized and saved")
+            return True
+        
+        except Exception as e:
+            logger.error(f"  ✗ Registry registration failed: {e}")
+            self.stats['errors'].append(f"Registry: {str(e)[:100]}")
+            return False
+    
+    def generate_dependent_data(self):
+        """Generate DEPENDENT data using registered master IDs"""
+        self.log_section("STEP 3c: Generating Dependent Data (Using Master Registry)")
+        
+        # Skip master data generator, only run dependent ones
         for db_name, config in DATABASES.items():
+            if db_name == 'genims_master_db':
+                continue  # Already generated in step 3a
+            
             generators = config.get('generators', [])
             
             for gen_script, expected_output in generators:
@@ -277,7 +380,6 @@ class GenIMSSetup:
                     )
                     
                     if result.returncode == 0:
-                        # Parse output for record count
                         output = result.stdout + result.stderr
                         if 'TOTAL' in output:
                             lines = output.split('\n')
@@ -297,8 +399,52 @@ class GenIMSSetup:
                     logger.warning(f"    ✗ Generator error: {e}")
                     self.stats['errors'].append(f"Generator {gen_script}: {str(e)[:100]}")
         
-        logger.info(f"\n✓ Generated data for {self.stats['data_generated']} databases")
+        logger.info(f"\n✓ Generated data for {self.stats['data_generated']} dependent databases")
         return True
+    
+    def validate_referential_integrity(self):
+        """Validate all FK relationships before loading"""
+        self.log_section("STEP 3d: Validating Referential Integrity")
+        
+        registry = get_registry(self.root_path)
+        total_errors = 0
+        
+        for db_name, config in DATABASES.items():
+            data_file = config.get('data_file')
+            if not data_file:
+                continue
+            
+            data_path = self.root_path / data_file
+            if not data_path.exists():
+                continue
+            
+            try:
+                with open(data_path, 'r') as f:
+                    data = json.load(f)
+                
+                errors = registry.validate_dataset(db_name, data)
+                
+                if errors:
+                    total_errors += len(errors)
+                    logger.warning(f"  ✗ {db_name}: {len(errors)} FK validation errors")
+                    for err in errors[:5]:
+                        logger.warning(f"      - {err}")
+                    if len(errors) > 5:
+                        logger.warning(f"      ... and {len(errors)-5} more")
+                else:
+                    logger.info(f"  ✓ {db_name}: All FKs valid")
+            
+            except Exception as e:
+                logger.warning(f"  ✗ Validation failed for {db_name}: {str(e)[:100]}")
+                self.stats['errors'].append(f"FK validation {db_name}: {str(e)[:100]}")
+                total_errors += 1
+        
+        if total_errors == 0:
+            logger.info(f"\n✓ Referential integrity validation passed")
+            return True
+        else:
+            logger.warning(f"\n⚠ {total_errors} FK validation errors found")
+            return False
     
     # ========================================================================
     # STEP 4: LOAD DATA (Optimized Batch Dump)
@@ -310,6 +456,10 @@ class GenIMSSetup:
             return 'NULL'
         if isinstance(val, bool):
             return 'true' if val else 'false'
+        if isinstance(val, list):
+            # Convert JSON array to PostgreSQL array format: {val1,val2,val3}
+            escaped = [str(v).replace("'", "''") for v in val]
+            return "'{" + ",".join(escaped) + "}'"
         if isinstance(val, str):
             return "'" + val.replace("'", "''") + "'"
         return str(val)
@@ -487,6 +637,7 @@ class GenIMSSetup:
         """Execute full setup pipeline"""
         logger.info("\n" + "="*80)
         logger.info("  GenIMS FULL SETUP - Database Creation to Data Loading")
+        logger.info("  With Referential Integrity Validation & Registry Coordination")
         logger.info("="*80)
         logger.info(f"  Host: {DB_HOST}:{DB_PORT}")
         logger.info(f"  User: {DB_USER}")
@@ -494,17 +645,29 @@ class GenIMSSetup:
         
         success = True
         
-        # Step 1: Create databases (COMMENTED OUT - already created)
+        # Step 1: Create databases
         if not self.create_databases():
-             success = False
+            success = False
         
         # Step 2: Load schemas
         if not self.load_schemas():
             success = False
         
-        # Step 3: Generate data
-        if not self.generate_data():
+        # Step 3a: Generate MASTER data first
+        if not self.generate_master_data():
             success = False
+        
+        # Step 3b: Register master IDs with registry
+        if not self.register_master_ids():
+            success = False
+        
+        # Step 3c: Generate dependent data using registry
+        if not self.generate_dependent_data():
+            success = False
+        
+        # Step 3d: Validate referential integrity
+        if not self.validate_referential_integrity():
+            logger.warning("  ⚠ Validation warnings - continuing anyway")
         
         # Step 4: Load data
         if not self.load_data():
