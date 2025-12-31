@@ -19,7 +19,7 @@ from generator_helper import get_helper  # type: ignore
 # CONFIGURATION
 # ============================================================================
 
-DAYS_OF_HISTORY = 30
+DAYS_OF_HISTORY = 180
 WORK_ORDERS_PER_DAY = (15, 30)  # Min/max work orders per day
 OPERATIONS_PER_ORDER = (2, 5)  # Routing steps
 MATERIALS_PER_ORDER = (3, 8)  # BOM items

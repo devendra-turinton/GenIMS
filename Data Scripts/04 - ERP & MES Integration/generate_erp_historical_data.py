@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 from generator_helper import get_helper  # type: ignore
 
 # Configuration
-DAYS_OF_HISTORY = 90
+DAYS_OF_HISTORY = 180
 MATERIALS_TO_CREATE = 200
 SUPPLIERS_TO_CREATE = 30
 SALES_ORDERS_PER_DAY = (3, 8)

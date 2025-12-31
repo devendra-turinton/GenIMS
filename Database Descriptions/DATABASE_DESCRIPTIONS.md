@@ -219,5 +219,45 @@ Supplier Management Portal and vendor management system for strategic sourcing, 
 
 ---
 
+## Users by Role
+
+| Role | Email |
+|------|-------|
+| Data Manager | datamanager@genims.com |
+| Shift Supervisor | shift_supervisor@genims.com |
+| Shop Floor Operator | shopfloor_operator@genims.com |
+| Maintenance Manager | maintenance_manager@genims.com |
+| Maintenance Technician | maintenance_tech@genims.com |
+| Inventory Manager | inventory_manager@genims.com |
+| Sales Manager | sales_manager@genims.com |
+| Procurement Manager | procurement_manager@genims.com |
+| Finance Manager | finance_manager@genims.com |
+| Accountant | accountant@genims.com |
+| Finance Approver | finance_approver@genims.com |
+| Warehouse Manager | warehouse_manager@genims.com |
+| Warehouse Supervisor | warehouse_supervisor@genims.com |
+| Warehouse Operator | warehouse_operator@genims.com |
+| Logistics Manager | logistics_manager@genims.com |
+| Logistics Coordinator | logistics_coordinator@genims.com |
+| Driver | driver@genims.com |
+| Sales Representative | sales_rep@genims.com |
+| Customer Service Rep | cust_service_rep@genims.com |
+| Support Manager | support_manager@genims.com |
+| Support Agent | support_agent@genims.com |
+| Service Technician | service_tech@genims.com |
+| HR Manager | hr_manager@genims.com |
+| HR Specialist | hr_specialist@genims.com |
+| Department Manager | dept_manager@genims.com |
+| Quality Manager | quality_manager@genims.com |
+| Quality Inspector | quality_inspector@genims.com |
+| Quality Auditor | quality_auditor@genims.com |
+| Plant Manager | plant_manager@genims.com |
+| Supplier Coordinator | supplier_coordinator@genims.com |
+| Supplier User | supplier_user@genims.com |
+| Data Analyst | data_analyst@genims.com |
+| Auditor | auditor@genims.com |
+
+---
+
 **Document Version:** 2.0 (December 27, 2025)  
-**Status:** Complete — All 14 databases documented with comprehensive descriptions
+**Status:** Complete — All 14 databases documented with comprehensive descriptions and user accounts

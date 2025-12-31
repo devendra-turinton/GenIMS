@@ -23,16 +23,39 @@ echo ""
 echo "Logs will be written to: ${LOG_DIR}"
 echo ""
 echo "Prerequisites:"
-echo "  - PostgreSQL database 'genims_db' created and schema loaded"
+echo "  - PostgreSQL database 'genims_operations_db' on Azure Cloud"
+echo "  - Environment variables configured in .env file (or system environment)"
 echo "  - Kafka broker running on localhost:9092 (optional)"
-echo "  - Python packages: psycopg2-binary, kafka-python, numpy"
+echo "  - Python packages: psycopg2-binary, kafka-python, numpy, python-dotenv"
 echo ""
 echo "Install dependencies:"
-echo "  pip install psycopg2-binary kafka-python numpy"
+echo "  pip install psycopg2-binary kafka-python numpy python-dotenv"
 echo ""
-echo "Press Ctrl+C to stop both daemons"
+echo "Environment variables:"
+echo "  - PG_HOST (default: insights-db.postgres.database.azure.com)"
+echo "  - PG_PORT (default: 5432)"
+echo "  - PG_DATABASE (default: genims_operations_db)"
+echo "  - PG_USER (default: turintonadmin)"
+echo "  - PG_PASSWORD (default: Passw0rd123!)"
+echo "  - PG_SSL_MODE (default: require)"
+echo ""
+echo "Connection Details:"
+echo "  Host: ${PG_HOST:-insights-db.postgres.database.azure.com}"
+echo "  Database: ${PG_DATABASE:-genims_operations_db}"
+echo "  Port: ${PG_PORT:-5432}"
+echo "  SSL Mode: ${PG_SSL_MODE:-require}"
+echo ""
 echo "================================================================================"
 echo ""
+
+# Check if .env file exists
+if [ -f "${SCRIPT_DIR}/.env" ]; then
+    echo "INFO: Loading environment from .env file"
+    export $(cat "${SCRIPT_DIR}/.env" | grep -v '^#' | xargs)
+else
+    echo "WARNING: .env file not found in ${SCRIPT_DIR}/"
+    echo "Using system environment variables or defaults"
+fi
 
 # Check if master data exists
 if [ ! -f "${SCRIPT_DIR}/genims_master_data.json" ]; then

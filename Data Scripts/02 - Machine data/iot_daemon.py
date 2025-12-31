@@ -6,6 +6,7 @@ Simulates real IoT sensor data and pushes to Kafka and PostgreSQL
 """
 
 import sys
+import os
 import time
 import json
 import random
@@ -15,6 +16,12 @@ from datetime import datetime
 from typing import Dict, List
 import math
 import numpy as np
+from dotenv import load_dotenv
+
+# Load environment variables from parent directory config
+env_file = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'config.env')
+if os.path.exists(env_file):
+    load_dotenv(env_file)
 
 # Optional dependencies - will work without them but log warnings
 try:
@@ -37,17 +44,18 @@ except ImportError:
 # ============================================================================
 
 # Streaming configuration
-SENSOR_SAMPLING_INTERVAL = 10  # seconds between sensor readings
-BATCH_SIZE = 100  # records to batch before database insert
-KAFKA_TOPIC = 'genims.sensor.data'
-KAFKA_BOOTSTRAP_SERVERS = ['localhost:9092']
+SENSOR_SAMPLING_INTERVAL = int(os.getenv('IOT_SAMPLING_INTERVAL', '10'))
+BATCH_SIZE = int(os.getenv('IOT_BATCH_SIZE', '100'))
+KAFKA_TOPIC = os.getenv('KAFKA_IOT_TOPIC', 'genims.sensor.data')
+KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092').split(',')
 
-# PostgreSQL configuration
-PG_HOST = 'localhost'
-PG_PORT = 5432
-PG_DATABASE = 'genims_db'
-PG_USER = 'genims_user'
-PG_PASSWORD = 'genims_password'
+# PostgreSQL configuration - from Azure Cloud via config.env
+PG_HOST = os.getenv('POSTGRES_HOST', 'localhost')
+PG_PORT = int(os.getenv('POSTGRES_PORT', '5432'))
+PG_DATABASE = os.getenv('DB_OPERATIONS', 'genims_operations_db')
+PG_USER = os.getenv('POSTGRES_USER', 'postgres')
+PG_PASSWORD = os.getenv('POSTGRES_PASSWORD', '')
+PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
 
 # Logging
 logging.basicConfig(
@@ -181,7 +189,7 @@ class SensorSimulator:
             min_1min = min(self.history)
             max_1min = max(self.history)
             avg_1min = sum(self.history) / len(self.history)
-            std_1min = np.std(self.history)
+            std_1min = float(np.std(self.history))  # Convert numpy float to Python float
         else:
             min_1min = max_1min = avg_1min = value
             std_1min = 0.0
@@ -195,30 +203,30 @@ class SensorSimulator:
             status = 'normal'
         
         # Anomaly detection
-        anomaly_score = fault_factor * random.uniform(0.7, 1.0) if fault_factor > 0.5 else random.uniform(0, 0.3)
+        anomaly_score = float(fault_factor * random.uniform(0.7, 1.0) if fault_factor > 0.5 else random.uniform(0, 0.3))
         is_anomaly = anomaly_score > 0.7
         
-        # Build record
+        # Build record - Convert all numpy types to Python native types for psycopg2
         record = {
             'sensor_id': self.sensor_id,
             'machine_id': self.machine_id,
             'line_id': self.sensor['line_id'],
             'factory_id': self.sensor['factory_id'],
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
-            'measurement_value': round(value, 4),
+            'measurement_value': float(round(value, 4)),  # Convert numpy float to Python float
             'measurement_unit': self.sensor['measurement_unit'],
             'status': status,
             'quality': 'good',
-            'is_below_warning': value < self.warning_min,
-            'is_above_warning': value > self.warning_max,
-            'is_below_critical': value < self.critical_min,
-            'is_above_critical': value > self.critical_max,
-            'min_value_1min': round(min_1min, 4),
-            'max_value_1min': round(max_1min, 4),
-            'avg_value_1min': round(avg_1min, 4),
-            'std_dev_1min': round(std_1min, 4),
-            'anomaly_score': round(anomaly_score, 4),
-            'is_anomaly': is_anomaly,
+            'is_below_warning': bool(value < self.warning_min),
+            'is_above_warning': bool(value > self.warning_max),
+            'is_below_critical': bool(value < self.critical_min),
+            'is_above_critical': bool(value > self.critical_max),
+            'min_value_1min': float(round(min_1min, 4)),  # Convert to Python float
+            'max_value_1min': float(round(max_1min, 4)),  # Convert to Python float
+            'avg_value_1min': float(round(avg_1min, 4)),  # Convert to Python float
+            'std_dev_1min': float(round(std_1min, 4)),    # Convert to Python float
+            'anomaly_score': float(round(anomaly_score, 4)),  # Convert to Python float
+            'is_anomaly': bool(is_anomaly),
             'data_source': 'IoT',
             'protocol': self.sensor['data_protocol'],
             'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
@@ -263,7 +271,8 @@ def initialize_postgres():
             port=PG_PORT,
             database=PG_DATABASE,
             user=PG_USER,
-            password=PG_PASSWORD
+            password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE
         )
         pg_connection.autocommit = False
         logger.info(f"PostgreSQL connection established: {PG_HOST}:{PG_PORT}/{PG_DATABASE}")
@@ -352,9 +361,14 @@ def print_stats():
 
 
 def load_sensors() -> List[Dict]:
-    """Load sensor master data"""
+    """Load sensor master data from Folder 01"""
     try:
-        with open('genims_master_data.json', 'r') as f:
+        import os
+        # Read from Folder 01 - Base Data
+        folder_01_path = os.path.join(os.path.dirname(__file__), '..', '01 - Base Data', 'genims_master_data.json')
+        master_data_path = os.path.abspath(folder_01_path)
+        
+        with open(master_data_path, 'r') as f:
             master_data = json.load(f)
         return master_data['sensors']
     except Exception as e:

@@ -5,12 +5,19 @@ Runs complete ERP business operations daily
 """
 
 import sys
+import os
 import time
 import logging
 import signal
 from datetime import datetime, timedelta, time as datetime_time
 import random
 import json
+from dotenv import load_dotenv
+
+# Load environment variables from parent directory config
+env_file = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'config.env')
+if os.path.exists(env_file):
+    load_dotenv(env_file)
 
 try:
     import psycopg2
@@ -21,19 +28,21 @@ except ImportError:
     print("WARNING: psycopg2 not installed. Install with: pip install psycopg2-binary")
 
 # ============================================================================
-# CONFIGURATION
+# CONFIGURATION - Environment Variables with Defaults
 # ============================================================================
 
-# Database Configuration
-PG_HOST = 'localhost'
-PG_PORT = 5432
-PG_DATABASE = 'genims_db'
-PG_USER = 'genims_user'
-PG_PASSWORD = 'genims_password'
+# Database Configuration - from Azure Cloud via config.env
+PG_HOST = os.getenv('POSTGRES_HOST', 'localhost')
+PG_PORT = int(os.getenv('POSTGRES_PORT', '5432'))
+PG_DATABASE = os.getenv('DB_ERP', 'genims_erp_db')
+PG_USER = os.getenv('POSTGRES_USER', 'postgres')
+PG_PASSWORD = os.getenv('POSTGRES_PASSWORD', '')
+PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
+PG_MASTER_DATABASE = os.getenv('DB_MASTER', 'genims_master_db')
 
 # Daemon Configuration
-CYCLE_INTERVAL_SECONDS = 86400  # Run every 24 hours (daily)
-RUN_TIME_HOUR = 2  # 2 AM daily run
+CYCLE_INTERVAL_SECONDS = int(os.getenv('ERP_CYCLE_INTERVAL', '86400'))  # Run every 24 hours (daily)
+RUN_TIME_HOUR = int(os.getenv('ERP_RUN_TIME_HOUR', '2'))  # 2 AM daily run
 
 # Business Volumes (per day)
 SALES_ORDERS_PER_DAY = (3, 8)
@@ -45,12 +54,16 @@ NEW_MATERIALS_PER_WEEK = (0, 2)
 MRP_PLANNING_HORIZON_DAYS = 90
 MRP_SAFETY_STOCK_DAYS = 7
 
-# Logging
+# Logging - use centralized logs directory with fallback
+log_dir = os.getenv("DAEMON_LOG_DIR", os.path.join(os.path.dirname(__file__), '..', '..', 'logs'))
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, 'erp_daily_daemon.log')
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/erp_daemon.log'),
+        logging.FileHandler(log_file),
         logging.StreamHandler()
     ]
 )
@@ -121,58 +134,73 @@ def initialize_database():
             port=PG_PORT,
             database=PG_DATABASE,
             user=PG_USER,
-            password=PG_PASSWORD
+            password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE
         )
         pg_connection.autocommit = False
-        logger.info(f"PostgreSQL connection established: {PG_HOST}:{PG_PORT}/{PG_DATABASE}")
+        logger.info(f"PostgreSQL connection established: {PG_HOST}:{PG_PORT}/{PG_DATABASE} (SSL: {PG_SSL_MODE})")
         return True
     except Exception as e:
         logger.error(f"Failed to connect to PostgreSQL: {e}")
+        logger.info("Verify config.env has correct POSTGRES_HOST, POSTGRES_USER, POSTGRES_PASSWORD, and PG_SSL_MODE")
         return False
 
 
 def load_master_data():
-    """Load master data from database"""
+    """Load master data from master_db and ERP data from ERP db"""
     global master_data
     
     try:
+        # Connect to master database for shared data
+        master_conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_MASTER_DATABASE,
+            user=PG_USER,
+            password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE
+        )
+        master_cursor = master_conn.cursor()
+        
+        # Load from master_db
+        master_cursor.execute("SELECT * FROM customers")
+        master_data['customers'] = [dict(zip([d[0] for d in master_cursor.description], row)) 
+                                    for row in master_cursor.fetchall()]
+        
+        master_cursor.execute("SELECT * FROM factories")
+        master_data['factories'] = [dict(zip([d[0] for d in master_cursor.description], row)) 
+                                    for row in master_cursor.fetchall()]
+        
+        master_cursor.execute("SELECT * FROM products")
+        master_data['products'] = [dict(zip([d[0] for d in master_cursor.description], row)) 
+                                  for row in master_cursor.fetchall()]
+        
+        master_cursor.close()
+        master_conn.close()
+        
+        # Load from ERP database
         cursor = pg_connection.cursor()
         
-        # Load materials
         cursor.execute("SELECT * FROM materials WHERE material_status = 'active'")
         master_data['materials'] = [dict(zip([d[0] for d in cursor.description], row)) 
                                     for row in cursor.fetchall()]
         
-        # Load suppliers
         cursor.execute("SELECT * FROM suppliers WHERE supplier_status = 'active'")
         master_data['suppliers'] = [dict(zip([d[0] for d in cursor.description], row)) 
                                     for row in cursor.fetchall()]
         
-        # Load BOMs
         cursor.execute("SELECT * FROM bill_of_materials WHERE bom_status = 'active'")
         master_data['boms'] = [dict(zip([d[0] for d in cursor.description], row)) 
                               for row in cursor.fetchall()]
         
-        # Load customers
-        cursor.execute("SELECT * FROM customers WHERE customer_status = 'active'")
-        master_data['customers'] = [dict(zip([d[0] for d in cursor.description], row)) 
-                                    for row in cursor.fetchall()]
-        
-        # Load factories
-        cursor.execute("SELECT * FROM factories WHERE is_active = true")
-        master_data['factories'] = [dict(zip([d[0] for d in cursor.description], row)) 
-                                    for row in cursor.fetchall()]
-        
-        # Load products
-        cursor.execute("SELECT * FROM products WHERE is_active = true")
-        master_data['products'] = [dict(zip([d[0] for d in cursor.description], row)) 
-                                  for row in cursor.fetchall()]
-        
         cursor.close()
         
-        logger.info(f"Master data loaded: {len(master_data['materials'])} materials, "
-                   f"{len(master_data['suppliers'])} suppliers, "
-                   f"{len(master_data['customers'])} customers")
+        logger.info(f"Master data loaded successfully:")
+        logger.info(f"  Materials: {len(master_data['materials'])}")
+        logger.info(f"  Suppliers: {len(master_data['suppliers'])}")
+        logger.info(f"  Customers: {len(master_data['customers'])}")
+        logger.info(f"  Products: {len(master_data['products'])}")
+        logger.info(f"  Factories: {len(master_data['factories'])}")
         
         # Initialize counters
         _initialize_counters()
@@ -184,31 +212,39 @@ def load_master_data():
 
 
 def _initialize_counters():
-    """Initialize counters based on existing data"""
+    """Initialize counters based on existing data - use MAX ID to avoid duplicates"""
     try:
         cursor = pg_connection.cursor()
         
+        # Define tables with their ID columns and prefixes
         tables = {
-            'material': 'materials',
-            'supplier': 'suppliers',
-            'bom': 'bill_of_materials',
-            'sales_order': 'sales_orders',
-            'prod_order': 'production_orders',
-            'purchase_req': 'purchase_requisitions',
-            'purchase_order': 'purchase_orders',
-            'goods_receipt': 'goods_receipts',
-            'inv_transaction': 'inventory_transactions',
-            'mrp_run': 'mrp_runs',
-            'gl_transaction': 'general_ledger'
+            'material': ('materials', 'material_id', 'MAT'),
+            'supplier': ('suppliers', 'supplier_id', 'SUP'),
+            'bom': ('bill_of_materials', 'bom_id', 'BOM'),
+            'sales_order': ('sales_orders', 'sales_order_id', 'SO'),
+            'prod_order': ('production_orders', 'production_order_id', 'PO'),
+            'purchase_req': ('purchase_requisitions', 'requisition_id', 'PR'),
+            'purchase_order': ('purchase_orders', 'purchase_order_id', 'PO'),
+            'goods_receipt': ('goods_receipts', 'goods_receipt_id', 'GR'),
+            'inv_transaction': ('inventory_transactions', 'transaction_id', 'INV'),
+            'mrp_run': ('mrp_runs', 'run_id', 'MRP'),
+            'gl_transaction': ('general_ledger', 'transaction_id', 'GL')
         }
         
-        for key, table in tables.items():
+        for key, (table, id_col, prefix) in tables.items():
             try:
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
-                count = cursor.fetchone()[0]
-                counters[key] = count + 1
-            except:
-                pass
+                # Get max numeric value from ID column
+                cursor.execute(f"""
+                    SELECT COALESCE(MAX(CAST(SUBSTRING({id_col} FROM '[0-9]+') AS INTEGER)), 0)
+                    FROM {table}
+                    WHERE {id_col} LIKE '{prefix}-%'
+                """)
+                max_id = cursor.fetchone()[0]
+                counters[key] = max_id + 1
+                logger.info(f"Counter {key}: starting at {counters[key]} (max found: {max_id})")
+            except Exception as e:
+                logger.warning(f"Could not initialize counter for {key}: {e}")
+                counters[key] = 1
         
         cursor.close()
     except Exception as e:

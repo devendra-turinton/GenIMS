@@ -6,6 +6,7 @@ Simulates PLC data aggregation by SCADA and pushes to Kafka and PostgreSQL
 """
 
 import sys
+import os
 import time
 import json
 import random
@@ -13,6 +14,12 @@ import signal
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List
+
+# Load environment variables from parent directory config
+from dotenv import load_dotenv
+env_file = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'config.env')
+if os.path.exists(env_file):
+    load_dotenv(env_file)
 
 # Optional dependencies
 try:
@@ -31,21 +38,23 @@ except ImportError:
     print("WARNING: psycopg2 not installed. Install with: pip install psycopg2-binary")
 
 # ============================================================================
-# CONFIGURATION
+# CONFIGURATION - Environment Variables with Defaults
 # ============================================================================
 
-# Streaming configuration
-SCADA_SAMPLING_INTERVAL = 60  # seconds between SCADA readings
-BATCH_SIZE = 50  # records to batch before database insert
-KAFKA_TOPIC = 'genims.scada.data'
-KAFKA_BOOTSTRAP_SERVERS = ['localhost:9092']
+# PostgreSQL configuration (Azure Cloud)
+PG_HOST = os.getenv('POSTGRES_HOST', 'insights-db.postgres.database.azure.com')
+PG_PORT = int(os.getenv('POSTGRES_PORT', '5432'))
+PG_DATABASE = os.getenv('DB_OPERATIONS', 'genims_operations_db')
+PG_USER = os.getenv('POSTGRES_USER', 'turintonadmin')
+PG_PASSWORD = os.getenv('POSTGRES_PASSWORD', 'Passw0rd123!')
+PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
+PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')  # Azure requires SSL
 
-# PostgreSQL configuration
-PG_HOST = 'localhost'
-PG_PORT = 5432
-PG_DATABASE = 'genims_db'
-PG_USER = 'genims_user'
-PG_PASSWORD = 'genims_password'
+# Streaming configuration
+SCADA_SAMPLING_INTERVAL = int(os.getenv('SCADA_SAMPLING_INTERVAL', '60'))
+BATCH_SIZE = int(os.getenv('BATCH_SIZE', '50'))
+KAFKA_TOPIC = os.getenv('KAFKA_TOPIC', 'genims.scada.data')
+KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092').split(',')
 
 # Logging
 logging.basicConfig(
@@ -338,10 +347,12 @@ def initialize_postgres():
             port=PG_PORT,
             database=PG_DATABASE,
             user=PG_USER,
-            password=PG_PASSWORD
+            password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE
         )
         pg_connection.autocommit = False
         logger.info(f"PostgreSQL connection established: {PG_HOST}:{PG_PORT}/{PG_DATABASE}")
+        logger.info(f"SSL Mode: {PG_SSL_MODE}")
         return True
     except Exception as e:
         logger.error(f"Failed to connect to PostgreSQL: {e}")
@@ -435,9 +446,14 @@ def print_stats():
 
 
 def load_master_data():
-    """Load master data"""
+    """Load master data from Folder 01"""
     try:
-        with open('genims_master_data.json', 'r') as f:
+        import os
+        # Read from Folder 01 - Base Data
+        folder_01_path = os.path.join(os.path.dirname(__file__), '..', '01 - Base Data', 'genims_master_data.json')
+        master_data_path = os.path.abspath(folder_01_path)
+        
+        with open(master_data_path, 'r') as f:
             return json.load(f)
     except Exception as e:
         logger.error(f"Failed to load master data: {e}")

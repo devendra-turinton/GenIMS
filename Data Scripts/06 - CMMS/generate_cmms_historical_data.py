@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 from generator_helper import get_helper
 
 # Configuration
-DAYS_OF_HISTORY = 90
+DAYS_OF_HISTORY = 180
 ASSETS_PER_FACTORY = 20
 TECHNICIANS_PER_FACTORY = 10
 MRO_PARTS_COUNT = 200

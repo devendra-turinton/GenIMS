@@ -6,12 +6,19 @@ TMS: Daily logistics operations (routing, tracking, delivery confirmation)
 """
 
 import sys
+import os
 import time
 import logging
 import signal
 from datetime import datetime, timedelta
 import random
 import json
+from dotenv import load_dotenv
+
+# Load environment variables from parent directory config
+env_file = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'config.env')
+if os.path.exists(env_file):
+    load_dotenv(env_file)
 
 try:
     import psycopg2
@@ -22,11 +29,13 @@ except ImportError:
     print("WARNING: psycopg2 not installed")
 
 # Configuration
-PG_HOST = 'localhost'
-PG_PORT = 5432
-PG_DATABASE = 'genims_db'
-PG_USER = 'genims_user'
-PG_PASSWORD = 'genims_password'
+PG_HOST = os.getenv('POSTGRES_HOST', 'localhost')
+PG_PORT = int(os.getenv('POSTGRES_PORT', '5432'))
+PG_DATABASE = os.getenv('DB_WMS', 'genims_wms_db')
+PG_USER = os.getenv('POSTGRES_USER', 'postgres')
+PG_PASSWORD = os.getenv('POSTGRES_PASSWORD', '')
+PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
+PG_MASTER_DATABASE = os.getenv('DB_MASTER', 'genims_master_db')
 
 # WMS Configuration (Continuous)
 WMS_CYCLE_INTERVAL_SECONDS = 1800  # Run every 30 minutes
@@ -38,11 +47,16 @@ TMS_RUN_HOUR = 3
 SHIPMENTS_PER_DAY = (5, 15)
 ROUTES_PER_DAY = (2, 5)
 
+# Logging configuration
+log_dir = os.getenv('DAEMON_LOG_DIR', os.path.join(os.path.dirname(__file__), '..', '..', 'logs'))
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, 'wms_tms_daemon.log')
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/wms_tms_daemon.log'),
+        logging.FileHandler(log_file),
         logging.StreamHandler()
     ]
 )
@@ -77,7 +91,8 @@ def initialize_database():
     try:
         pg_connection = psycopg2.connect(
             host=PG_HOST, port=PG_PORT, database=PG_DATABASE,
-            user=PG_USER, password=PG_PASSWORD
+            user=PG_USER, password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE
         )
         pg_connection.autocommit = False
         logger.info("PostgreSQL connected")
@@ -91,24 +106,47 @@ def load_master_data():
     try:
         cursor = pg_connection.cursor()
         
-        # Load warehouses
+        # Load warehouses (from WMS DB)
         cursor.execute("SELECT * FROM warehouses WHERE is_active = true")
         master_data['warehouses'] = [dict(zip([d[0] for d in cursor.description], row)) 
                                      for row in cursor.fetchall()]
-        
-        # Load carriers
-        cursor.execute("SELECT * FROM carriers WHERE carrier_status = 'active'")
-        master_data['carriers'] = [dict(zip([d[0] for d in cursor.description], row)) 
-                                   for row in cursor.fetchall()]
-        
-        # Load sales orders
-        cursor.execute("SELECT * FROM sales_orders WHERE order_status IN ('open', 'in_production') LIMIT 100")
-        master_data['sales_orders'] = [dict(zip([d[0] for d in cursor.description], row)) 
-                                       for row in cursor.fetchall()]
-        
         cursor.close()
+        
+        # Load carriers from TMS DB
+        try:
+            tms_conn = psycopg2.connect(
+                host=PG_HOST, port=PG_PORT, database=os.getenv('DB_TMS', 'genims_tms_db'),
+                user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE
+            )
+            tms_cursor = tms_conn.cursor()
+            tms_cursor.execute("SELECT * FROM carriers WHERE carrier_status = 'active'")
+            master_data['carriers'] = [dict(zip([d[0] for d in tms_cursor.description], row)) 
+                                       for row in tms_cursor.fetchall()]
+            tms_cursor.close()
+            tms_conn.close()
+        except Exception as e:
+            logger.warning(f"Failed to load carriers from TMS DB: {e}")
+            master_data['carriers'] = []
+        
+        # Load sales orders from ERP DB
+        try:
+            erp_conn = psycopg2.connect(
+                host=PG_HOST, port=PG_PORT, database=os.getenv('DB_ERP', 'genims_erp_db'),
+                user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE
+            )
+            erp_cursor = erp_conn.cursor()
+            erp_cursor.execute("SELECT * FROM sales_orders WHERE order_status IN ('open', 'in_production') LIMIT 100")
+            master_data['sales_orders'] = [dict(zip([d[0] for d in erp_cursor.description], row)) 
+                                           for row in erp_cursor.fetchall()]
+            erp_cursor.close()
+            erp_conn.close()
+        except Exception as e:
+            logger.warning(f"Failed to load sales orders from ERP DB: {e}")
+            master_data['sales_orders'] = []
+        
         logger.info(f"Loaded: {len(master_data.get('warehouses', []))} warehouses, "
-                   f"{len(master_data.get('carriers', []))} carriers")
+                   f"{len(master_data.get('carriers', []))} carriers, "
+                   f"{len(master_data.get('sales_orders', []))} sales orders")
         return True
     except Exception as e:
         logger.error(f"Failed to load master data: {e}")
@@ -124,6 +162,23 @@ def generate_id(prefix: str) -> str:
 def run_wms_cycle():
     """Execute WMS warehouse operations cycle"""
     logger.info("=== WMS Cycle Starting ===")
+    
+    # Check and reconnect if necessary
+    global pg_connection
+    try:
+        if pg_connection:
+            cursor = pg_connection.cursor()
+            cursor.execute("SELECT 1")
+            cursor.close()
+    except Exception:
+        logger.warning("Database connection lost, reconnecting...")
+        try:
+            pg_connection.close()
+        except:
+            pass
+        if not initialize_database():
+            logger.error("Failed to reconnect")
+            return False
     
     try:
         # 1. Create pick waves for pending orders

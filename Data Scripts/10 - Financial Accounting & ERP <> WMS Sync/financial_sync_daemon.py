@@ -5,12 +5,19 @@ Handles automated GL posting and real-time ERP-WMS inventory synchronization
 """
 
 import sys
+import os
 import time
 import logging
 import signal
 from datetime import datetime, timedelta
 import random
 import json
+from dotenv import load_dotenv
+
+# Load environment variables
+env_file = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'config.env')
+if os.path.exists(env_file):
+    load_dotenv(env_file)
 
 try:
     import psycopg2
@@ -21,27 +28,32 @@ except ImportError:
     print("WARNING: psycopg2 not installed")
 
 # Configuration
-PG_HOST = 'localhost'
-PG_PORT = 5432
-PG_DATABASE = 'genims_db'
-PG_USER = 'genims_user'
-PG_PASSWORD = 'genims_password'
+PG_HOST = os.getenv('POSTGRES_HOST', 'localhost')
+PG_PORT = int(os.getenv('POSTGRES_PORT', '5432'))
+PG_DATABASE = os.getenv('DB_FINANCIAL', 'genims_financial_db')
+PG_SYNC_DATABASE = os.getenv('DB_ERP_WMS_SYNC', 'genims_erp_wms_sync_db')
+PG_USER = os.getenv('POSTGRES_USER', 'postgres')
+PG_PASSWORD = os.getenv('POSTGRES_PASSWORD', '')
+PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
 
-# Daemon Configuration
-CYCLE_INTERVAL_SECONDS = 300  # Run every 5 minutes
+# Logging configuration
+log_dir = os.getenv('DAEMON_LOG_DIR', os.path.join(os.path.dirname(__file__), '..', '..', 'logs'))
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, 'financial_sync_daemon.log')
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/financial_sync_daemon.log'),
+        logging.FileHandler(log_file),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('FinancialSyncDaemon')
+logger = logging.getLogger('FinancialSync')
 
 running = True
 pg_connection = None
+pg_sync_connection = None
 posting_rules = {}
 sync_mappings = {}
 stats = {
@@ -62,16 +74,27 @@ signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 def initialize_database():
-    global pg_connection
+    global pg_connection, pg_sync_connection
     if not POSTGRES_AVAILABLE:
         return False
     try:
+        # Connect to financial database
         pg_connection = psycopg2.connect(
             host=PG_HOST, port=PG_PORT, database=PG_DATABASE,
-            user=PG_USER, password=PG_PASSWORD
+            user=PG_USER, password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE
         )
         pg_connection.autocommit = False
-        logger.info("PostgreSQL connected")
+        logger.info(f"PostgreSQL connected to {PG_DATABASE}")
+        
+        # Connect to sync database
+        pg_sync_connection = psycopg2.connect(
+            host=PG_HOST, port=PG_PORT, database=PG_SYNC_DATABASE,
+            user=PG_USER, password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE
+        )
+        pg_sync_connection.autocommit = False
+        logger.info(f"PostgreSQL connected to {PG_SYNC_DATABASE}")
         return True
     except Exception as e:
         logger.error(f"DB connection failed: {e}")
@@ -81,9 +104,8 @@ def load_configuration():
     """Load GL posting rules and sync mappings"""
     global posting_rules, sync_mappings
     try:
+        # Load GL posting rules from financial database
         cursor = pg_connection.cursor()
-        
-        # Load GL posting rules
         cursor.execute("""
             SELECT rule_id, transaction_type, transaction_subtype,
                    debit_account_id, credit_account_id, amount_field
@@ -99,21 +121,23 @@ def load_configuration():
                 'credit_account': row[4],
                 'amount_field': row[5]
             }
+        cursor.close()
         
-        # Load sync mappings
-        cursor.execute("""
+        # Load sync mappings from sync database
+        sync_cursor = pg_sync_connection.cursor()
+        sync_cursor.execute("""
             SELECT mapping_id, erp_location_id, wms_warehouse_id
             FROM inventory_sync_mappings
             WHERE is_active = true AND sync_enabled = true
         """)
         
-        for row in cursor.fetchall():
+        for row in sync_cursor.fetchall():
             sync_mappings[row[1]] = {
                 'mapping_id': row[0],
                 'wms_warehouse': row[2]
             }
+        sync_cursor.close()
         
-        cursor.close()
         logger.info(f"Loaded {len(posting_rules)} posting rules, {len(sync_mappings)} sync mappings")
         return True
     except Exception as e:

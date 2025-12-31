@@ -16,8 +16,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 from generator_helper import get_helper
 
 # Configuration
-WMS_DAYS_OF_HISTORY = 30
-TMS_DAYS_OF_HISTORY = 60
+WMS_DAYS_OF_HISTORY = 180
+TMS_DAYS_OF_HISTORY = 180
 WAREHOUSES_TO_CREATE = 3
 CARRIERS_TO_CREATE = 10
 

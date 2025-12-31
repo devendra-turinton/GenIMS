@@ -5,12 +5,19 @@ Continuously generates production data every hour simulating real factory operat
 """
 
 import sys
+import os
 import time
 import logging
 import signal
 from datetime import datetime, timedelta
 import random
 import json
+from dotenv import load_dotenv
+
+# Load environment variables from parent directory config
+env_file = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'config.env')
+if os.path.exists(env_file):
+    load_dotenv(env_file)
 
 try:
     import psycopg2
@@ -21,19 +28,22 @@ except ImportError:
     print("WARNING: psycopg2 not installed. Install with: pip install psycopg2-binary")
 
 # ============================================================================
-# CONFIGURATION
+# CONFIGURATION - Environment Variables with Defaults
 # ============================================================================
 
-# Database Configuration
-PG_HOST = 'localhost'
-PG_PORT = 5432
-PG_DATABASE = 'genims_db'
-PG_USER = 'genims_user'
-PG_PASSWORD = 'genims_password'
+# Database Configuration - from Azure Cloud via config.env
+PG_HOST = os.getenv('POSTGRES_HOST', 'localhost')
+PG_PORT = int(os.getenv('POSTGRES_PORT', '5432'))
+PG_DATABASE = os.getenv('FOLDER_03_DATABASE', os.getenv('DB_MANUFACTURING', 'genims_manufacturing_db'))
+PG_MASTER_DATABASE = os.getenv('DB_MASTER', 'genims_master_db')  # Master data database
+PG_USER = os.getenv('POSTGRES_USER', 'postgres')
+PG_PASSWORD = os.getenv('POSTGRES_PASSWORD', '')
+PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
 
 # Daemon Configuration
-CYCLE_INTERVAL_SECONDS = 3600  # Run every hour
-BATCH_SIZE = 50  # Records per batch insert
+MES_ENABLED = os.getenv('MES_ENABLED', 'true').lower() == 'true'
+CYCLE_INTERVAL_SECONDS = int(os.getenv('MES_CYCLE_INTERVAL', '3600'))  # Run every hour
+BATCH_SIZE = int(os.getenv('MES_BATCH_SIZE', '50'))  # Records per batch insert
 
 # Production Rates (per hour)
 DAY_SHIFT_ORDERS = (4, 5)      # 06:00-14:00
@@ -58,12 +68,26 @@ COMPONENTS = [
     'COMP-BEARING-6205', 'COMP-SEAL-RUBBER', 'COMP-GASKET-FIBER', 'COMP-O-RING-10MM'
 ]
 
-# Logging
+# Logging - use centralized logs directory with fallback
+log_dir = os.getenv("DAEMON_LOG_DIR", os.path.join(os.path.dirname(__file__), '..', '..', 'logs'))
+os.makedirs(log_dir, exist_ok=True)
+
+# Get log file path from env, expand variables if needed
+log_file_env = os.getenv('MES_LOG_FILE', '')
+if log_file_env and '$LOGS_DIR' in log_file_env:
+    log_file = log_file_env.replace('$LOGS_DIR', log_dir)
+elif log_file_env:
+    log_file = log_file_env
+else:
+    log_file = os.path.join(log_dir, 'mes_hourly_daemon.log')
+
+log_level = getattr(logging, os.getenv('DAEMON_LOG_LEVEL', 'INFO').upper(), logging.INFO)
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/mes_daemon.log'),
+        logging.FileHandler(log_file),
         logging.StreamHandler()
     ]
 )
@@ -136,11 +160,12 @@ signal.signal(signal.SIGTERM, signal_handler)
 # ============================================================================
 
 def initialize_database():
-    """Initialize PostgreSQL connection"""
+    """Initialize PostgreSQL connection with SSL support for Azure"""
     global pg_connection
     
     if not POSTGRES_AVAILABLE:
         logger.error("PostgreSQL library not available. Cannot start daemon.")
+        logger.error("Install with: pip install psycopg2-binary")
         return False
     
     try:
@@ -149,22 +174,67 @@ def initialize_database():
             port=PG_PORT,
             database=PG_DATABASE,
             user=PG_USER,
-            password=PG_PASSWORD
+            password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE
         )
         pg_connection.autocommit = False
-        logger.info(f"PostgreSQL connection established: {PG_HOST}:{PG_PORT}/{PG_DATABASE}")
+        logger.info(f"PostgreSQL connection established: {PG_HOST}:{PG_PORT}/{PG_DATABASE} (SSL: {PG_SSL_MODE})")
         return True
     except Exception as e:
         logger.error(f"Failed to connect to PostgreSQL: {e}")
         return False
 
 
+def check_connection():
+    """Check if database connection is alive and reconnect if needed"""
+    global pg_connection
+    try:
+        if pg_connection is None or pg_connection.closed:
+            logger.warning("Connection is closed, reconnecting...")
+            if not initialize_database():
+                logger.error("Failed to reconnect to database")
+                return False
+            logger.info("Successfully reconnected to database")
+            return True
+        # Test the connection with a simple query
+        cursor = pg_connection.cursor()
+        cursor.execute("SELECT 1")
+        cursor.close()
+        pg_connection.commit()  # Ensure we're not in a failed transaction state
+        return True
+    except Exception as e:
+        logger.warning(f"Connection check failed ({type(e).__name__}: {e}), reconnecting...")
+        try:
+            if pg_connection and not pg_connection.closed:
+                pg_connection.close()
+        except:
+            pass
+        pg_connection = None
+        if not initialize_database():
+            logger.error("Failed to reconnect after connection check failure")
+            return False
+        logger.info("Successfully reconnected after connection failure")
+        return True
+        logger.error(f"Config file: {env_file}")
+        logger.error("Verify config.env has correct POSTGRES_HOST, POSTGRES_USER, POSTGRES_PASSWORD, FOLDER_03_DATABASE")
+        return False
+
+
 def load_master_data():
-    """Load master data from database"""
+    """Load master data from master database"""
     global master_data
     
     try:
-        cursor = pg_connection.cursor()
+        # Connect to master database to load master data
+        master_conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_MASTER_DATABASE,
+            user=PG_USER,
+            password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE
+        )
+        cursor = master_conn.cursor()
         
         # Load factories
         cursor.execute("SELECT * FROM factories")
@@ -207,16 +277,25 @@ def load_master_data():
                                    for row in cursor.fetchall()]
         
         cursor.close()
+        master_conn.close()
         
-        logger.info(f"Master data loaded: {len(master_data['products'])} products, "
-                   f"{len(master_data['lines'])} lines, {len(master_data['employees'])} employees")
+        logger.info(f"Master data loaded successfully from {PG_MASTER_DATABASE}:")
+        logger.info(f"  Factories: {len(master_data.get('factories', []))}")
+        logger.info(f"  Production Lines: {len(master_data.get('lines', []))}")
+        logger.info(f"  Machines: {len(master_data.get('machines', []))}")
+        logger.info(f"  Products: {len(master_data.get('products', []))}")
+        logger.info(f"  Line-Product Mappings: {len(master_data.get('mappings', []))}")
+        logger.info(f"  Employees: {len(master_data.get('employees', []))}")
+        logger.info(f"  Customers: {len(master_data.get('customers', []))}")
+        logger.info(f"  Shifts: {len(master_data.get('shifts', []))}")
         
         # Initialize counters based on existing data
         _initialize_counters()
         
         return True
     except Exception as e:
-        logger.error(f"Failed to load master data: {e}")
+        logger.error(f"Failed to load master data from {PG_MASTER_DATABASE}: {e}")
+        logger.error(f"Ensure master data tables exist in database: {PG_MASTER_DATABASE}")
         return False
 
 
@@ -225,28 +304,34 @@ def _initialize_counters():
     try:
         cursor = pg_connection.cursor()
         
-        # Get max IDs from each table
+        # Get max IDs from each table - use MAX of numeric part of ID
         tables = {
-            'work_order': 'work_orders',
-            'operation': 'work_order_operations',
-            'material': 'material_transactions',
-            'inspection': 'quality_inspections',
-            'defect': 'defects',
-            'labor': 'labor_transactions',
-            'downtime': 'downtime_events',
-            'changeover': 'changeover_events',
-            'ebr': 'electronic_batch_records',
-            'schedule': 'production_schedule'
+            'work_order': ('work_orders', 'work_order_id', 'WO'),
+            'operation': ('work_order_operations', 'operation_id', 'OP'),
+            'material': ('material_transactions', 'transaction_id', 'MAT'),
+            'inspection': ('quality_inspections', 'inspection_id', 'INSP'),
+            'defect': ('defects', 'defect_id', 'DEF'),
+            'labor': ('labor_transactions', 'labor_transaction_id', 'LAB'),
+            'downtime': ('downtime_events', 'downtime_id', 'DOWN'),
+            'changeover': ('changeover_events', 'changeover_id', 'CHG'),
+            'ebr': ('electronic_batch_records', 'ebr_id', 'EBR'),
+            'schedule': ('production_schedule', 'schedule_id', 'SCH')
         }
         
-        for key, table in tables.items():
+        for key, (table, id_col, prefix) in tables.items():
             try:
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
-                count = cursor.fetchone()[0]
-                counters[key] = count + 1
-                logger.info(f"Counter {key}: starting at {counters[key]}")
-            except:
-                pass  # Table might not exist yet
+                # Get max numeric value from ID column
+                cursor.execute(f"""
+                    SELECT COALESCE(MAX(CAST(SUBSTRING({id_col} FROM '[0-9]+') AS INTEGER)), 0)
+                    FROM {table}
+                    WHERE {id_col} LIKE '{prefix}-%'
+                """)
+                max_id = cursor.fetchone()[0]
+                counters[key] = max_id + 1
+                logger.info(f"Counter {key}: starting at {counters[key]} (max found: {max_id})")
+            except Exception as e:
+                logger.warning(f"Could not initialize counter for {key}: {e}")
+                counters[key] = 1
         
         cursor.close()
     except Exception as e:
@@ -397,7 +482,8 @@ def flush_buffers():
         
     except Exception as e:
         logger.error(f"Error flushing buffers: {e}")
-        pg_connection.rollback()
+        if pg_connection and not pg_connection.closed:
+            pg_connection.rollback()
         return False
 
 
@@ -422,8 +508,13 @@ def get_shift_for_time(factory_id: str, dt: datetime) -> dict:
     for shift in factory_shifts:
         days = shift['days_of_week'].split(',')
         if day_of_week in days:
-            start_hour = int(shift['start_time'].split(':')[0])
-            end_hour = int(shift['end_time'].split(':')[0])
+            # Handle both string and datetime.time objects
+            if isinstance(shift['start_time'], str):
+                start_hour = int(shift['start_time'].split(':')[0])
+                end_hour = int(shift['end_time'].split(':')[0])
+            else:  # datetime.time object
+                start_hour = shift['start_time'].hour
+                end_hour = shift['end_time'].hour
             
             if start_hour <= end_hour:
                 if start_hour <= hour < end_hour:
@@ -465,103 +556,124 @@ def create_new_work_orders(count: int):
     """Create new work orders"""
     logger.info(f"Creating {count} new work orders...")
     
-    for _ in range(count):
-        # Select random line-product mapping
-        mapping = random.choice(master_data['mappings'])
-        line_id = mapping['line_id']
-        product_id = mapping['product_id']
-        factory_id = mapping['factory_id']
-        
-        # Get product details
-        product = next(p for p in master_data['products'] if p['product_id'] == product_id)
-        
-        # Customer (80% customer orders, 20% stock)
-        customer_id = random.choice(master_data['customers'])['customer_id'] if random.random() < 0.8 else None
-        
-        # Quantities
-        planned_qty = random.randint(50, 500)
-        
-        # Timing
-        now = datetime.now()
-        start_hour = random.randint(now.hour, min(now.hour + 2, 23))
-        planned_start = now.replace(hour=start_hour, minute=random.randint(0, 59), second=0, microsecond=0)
-        
-        # Duration
-        cycle_time = product['standard_cycle_time_seconds']
-        estimated_minutes = (planned_qty * cycle_time) / 60
-        setup_time = random.randint(30, 90)
-        total_minutes = int(estimated_minutes + setup_time)
-        
-        planned_end = planned_start + timedelta(minutes=total_minutes)
-        
-        # Batch/lot numbers
-        batch_number = f"BATCH-{now.strftime('%Y%m%d')}-{counters['work_order']:04d}"
-        lot_number = f"LOT-{factory_id[-3:]}-{counters['work_order']:05d}"
-        
-        # Create work order
-        work_order = {
-            'work_order_id': generate_id('WO', 'work_order'),
-            'work_order_number': f"WO-{now.strftime('%Y%m%d')}-{counters['work_order']-1:04d}",
-            'product_id': product_id,
-            'customer_id': customer_id,
-            'sales_order_number': f"SO-{random.randint(10000, 99999)}" if customer_id else None,
-            'factory_id': factory_id,
-            'line_id': line_id,
-            'planned_quantity': planned_qty,
-            'unit_of_measure': 'EA',
-            'priority': random.randint(1, 10),
-            'planned_start_date': planned_start.strftime('%Y-%m-%d %H:%M:%S'),
-            'planned_end_date': planned_end.strftime('%Y-%m-%d %H:%M:%S'),
-            'scheduled_start_time': planned_start.strftime('%Y-%m-%d %H:%M:%S'),
-            'scheduled_end_time': planned_end.strftime('%Y-%m-%d %H:%M:%S'),
-            'actual_start_time': None,
-            'actual_end_time': None,
-            'produced_quantity': 0,
-            'good_quantity': 0,
-            'rejected_quantity': 0,
-            'scrapped_quantity': 0,
-            'rework_quantity': 0,
-            'status': 'scheduled',
-            'quality_status': 'pending',
-            'quality_hold': False,
-            'planned_cycle_time_seconds': cycle_time,
-            'actual_cycle_time_seconds': None,
-            'setup_time_minutes': setup_time,
-            'run_time_minutes': None,
-            'downtime_minutes': 0,
-            'yield_percentage': None,
-            'first_pass_yield_percentage': None,
-            'standard_cost_per_unit': round(random.uniform(10, 100), 2),
-            'actual_cost_per_unit': None,
-            'total_material_cost': None,
-            'total_labor_cost': None,
-            'total_overhead_cost': None,
-            'batch_number': batch_number,
-            'lot_number': lot_number,
-            'expiry_date': (now + timedelta(days=365)).strftime('%Y-%m-%d'),
-            'electronic_batch_record_id': None,
-            'requires_validation': False,
-            'validation_status': None,
-            'parent_work_order_id': None,
-            'erp_order_id': f"ERP-{random.randint(100000, 999999)}",
-            'created_by': random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] in ['supervisor', 'manager']]),
-            'created_at': now.strftime('%Y-%m-%d %H:%M:%S'),
-            'updated_at': now.strftime('%Y-%m-%d %H:%M:%S'),
-            'completed_by': None,
-            'closed_at': None
-        }
-        
-        buffers['work_orders'].append(work_order)
-        stats['work_orders_created'] += 1
-        
-        # Create schedule entry
-        _create_schedule_entry(work_order)
+    if not master_data['mappings']:
+        logger.error("No line-product mappings available, cannot create work orders")
+        return
+    
+    for i in range(count):
+        mapping = None
+        product = None
+        try:
+            # Select random line-product mapping
+            mapping = random.choice(master_data['mappings'])
+            line_id = mapping['line_id']
+            product_id = mapping['product_id']
+            factory_id = mapping['factory_id']
+            
+            # Get product details
+            product = next(p for p in master_data['products'] if p['product_id'] == product_id)
+            
+            # Customer (80% customer orders, 20% stock)
+            customer_id = random.choice(master_data['customers'])['customer_id'] if (random.random() < 0.8 and master_data['customers']) else None
+            
+            # Quantities
+            planned_qty = random.randint(50, 500)
+            
+            # Timing
+            now = datetime.now()
+            start_hour = random.randint(now.hour, min(now.hour + 2, 23))
+            planned_start = now.replace(hour=start_hour, minute=random.randint(0, 59), second=0, microsecond=0)
+            
+            # Duration
+            cycle_time = product['standard_cycle_time_seconds']
+            estimated_minutes = (planned_qty * cycle_time) / 60
+            setup_time = random.randint(30, 90)
+            total_minutes = int(estimated_minutes + setup_time)
+            
+            planned_end = planned_start + timedelta(minutes=total_minutes)
+            
+            # Batch/lot numbers
+            batch_number = f"BATCH-{now.strftime('%Y%m%d')}-{counters['work_order']:04d}"
+            lot_number = f"LOT-{factory_id[-3:]}-{counters['work_order']:05d}"
+            
+            # Create work order
+            work_order = {
+                'work_order_id': generate_id('WO', 'work_order'),
+                'work_order_number': f"WO-{now.strftime('%Y%m%d')}-{counters['work_order']-1:04d}",
+                'product_id': product_id,
+                'customer_id': customer_id,
+                'sales_order_number': f"SO-{random.randint(10000, 99999)}" if customer_id else None,
+                'factory_id': factory_id,
+                'line_id': line_id,
+                'planned_quantity': planned_qty,
+                'unit_of_measure': 'EA',
+                'priority': random.randint(1, 10),
+                'planned_start_date': planned_start.strftime('%Y-%m-%d %H:%M:%S'),
+                'planned_end_date': planned_end.strftime('%Y-%m-%d %H:%M:%S'),
+                'scheduled_start_time': planned_start.strftime('%Y-%m-%d %H:%M:%S'),
+                'scheduled_end_time': planned_end.strftime('%Y-%m-%d %H:%M:%S'),
+                'actual_start_time': None,
+                'actual_end_time': None,
+                'produced_quantity': 0,
+                'good_quantity': 0,
+                'rejected_quantity': 0,
+                'scrapped_quantity': 0,
+                'rework_quantity': 0,
+                'status': 'scheduled',
+                'quality_status': 'pending',
+                'quality_hold': False,
+                'planned_cycle_time_seconds': cycle_time,
+                'actual_cycle_time_seconds': None,
+                'setup_time_minutes': setup_time,
+                'run_time_minutes': None,
+                'downtime_minutes': 0,
+                'yield_percentage': None,
+                'first_pass_yield_percentage': None,
+                'standard_cost_per_unit': round(random.uniform(10, 100), 2),
+                'actual_cost_per_unit': None,
+                'total_material_cost': None,
+                'total_labor_cost': None,
+                'total_overhead_cost': None,
+                'batch_number': batch_number,
+                'lot_number': lot_number,
+                'expiry_date': (now + timedelta(days=365)).strftime('%Y-%m-%d'),
+                'electronic_batch_record_id': None,
+                'requires_validation': False,
+                'validation_status': None,
+                'parent_work_order_id': None,
+                'erp_order_id': f"ERP-{random.randint(100000, 999999)}",
+                'created_by': random.choice(([e['employee_id'] for e in master_data['employees'] if e['role'] in ['supervisor', 'manager']] or [master_data['employees'][0]['employee_id']]) if master_data['employees'] else ['EMP-000001']),
+                'created_at': now.strftime('%Y-%m-%d %H:%M:%S'),
+                'updated_at': now.strftime('%Y-%m-%d %H:%M:%S'),
+                'completed_by': None,
+                'closed_at': None
+            }
+            
+            buffers['work_orders'].append(work_order)
+            stats['work_orders_created'] += 1
+            
+            # Create schedule entry
+            _create_schedule_entry(work_order)
+            
+        except IndexError as e:
+            logger.error(f"IndexError creating work order {i+1}/{count}: {e}")
+            logger.error(f"Mapping: {mapping}, Product: {product}")
+            logger.error(f"Employees count: {len(master_data.get('employees', []))}")
+            logger.error(f"Supervisors/managers: {len([e for e in master_data.get('employees', []) if e.get('role') in ['supervisor', 'manager']])}")
+            continue
+        except Exception as e:
+            logger.error(f"Error creating work order {i+1}/{count}: {e}", exc_info=True)
+            continue
     
     logger.info(f"Created {count} work orders")
 
 
 def update_in_progress_orders():
     """Update work orders currently in progress"""
+    if not check_connection():
+        logger.error("Database connection unavailable")
+        return
+    
     try:
         cursor = pg_connection.cursor()
         
@@ -628,11 +740,16 @@ def update_in_progress_orders():
         
     except Exception as e:
         logger.error(f"Error updating in-progress orders: {e}")
-        pg_connection.rollback()
+        if pg_connection and not pg_connection.closed:
+            pg_connection.rollback()
 
 
 def start_scheduled_orders():
     """Start orders that are scheduled for now"""
+    if not check_connection():
+        logger.error("Database connection unavailable")
+        return
+    
     try:
         cursor = pg_connection.cursor()
         
@@ -677,11 +794,16 @@ def start_scheduled_orders():
         
     except Exception as e:
         logger.error(f"Error starting scheduled orders: {e}")
-        pg_connection.rollback()
+        if pg_connection and not pg_connection.closed:
+            pg_connection.rollback()
 
 
 def complete_finished_orders():
     """Complete orders that have reached their end time"""
+    if not check_connection():
+        logger.error("Database connection unavailable")
+        return
+    
     try:
         cursor = pg_connection.cursor()
         
@@ -754,7 +876,7 @@ def complete_finished_orders():
                   rejected_qty, scrapped_qty, rework_qty, round(yield_pct, 2), 
                   round(fpyield_pct, 2), actual_cycle_time, run_time, downtime,
                   actual_cost_per_unit, material_cost, labor_cost, overhead_cost,
-                  random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] == 'supervisor']),
+                  random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] == 'supervisor'] or [master_data['employees'][0]['employee_id']]),
                   now.strftime('%Y-%m-%d %H:%M:%S'), wo['work_order_id']))
             
             # Final quality inspection
@@ -775,16 +897,23 @@ def complete_finished_orders():
         
     except Exception as e:
         logger.error(f"Error completing orders: {e}")
-        pg_connection.rollback()
+        if pg_connection and not pg_connection.closed:
+            pg_connection.rollback()
 
 
 def _create_schedule_entry(wo: dict):
     """Create production schedule entry"""
+    # Handle both string and datetime objects for planned_start_date
+    if isinstance(wo['planned_start_date'], str):
+        planned_start = datetime.strptime(wo['planned_start_date'], '%Y-%m-%d %H:%M:%S')
+    else:
+        planned_start = wo['planned_start_date']
+    
     schedule = {
         'schedule_id': generate_id('SCH', 'schedule'),
-        'schedule_date': datetime.strptime(wo['planned_start_date'], '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d'),
-        'schedule_week': datetime.strptime(wo['planned_start_date'], '%Y-%m-%d %H:%M:%S').isocalendar()[1],
-        'shift_id': get_shift_for_time(wo['factory_id'], datetime.strptime(wo['planned_start_date'], '%Y-%m-%d %H:%M:%S'))['shift_id'],
+        'schedule_date': planned_start.strftime('%Y-%m-%d'),
+        'schedule_week': planned_start.isocalendar()[1],
+        'shift_id': get_shift_for_time(wo['factory_id'], planned_start)['shift_id'],
         'line_id': wo['line_id'],
         'factory_id': wo['factory_id'],
         'work_order_id': wo['work_order_id'],
@@ -858,7 +987,7 @@ def _record_material_transaction(wo: dict):
             'certificate_of_analysis': f"COA-{random.randint(10000, 99999)}" if mat_type == 'raw_material' else None,
             'parent_lot_number': None,
             'consumed_by_lot_number': wo['lot_number'],
-            'performed_by': random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] == 'operator']),
+            'performed_by': random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] == 'operator'] or [master_data['employees'][0]['employee_id']]),
             'requires_documentation': mat_type == 'raw_material',
             'documentation_complete': True,
             'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -874,6 +1003,7 @@ def _record_labor_transaction(wo: dict):
     operators = get_operators_for_shift(wo['line_id'], shift['shift_name'])
     
     if not operators:
+        logger.warning(f"No operators found for line {wo['line_id']}, shift {shift['shift_name']}")
         return
     
     operator = random.choice(operators)
@@ -982,7 +1112,7 @@ def _perform_final_inspection(wo: dict, produced_qty: int, good_qty: int):
         'lot_number': wo['lot_number'],
         'batch_number': wo['batch_number'],
         'serial_number': None,
-        'inspector_id': random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] == 'quality_inspector']),
+        'inspector_id': random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] == 'quality_inspector'] or [master_data['employees'][0]['employee_id']]),
         'shift_id': get_shift_for_time(wo['factory_id'], datetime.now())['shift_id'],
         'inspection_result': result,
         'defects_found': defects,
@@ -993,7 +1123,7 @@ def _perform_final_inspection(wo: dict, produced_qty: int, good_qty: int):
         'specification_values': None,
         'disposition': disposition,
         'disposition_reason': 'Quality standards met' if inspection_passed else 'Dimensional non-conformance',
-        'disposition_by': random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] == 'quality_inspector']),
+        'disposition_by': random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] == 'quality_inspector'] or [master_data['employees'][0]['employee_id']]),
         'ncr_number': f"NCR-{random.randint(1000, 9999)}" if not inspection_passed else None,
         'corrective_action_required': not inspection_passed,
         'inspection_plan_id': f"IP-{random.randint(100, 999)}",
@@ -1013,6 +1143,19 @@ def _generate_ebr(wo: dict):
     """Generate electronic batch record"""
     now = datetime.now()
     
+    # Handle datetime objects
+    if isinstance(wo['actual_start_time'], str):
+        manufacturing_date = datetime.strptime(wo['actual_start_time'], '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d')
+    else:
+        manufacturing_date = wo['actual_start_time'].strftime('%Y-%m-%d')
+    
+    if isinstance(wo['expiry_date'], str):
+        expiry_date = wo['expiry_date']
+        retest_date = (datetime.strptime(wo['expiry_date'], '%Y-%m-%d') - timedelta(days=30)).strftime('%Y-%m-%d')
+    else:
+        expiry_date = wo['expiry_date'].strftime('%Y-%m-%d')
+        retest_date = (wo['expiry_date'] - timedelta(days=30)).strftime('%Y-%m-%d')
+    
     ebr = {
         'ebr_id': generate_id('EBR', 'ebr'),
         'batch_number': wo['batch_number'],
@@ -1021,20 +1164,20 @@ def _generate_ebr(wo: dict):
         'batch_size': wo['produced_quantity'],
         'formula_id': f"FORM-{random.randint(100, 999)}",
         'formula_version': f"v{random.randint(1, 5)}.{random.randint(0, 9)}",
-        'manufacturing_date': datetime.strptime(wo['actual_start_time'], '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d'),
-        'expiration_date': wo['expiry_date'],
-        'retest_date': (datetime.strptime(wo['expiry_date'], '%Y-%m-%d') - timedelta(days=30)).strftime('%Y-%m-%d'),
+        'manufacturing_date': manufacturing_date,
+        'expiration_date': expiry_date,
+        'retest_date': retest_date,
         'factory_id': wo['factory_id'],
         'manufacturing_area': f"AREA-{wo['line_id'][-3:]}",
         'record_status': 'approved',
         'prepared_by': wo['created_by'],
         'prepared_at': now.strftime('%Y-%m-%d %H:%M:%S'),
-        'reviewed_by': random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] == 'supervisor']),
+        'reviewed_by': random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] == 'supervisor'] or [master_data['employees'][0]['employee_id']]),
         'reviewed_at': (now + timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S'),
-        'approved_by': random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] == 'manager']),
+        'approved_by': random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] == 'manager'] or [master_data['employees'][0]['employee_id']]),
         'approved_at': (now + timedelta(hours=2)).strftime('%Y-%m-%d %H:%M:%S'),
         'release_status': 'released',
-        'released_by': random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] == 'manager']),
+        'released_by': random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] == 'manager'] or [master_data['employees'][0]['employee_id']]),
         'released_at': (now + timedelta(hours=3)).strftime('%Y-%m-%d %H:%M:%S'),
         'has_deviations': False,
         'deviation_count': 0,
@@ -1083,56 +1226,88 @@ def main():
     logger.info("="*80)
     logger.info("GenIMS MES Hourly Production Daemon Starting")
     logger.info("="*80)
+    logger.info(f"Configuration:")
+    logger.info(f"  Database: {PG_DATABASE}")
+    logger.info(f"  Host: {PG_HOST}:{PG_PORT}")
+    logger.info(f"  SSL Mode: {PG_SSL_MODE}")
+    logger.info(f"  Cycle Interval: {CYCLE_INTERVAL_SECONDS}s")
+    logger.info(f"  Batch Size: {BATCH_SIZE}")
+    logger.info(f"  Log File: {log_file}")
+    logger.info("="*80)
     
     # Initialize
     if not initialize_database():
         return 1
     
     if not load_master_data():
+        logger.error("Failed to load master data. Cannot start daemon.")
+        logger.error("Please ensure master data is populated by running: python3 scripts/full_setup.py")
         return 1
     
+    # Validate critical master data
+    if not master_data.get('products'):
+        logger.error("No products found in master data. Cannot create work orders.")
+        logger.error("Please populate products table in genims_master_db.")
+        return 1
+    
+    if not master_data.get('mappings'):
+        logger.error("No line-product mappings found. Cannot assign products to lines.")
+        logger.error("Please populate line_product_mapping table in genims_master_db.")
+        return 1
+    
+    if not master_data.get('employees'):
+        logger.warning("No employees found in master data. Some features may be limited.")
+    
+    logger.info(f"Master data validation passed.")
     logger.info(f"Cycle interval: {CYCLE_INTERVAL_SECONDS} seconds (1 hour)")
     logger.info("Press Ctrl+C to stop")
     logger.info("="*80)
     
+    last_cycle = datetime.now() - timedelta(hours=2)  # Force initial run
+    
     while running:
         try:
-            cycle_start = time.time()
-            current_hour = datetime.now().hour
-            current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            now = datetime.now()
             
-            logger.info(f"\n{'='*80}")
-            logger.info(f"Hourly Production Cycle - {current_time}")
-            logger.info(f"Hour: {current_hour:02d}:00")
-            logger.info(f"{'='*80}")
+            # Run cycle every hour
+            if (now - last_cycle).total_seconds() >= CYCLE_INTERVAL_SECONDS:
+                current_time = now.strftime('%Y-%m-%d %H:%M:%S')
+                
+                logger.info(f"\n{'='*80}")
+                logger.info(f"Hourly Production Cycle - {current_time}")
+                logger.info(f"Hour: {now.hour:02d}:00")
+                logger.info(f"{'='*80}")
+                
+                # Ensure connection is alive
+                if not check_connection():
+                    logger.error("Failed to establish database connection for this cycle")
+                    time.sleep(60)  # Wait 1 minute before retrying
+                    continue
+                
+                # Determine activity level
+                new_orders = determine_hourly_capacity()
+                logger.info(f"Activity level: {new_orders} new orders this hour")
+                
+                # Execute production cycle
+                create_new_work_orders(new_orders)
+                start_scheduled_orders()
+                update_in_progress_orders()
+                complete_finished_orders()
+                
+                # Flush all buffers
+                flush_buffers()
+                
+                stats['cycles_completed'] += 1
+                last_cycle = now
+                
+                logger.info(f"Cycle complete. Next cycle in {CYCLE_INTERVAL_SECONDS}s")
+                
+                # Print stats every 6 hours
+                if stats['cycles_completed'] % 6 == 0:
+                    print_hourly_stats()
             
-            # Determine activity level
-            new_orders = determine_hourly_capacity()
-            logger.info(f"Activity level: {new_orders} new orders this hour")
-            
-            # Execute production cycle
-            create_new_work_orders(new_orders)
-            start_scheduled_orders()
-            update_in_progress_orders()
-            complete_finished_orders()
-            
-            # Flush all buffers
-            flush_buffers()
-            
-            stats['cycles_completed'] += 1
-            
-            # Print stats every 6 hours
-            if stats['cycles_completed'] % 6 == 0:
-                print_hourly_stats()
-            
-            # Sleep until next hour
-            elapsed = time.time() - cycle_start
-            sleep_time = max(0, CYCLE_INTERVAL_SECONDS - elapsed)
-            
-            logger.info(f"Cycle complete in {elapsed:.1f}s. Sleeping {sleep_time:.0f}s until next hour...")
-            
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+            # Check every minute (keeps connection alive)
+            time.sleep(60)
             
         except Exception as e:
             logger.error(f"Error in main loop: {e}", exc_info=True)

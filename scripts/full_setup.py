@@ -20,10 +20,15 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).parent))
 from data_registry import DataRegistry, get_registry
 
-# Load .env file
-env_path = Path(__file__).parent.parent / '.env'
+# Load config.env file from scripts directory
+env_path = Path(__file__).parent / 'config.env'
 if env_path.exists():
     load_dotenv(env_path)
+else:
+    # Fallback to .env in root
+    env_path = Path(__file__).parent.parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
 
 # Setup logging
 logging.basicConfig(
@@ -36,9 +41,9 @@ logger = logging.getLogger(__name__)
 # Configuration - Load from .env with fallback defaults
 DB_HOST = os.getenv('POSTGRES_HOST', 'localhost')
 DB_PORT = int(os.getenv('POSTGRES_PORT', '5432'))
-DB_USER = os.getenv('POSTGRES_USERNAME', 'postgres')
+DB_USER = os.getenv('POSTGRES_USER', 'postgres')  # Fixed: was POSTGRES_USERNAME
 DB_PASSWORD = os.getenv('POSTGRES_PASSWORD', 'postgres')
-DB_ADMIN = 'postgres'
+DB_ADMIN_DB = 'postgres'  # Admin database name (not user)
 
 # Database configurations with generators for all 13 databases
 DATABASES = {
@@ -177,27 +182,41 @@ class GenIMSSetup:
                 port=DB_PORT,
                 user=DB_USER,
                 password=DB_PASSWORD,
-                dbname=DB_ADMIN
+                dbname=DB_ADMIN_DB,
+                sslmode='require'
             )
             conn.autocommit = True
             cursor = conn.cursor()
             
             for db_name in DATABASES.keys():
                 try:
+                    # Step 1: Terminate all connections to the database
+                    cursor.execute(f"""
+                        SELECT pg_terminate_backend(pid) 
+                        FROM pg_stat_activity 
+                        WHERE datname = %s AND pid <> pg_backend_pid();
+                    """, (db_name,))
+                    
+                    # Step 2: Drop database
                     cursor.execute(f"DROP DATABASE IF EXISTS {db_name};")
                     logger.info(f"  ✓ Dropped existing: {db_name}")
-                except:
-                    pass
+                except Exception as e:
+                    if 'does not exist' in str(e):
+                        logger.info(f"  ⊘ Does not exist: {db_name}")
+                    else:
+                        logger.warning(f"  ⚠ Drop failed for {db_name}: {str(e)[:80]}")
                 
                 try:
+                    # Step 3: Create fresh database
                     cursor.execute(f"CREATE DATABASE {db_name};")
                     logger.info(f"  ✓ Created: {db_name}")
                     self.stats['databases_created'] += 1
                 except psycopg2.Error as e:
                     if 'already exists' not in str(e):
                         raise
-                    logger.info(f"  ✓ Already exists: {db_name}")
+                    logger.warning(f"  ⚠ Already exists (drop failed): {db_name}")
                     self.stats['databases_created'] += 1
+                    self.stats['errors'].append(f"{db_name}: Not dropped cleanly")
             
             cursor.close()
             conn.close()
@@ -236,7 +255,8 @@ class GenIMSSetup:
                     port=DB_PORT,
                     user=DB_USER,
                     password=DB_PASSWORD,
-                    dbname=db_name
+                    dbname=db_name,
+                    sslmode='require'
                 )
                 cursor = conn.cursor()
                 
@@ -590,7 +610,8 @@ class GenIMSSetup:
                     port=DB_PORT,
                     user=DB_USER,
                     password=DB_PASSWORD,
-                    dbname=db_name
+                    dbname=db_name,
+                    sslmode='require'
                 )
                 conn.autocommit = True
                 cursor = conn.cursor()
@@ -646,12 +667,12 @@ class GenIMSSetup:
         success = True
         
         # Step 1: Create databases
-        if not self.create_databases():
-            success = False
+        # if not self.create_databases():
+        #     success = False
         
         # Step 2: Load schemas
-        if not self.load_schemas():
-            success = False
+        # if not self.load_schemas():
+        #     success = False
         
         # Step 3a: Generate MASTER data first
         if not self.generate_master_data():

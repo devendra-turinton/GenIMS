@@ -5,12 +5,19 @@ Continuous customer relationship management operations
 """
 
 import sys
+import os
 import time
 import logging
 import signal
 from datetime import datetime, timedelta
 import random
 import json
+from dotenv import load_dotenv
+
+# Load environment variables
+env_file = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'config.env')
+if os.path.exists(env_file):
+    load_dotenv(env_file)
 
 try:
     import psycopg2
@@ -21,25 +28,31 @@ except ImportError:
     print("WARNING: psycopg2 not installed")
 
 # Configuration
-PG_HOST = 'localhost'
-PG_PORT = 5432
-PG_DATABASE = 'genims_db'
-PG_USER = 'genims_user'
-PG_PASSWORD = 'genims_password'
+PG_HOST = os.getenv('POSTGRES_HOST', 'localhost')
+PG_PORT = int(os.getenv('POSTGRES_PORT', '5432'))
+PG_DATABASE = os.getenv('DB_CRM', 'genims_crm_db')
+PG_USER = os.getenv('POSTGRES_USER', 'postgres')
+PG_PASSWORD = os.getenv('POSTGRES_PASSWORD', '')
+PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
 
 # CRM Configuration
-CYCLE_INTERVAL_SECONDS = 1800  # Run every 30 minutes
-LEAD_SCORE_THRESHOLD = 60  # Auto-qualify leads above this score
+CYCLE_INTERVAL_SECONDS = 900  # Run every 15 minutes
 
+# Logging configuration
+log_dir = os.getenv('DAEMON_LOG_DIR', os.path.join(os.path.dirname(__file__), '..', '..', 'logs'))
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, 'crm_daemon.log')
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/crm_daemon.log'),
+        logging.FileHandler(log_file),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('CRMDaemon')
+logger = logging.getLogger('Crm')
+
+
 
 running = True
 pg_connection = None
@@ -70,7 +83,8 @@ def initialize_database():
     try:
         pg_connection = psycopg2.connect(
             host=PG_HOST, port=PG_PORT, database=PG_DATABASE,
-            user=PG_USER, password=PG_PASSWORD
+            user=PG_USER, password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE
         )
         pg_connection.autocommit = False
         logger.info("PostgreSQL connected")

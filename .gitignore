@@ -87,3 +87,8 @@ zookeeper-data/
 # Backup files
 *.backup
 *.bak
+
+__pycache__/
+.daemon_pids/
+$BASE_DIR/
+$LOGS_DIR/

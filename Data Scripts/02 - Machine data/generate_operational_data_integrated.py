@@ -135,7 +135,7 @@ class OperationsDataGenerator:
         print("Generating sensor data...")
         
         end_time = datetime.now()
-        start_time = end_time - timedelta(days=7)
+        start_time = end_time - timedelta(days=14)
         sensor_data_id = 1  # Track BIGSERIAL primary key
         
         for sensor in self.sensors:
@@ -179,7 +179,7 @@ class OperationsDataGenerator:
         print("Generating SCADA data...")
         
         end_time = datetime.now()
-        start_time = end_time - timedelta(days=7)
+        start_time = end_time - timedelta(days=14)
         scada_id = 1  # Track BIGSERIAL primary key
         
         # Build machine-indexed fault list for fast lookup
@@ -407,7 +407,7 @@ class OperationsDataGenerator:
         print("Generating sensor health metrics...")
         
         end_time = datetime.now()
-        start_time = end_time - timedelta(days=7)
+        start_time = end_time - timedelta(days=14)
         health_id = 1  # Track BIGSERIAL primary key
         
         for sensor in self.sensors:

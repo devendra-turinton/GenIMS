@@ -6,11 +6,19 @@ SPC tracking, NCR management, and quality metrics calculation
 """
 
 import sys
+import os
 import time
 import logging
 import signal
 from datetime import datetime, timedelta
 import random
+import json
+from dotenv import load_dotenv
+
+# Load environment variables
+env_file = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'config.env')
+if os.path.exists(env_file):
+    load_dotenv(env_file)
 
 try:
     import psycopg2
@@ -21,24 +29,31 @@ except ImportError:
     print("WARNING: psycopg2 not installed")
 
 # Configuration
-PG_HOST = 'localhost'
-PG_PORT = 5432
-PG_DATABASE = 'genims_db'
-PG_USER = 'genims_user'
-PG_PASSWORD = 'genims_password'
+PG_HOST = os.getenv('POSTGRES_HOST', 'localhost')
+PG_PORT = int(os.getenv('POSTGRES_PORT', '5432'))
+PG_DATABASE = os.getenv('DB_QUALITY', 'genims_quality_db')
+PG_USER = os.getenv('POSTGRES_USER', 'postgres')
+PG_PASSWORD = os.getenv('POSTGRES_PASSWORD', '')
+PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
 
-# Daemon Configuration
-CYCLE_INTERVAL_SECONDS = 300  # Run every 5 minutes
+# QMS Configuration
+CYCLE_INTERVAL_SECONDS = 1200  # Run every 20 minutes
 
+# Logging configuration
+log_dir = os.getenv('DAEMON_LOG_DIR', os.path.join(os.path.dirname(__file__), '..', '..', 'logs'))
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, 'qms_daemon.log')
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/qms_daemon.log'),
+        logging.FileHandler(log_file),
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('QMSDaemon')
+logger = logging.getLogger('Qms')
+
+
 
 running = True
 pg_connection = None
@@ -69,7 +84,8 @@ def initialize_database():
     try:
         pg_connection = psycopg2.connect(
             host=PG_HOST, port=PG_PORT, database=PG_DATABASE,
-            user=PG_USER, password=PG_PASSWORD
+            user=PG_USER, password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE
         )
         pg_connection.autocommit = False
         logger.info("PostgreSQL connected")
@@ -351,6 +367,7 @@ def integrate_mes_quality_inspections():
         for insp_id, wo_id, material_id, result, defect_count, defect_type, insp_date in failed_inspections:
             # Create NCR
             ncr_id = generate_id('NCR')
+            ncr_number = f'NCR-{datetime.now().strftime("%Y%m%d")}-{random.randint(1, 9999):04d}'
             cursor.execute("""
                 INSERT INTO ncr_headers (
                     ncr_id, ncr_number, source_type, source_document_id,
@@ -359,7 +376,7 @@ def integrate_mes_quality_inspections():
                     defect_severity, disposition, ncr_status,
                     priority, created_at
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (ncr_id, f'NCR-{datetime.now().strftime("%Y%m%d")}-{self.counters.get("ncr", 1):04d}',
+            """, (ncr_id, ncr_number,
                   'in_process', insp_id, insp_date, 'MES_SYSTEM',
                   material_id, defect_count, defect_type or 'quality',
                   f'Failed quality inspection from MES (WO: {wo_id})',
