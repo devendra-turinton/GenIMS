@@ -328,7 +328,7 @@ class QMSDataGenerator:
         """Generate NCR defect details"""
         print("Generating NCR defect details...")
         
-        for ncr in self.data['ncr_headers'][:20]:
+        for ncr in self.data['ncr_headers']:
             for i in range(random.randint(1, 3)):
                 detail = {
                     'defect_detail_id': f"DEFDET-{ncr['ncr_id']}-{i}",
@@ -353,7 +353,7 @@ class QMSDataGenerator:
         
         for day in range(0, days, 7):
             if len(self.data['ncr_headers']) > 0:
-                source_ncr = random.choice(self.data['ncr_headers'][:10])
+                source_ncr = random.choice(self.data['ncr_headers'])
                 
                 # 70% of CAPAs are completed/verified (improve from previous 40%)
                 is_completed = random.random() < 0.70
@@ -441,7 +441,7 @@ class QMSDataGenerator:
         """Generate control plans"""
         print("Generating control plans...")
         
-        for i, product in enumerate(self.products[:20]):
+        for i, product in enumerate(self.products):
             plan = {
                 'control_plan_id': f"CTRLPLAN-{i+1:06d}",
                 'control_plan_number': f"CP-{product.get('product_code', f'PRD{i+1}')}",
@@ -557,7 +557,7 @@ class QMSDataGenerator:
                 'accuracy': f'±{random.choice([0.01, 0.05, 0.1])} mm',
                 'location': random.choice([f.get('factory_id', 'FAC-001') for f in self.factories] + ['FAC-001']),
                 'equipment_status': 'active',
-                'responsible_person': random.choice([e.get('employee_id', 'EMP-000001') for e in self.employees[:10]] + ['EMP-000001']),
+                'responsible_person': random.choice([e.get('employee_id', 'EMP-000001') for e in self.employees] + ['EMP-000001']),
                 'locked_out': False,
                 'purchase_cost': round(random.uniform(500, 5000), 2),
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -605,7 +605,7 @@ class QMSDataGenerator:
         print("Generating calibration alerts...")
         alert_counter = 1
         
-        for equipment in self.data['measuring_equipment'][:10]:
+        for equipment in self.data['measuring_equipment']:
             if random.random() > 0.6:
                 alert = {
                     'alert_id': f"ALERT-{alert_counter:06d}",
@@ -625,7 +625,7 @@ class QMSDataGenerator:
         """Generate SPC control charts"""
         print("Generating SPC control charts...")
         
-        for i, plan in enumerate(self.data['control_plans'][:15]):
+        for i, plan in enumerate(self.data['control_plans']):
             chart = {
                 'chart_id': f"SPC-{i+1:06d}",
                 'chart_number': f"CHART-{i+1:05d}",
@@ -782,7 +782,7 @@ class QMSDataGenerator:
         print("Generating document revisions...")
         rev_counter = 1
         
-        for doc in self.data['quality_documents'][:15]:
+        for doc in self.data['quality_documents']:
             for rev_num in range(1, random.randint(2, 4)):
                 # 85% of revisions are approved
                 is_approved = random.random() < 0.85

@@ -445,8 +445,8 @@ class FinancialSyncDataGenerator:
             'gl_posting_rules': self.posting_rules,
             'cost_centers': self.cost_centers,
             'fiscal_years': self.fiscal_years,
-            'fiscal_periods': self.fiscal_periods[:24],
-            'exchange_rates': self.exchange_rates[:50],
+            'fiscal_periods': self.fiscal_periods,
+            'exchange_rates': self.exchange_rates,
             'budget_headers': [b for b in self.budgets]
         }
         
@@ -458,7 +458,7 @@ class FinancialSyncDataGenerator:
         # FILE 2: Inventory sync data (for genims_erp_wms_sync_db)
         inventory_sync_data = {
             'inventory_sync_mappings': self.sync_mappings,
-            'inventory_snapshot': self.inventory_snapshot[:50]
+            'inventory_snapshot': self.inventory_snapshot
         }
         
         inventory_file = Path(__file__).parent / 'genims_inventory_sync_data.json'

@@ -657,7 +657,7 @@ class HCMDataGenerator:
         """Generate employee onboarding records"""
         print("Generating employee onboarding records...")
         
-        for employee in self.employees[:40]:
+        for employee in self.employees:
             record = {
                 'onboarding_id': self.generate_id('OB', 'onboard'),
                 'employee_id': employee['employee_id'],
@@ -834,15 +834,15 @@ class HCMDataGenerator:
         print("Generating employee employment history...")
         history = []
         
-        for employee in self.employees[:50]:
+        for employee in self.employees:
             hist = {
                 'history_id': self.generate_id('EH', 'hist'),
                 'employee_id': employee['employee_id'],
                 'change_type': random.choice(['promotion', 'transfer', 'demotion']),
-                'previous_position_id': random.choice([p['position_id'] for p in self.positions[:10]]),
-                'previous_department_id': random.choice([d['department_id'] for d in self.departments[:3]]),
-                'new_position_id': random.choice([p['position_id'] for p in self.positions[:10]]),
-                'new_department_id': random.choice([d['department_id'] for d in self.departments[:3]]),
+                'previous_position_id': random.choice([p['position_id'] for p in self.positions]),
+                'previous_department_id': random.choice([d['department_id'] for d in self.departments]),
+                'new_position_id': random.choice([p['position_id'] for p in self.positions]),
+                'new_department_id': random.choice([d['department_id'] for d in self.departments]),
                 'effective_date': (datetime.now() - timedelta(days=random.randint(30, 365))).strftime('%Y-%m-%d'),
                 'reason': random.choice(['Performance', 'Reorganization', 'Personal request']),
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -857,7 +857,7 @@ class HCMDataGenerator:
         print("Generating employee shifts...")
         shifts = []
         
-        for employee in self.employees[:60]:
+        for employee in self.employees:
             shift = {
                 'employee_shift_id': self.generate_id('ES', 'emp_shift'),
                 'employee_id': employee['employee_id'],
@@ -908,7 +908,7 @@ class HCMDataGenerator:
         goals = []
         start_date_base = datetime.now() - timedelta(days=180)
         
-        for employee in self.employees[:70]:
+        for employee in self.employees:
             for i in range(random.randint(1, 3)):
                 goal_start = start_date_base + timedelta(days=random.randint(0, 180))
                 goal = {
@@ -934,7 +934,7 @@ class HCMDataGenerator:
         print("Generating training requirements...")
         requirements = []
         
-        for role in self.job_roles[:20]:
+        for role in self.job_roles:
             for i in range(random.randint(2, 4)):
                 req = {
                     'requirement_id': self.generate_id('TR', 'req'),
@@ -956,7 +956,7 @@ class HCMDataGenerator:
         paths = []
         counter = 0
         
-        for i, role in enumerate(self.job_roles[:15]):
+        for i, role in enumerate(self.job_roles):
             counter += 1
             path = {
                 'path_id': self.generate_id('CP', 'path'),
@@ -979,10 +979,10 @@ class HCMDataGenerator:
         print("Generating succession planning...")
         plans = []
         
-        for role in self.job_roles[:10]:
+        for role in self.job_roles:
             plan = {
                 'plan_id': self.generate_id('SP', 'plan'),
-                'position_id': random.choice([p['position_id'] for p in self.positions[:10]]),
+                'position_id': random.choice([p['position_id'] for p in self.positions]),
                 'job_role_id': role['role_id'],
                 'role_name': role['role_name'],
                 'current_holder_id': random.choice(self.employees)['employee_id'],
@@ -1056,8 +1056,8 @@ class HCMDataGenerator:
         balances = []
         current_year = datetime.now().year
         
-        for employee in self.employees[:80]:
-            for leave_type in self.leave_types[:4]:
+        for employee in self.employees:
+            for leave_type in self.leave_types:
                 balance = {
                     'balance_id': self.generate_id('LB', 'balance'),
                     'employee_id': employee['employee_id'],
@@ -1082,7 +1082,7 @@ class HCMDataGenerator:
         
         ppe_items = ['Safety Helmet', 'Safety Glasses', 'Hand Gloves', 'Safety Shoes', 'Respirator', 'Safety Vest']
         
-        for role in self.job_roles[:15]:
+        for role in self.job_roles:
             for ppe in random.sample(ppe_items, random.randint(2, 4)):
                 req = {
                     'ppe_requirement_id': self.generate_id('PPE', 'balance'),
@@ -1103,7 +1103,7 @@ class HCMDataGenerator:
         print("Generating employee onboarding...")
         onboarding = []
         
-        for employee in self.employees[:40]:
+        for employee in self.employees:
             record = {
                 'onboarding_id': self.generate_id('OB', 'onboard'),
                 'employee_id': employee['employee_id'],
@@ -1135,9 +1135,9 @@ class HCMDataGenerator:
             'Mentor Assignment'
         ]
         
-        onboarding_records = self.onboarding_history[:40] if hasattr(self, 'onboarding_history') else []
+        onboarding_records = self.onboarding_history if hasattr(self, 'onboarding_history') else []
         
-        for i, onboarding_rec in enumerate(onboarding_records[:40]):
+        for i, onboarding_rec in enumerate(onboarding_records):
             for task in random.sample(onboarding_tasks, random.randint(4, 6)):
                 item = {
                     'item_id': self.generate_id('OBI', 'item'),
@@ -1160,7 +1160,7 @@ class HCMDataGenerator:
         checklists = []
         counter = 0
         
-        for role in self.job_roles[:10]:
+        for role in self.job_roles:
             counter += 1
             checklist = {
                 'checklist_id': self.generate_id('OCL', 'checklist'),
@@ -1194,7 +1194,7 @@ class HCMDataGenerator:
             'Benefits orientation'
         ]
         
-        checklists = self.onboarding_checklists[:10] if hasattr(self, 'onboarding_checklists') else []
+        checklists = self.onboarding_checklists if hasattr(self, 'onboarding_checklists') else []
         
         for checklist in checklists:
             for idx, item_desc in enumerate(random.sample(checklist_items, random.randint(5, 7))):
@@ -1246,7 +1246,7 @@ class HCMDataGenerator:
         print("Generating role skill requirements...")
         requirements = []
         
-        for role in self.job_roles[:20]:
+        for role in self.job_roles:
             for skill in random.sample(self.skills_catalog, min(3, len(self.skills_catalog))):
                 req = {
                     'requirement_id': self.generate_id('RSR', 'balance'),
@@ -1293,7 +1293,7 @@ class HCMDataGenerator:
         kpis = []
         counter = 0
         
-        for employee in self.employees[:60]:
+        for employee in self.employees:
             counter += 1
             kpi = {
                 'kpi_id': self.generate_id('KPI', 'kpi'),
@@ -1360,15 +1360,15 @@ class HCMDataGenerator:
         
         data = {
             # Organization Structure
-            'departments': self.departments[:20],
+            'departments': self.departments,
             'job_roles': self.job_roles,
-            'positions': self.positions[:50],
+            'positions': self.positions,
             
             # Workforce
-            'employees': self.employees[:100],
+            'employees': self.employees,
             'employee_employment_history': employment_history,
-            'employee_skills': self.employee_skills[:100],
-            'employee_certifications': self.certifications[:50],
+            'employee_skills': self.employee_skills,
+            'employee_certifications': self.certifications,
             
             # Assignments & Shifts
             'employee_shifts': self._generate_employee_shifts(),
@@ -1378,21 +1378,21 @@ class HCMDataGenerator:
             # Training & Development
             'training_courses': self.training_courses,
             'training_schedules': self.training_schedules,
-            'training_enrollments': self.training_enrollments[:100],
+            'training_enrollments': self.training_enrollments,
             'training_requirements': self._generate_training_requirements(),
             'career_paths': career_paths,
             
             # Performance & Reviews
-            'performance_reviews': self.performance_reviews[:30],
+            'performance_reviews': self.performance_reviews,
             'performance_kpis': self._generate_performance_kpis(),
             'succession_planning': succession_planning,
             'succession_candidates': succession_candidates,
             
             # Leave & Attendance
             'leave_types': self._generate_leave_types(),
-            'leave_requests': self.leave_requests[:50],
+            'leave_requests': self.leave_requests,
             'employee_leave_balances': employee_leave_balances,
-            'attendance_records': self.attendance_records[:200],
+            'attendance_records': self.attendance_records,
             
             # Safety & Onboarding
             'safety_incidents': self.safety_incidents,

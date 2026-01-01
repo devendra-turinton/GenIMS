@@ -609,7 +609,7 @@ class WMSTMSDataGenerator:
         print("Generating warehouse inventory...")
         inventory = []
         
-        for i, material in enumerate(self.materials[:50]):
+        for i, material in enumerate(self.materials):
             inv = {
                 'inventory_id': self.generate_id('INV', 'wh_inv'),
                 'warehouse_id': random.choice(self.warehouses)['warehouse_id'],
@@ -636,7 +636,7 @@ class WMSTMSDataGenerator:
         print("Generating wave lines...")
         lines = []
         
-        for wave in self.pick_waves[:30]:
+        for wave in self.pick_waves:
             for i in range(random.randint(5, 15)):
                 line = {
                     'wave_line_id': self.generate_id('WL', 'picking'),
@@ -821,7 +821,7 @@ class WMSTMSDataGenerator:
         print("Generating shipment lines...")
         lines = []
         
-        for shipment in self.shipments[:40]:
+        for shipment in self.shipments:
             for i in range(random.randint(1, 5)):
                 line = {
                     'shipment_line_id': self.generate_id('SHL', 'shipment'),
@@ -846,7 +846,7 @@ class WMSTMSDataGenerator:
         print("Generating shipment packages...")
         packages = []
         
-        for shipment in self.shipments[:35]:
+        for shipment in self.shipments:
             for i in range(random.randint(1, 3)):
                 pkg = {
                     'package_id': self.generate_id('PKG', 'shipping'),
@@ -1133,22 +1133,22 @@ class WMSTMSDataGenerator:
             # WMS - Warehouses & Zones & Aisles
             'warehouses': self.warehouses,
             'warehouse_zones': self.zones,
-            'storage_bins': self.bins[:100],
+            'storage_bins': self.bins,
             'warehouse_workers': self.warehouse_workers,
             
             # WMS - Inventory
             'warehouse_inventory': warehouse_inventory,
             
             # WMS - Receiving
-            'receiving_tasks': self.receiving_tasks[:50],
+            'receiving_tasks': self.receiving_tasks,
             
             # WMS - Putaway
-            'putaway_tasks': self.putaway_tasks[:50],
+            'putaway_tasks': self.putaway_tasks,
             
             # WMS - Picking & Wave
             'pick_waves': self.pick_waves,
             'wave_lines': wave_lines,
-            'picking_tasks': self.picking_tasks[:50],
+            'picking_tasks': self.picking_tasks,
             
             # WMS - Packing & Shipping
             'packing_tasks': self.packing_tasks,
@@ -1173,7 +1173,7 @@ class WMSTMSDataGenerator:
             'shipments': self.shipments,
             'shipment_lines': shipment_lines,
             'shipment_packages': shipment_packages,
-            'tracking_events': self.tracking_events[:100],
+            'tracking_events': self.tracking_events,
             
             # TMS - Deliveries & Routes
             'routes': routes,

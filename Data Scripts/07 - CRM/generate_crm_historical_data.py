@@ -718,7 +718,7 @@ class CRMDataGenerator:
         print("Generating contracts...")
         contracts = []
         
-        for i, account in enumerate(self.accounts[:25]):
+        for i, account in enumerate(self.accounts):
             contract = {
                 'contract_id': self.generate_id('CONT', 'activity'),
                 'contract_number': f"CONT-{i+1:06d}",
@@ -831,25 +831,25 @@ class CRMDataGenerator:
             'sales_territories': self.territories,
             
             # Accounts & Contacts
-            'accounts': self.accounts[:50],
+            'accounts': self.accounts,
             'contacts': self.contacts[:100],
             
             # Leads & Activities
-            'leads': self.leads[:100],
+            'leads': self.leads,
             'lead_activities': self.lead_activities[:100],
             'activities': activities,
             
             # Opportunities
-            'opportunities': self.opportunities[:100],
-            'opportunity_products': self.opp_products[:100],
+            'opportunities': self.opportunities,
+            'opportunity_products': self.opp_products,
             'opportunity_stage_history': self.opp_history[:50],
             
             # Quotations
-            'quotations': self.quotations[:50],
-            'quotation_lines': self.quote_lines[:100],
+            'quotations': self.quotations,
+            'quotation_lines': self.quote_lines,
             
             # Cases & Notes
-            'cases': self.cases[:50],
+            'cases': self.cases,
             'case_comments': case_comments,
             'notes': notes,
             'tasks': tasks,

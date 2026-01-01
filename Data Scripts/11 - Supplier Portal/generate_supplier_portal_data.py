@@ -273,8 +273,8 @@ class SupplierPortalDataGenerator:
         """Generate supplier contracts and pricing"""
         print("Generating supplier contracts...")
         
-        # Create contracts for top 10 suppliers
-        for i, supplier in enumerate(self.suppliers[:10]):
+        # Create contracts for top suppliers
+        for i, supplier in enumerate(self.suppliers):
             supplier_id = supplier.get('supplier_id', 'SUP-000001') if isinstance(supplier, dict) else supplier
             start_date = datetime.now() - timedelta(days=random.randint(30, 365))
             end_date = start_date + timedelta(days=365)
@@ -542,10 +542,10 @@ class SupplierPortalDataGenerator:
         """Generate supplier qualification records"""
         print("Generating supplier qualification data...")
         
-        # Qualification for 10 suppliers (mix of statuses)
+        # Qualification for suppliers (mix of statuses)
         statuses = ['approved', 'under_review', 'sample_testing', 'audit_completed']
         
-        for i, supplier in enumerate(self.suppliers[:10]):
+        for i, supplier in enumerate(self.suppliers):
             supplier_id = supplier.get('supplier_id', 'SUP-000001') if isinstance(supplier, dict) else supplier
             qual_date = datetime.now() - timedelta(days=random.randint(30, 180))
             status = random.choice(statuses)
@@ -710,37 +710,37 @@ class SupplierPortalDataGenerator:
         data = {
             # RFQ Management - 5 tables
             'rfq_headers': self.rfq_headers,
-            'rfq_lines': self.rfq_lines[:50],
-            'rfq_suppliers': self.rfq_suppliers[:30],
-            'rfq_responses': self.rfq_responses[:20],
-            'rfq_response_lines': self.rfq_response_lines[:50],
+            'rfq_lines': self.rfq_lines,
+            'rfq_suppliers': self.rfq_suppliers,
+            'rfq_responses': self.rfq_responses,
+            'rfq_response_lines': self.rfq_response_lines,
             
             # Supplier Contracts - 2 tables
             'supplier_contracts': self.supplier_contracts,
-            'contract_pricing': self.contract_pricing[:30],
+            'contract_pricing': self.contract_pricing,
             
             # Performance Management - 3 tables
-            'supplier_performance_metrics': self.performance_metrics[:30],
-            'supplier_scorecards': self.scorecards[:30],
+            'supplier_performance_metrics': self.performance_metrics,
+            'supplier_scorecards': self.scorecards,
             'supplier_audits': self.supplier_audits,
             
             # Invoicing & Payments - 2 tables
             'supplier_invoices': self.supplier_invoices,
-            'supplier_invoice_lines': self.invoice_lines[:50],
+            'supplier_invoice_lines': self.invoice_lines,
             
             # Supplier Qualification - 1 table
             'supplier_qualification': self.qualification_records,
             
             # Supplier Management - 2 tables
-            'supplier_documents': self.supplier_documents[:20],
+            'supplier_documents': self.supplier_documents,
             'supplier_communications': supplier_communications,
             
             # Portal Users - 1 table
-            'supplier_portal_users': self.portal_users[:30],
+            'supplier_portal_users': self.portal_users,
             
             # Purchase Requisitions - 2 tables
-            'purchase_requisitions': self.purchase_requisitions[:20],
-            'purchase_requisition_lines': self.req_lines[:50],
+            'purchase_requisitions': self.purchase_requisitions,
+            'purchase_requisition_lines': self.req_lines,
             
             # Additional tables from schema
             'audit_findings': audit_findings,

@@ -667,12 +667,12 @@ class GenIMSSetup:
         success = True
         
         # Step 1: Create databases
-        # if not self.create_databases():
-        #     success = False
+        if not self.create_databases():
+            success = False
         
         # Step 2: Load schemas
-        # if not self.load_schemas():
-        #     success = False
+        if not self.load_schemas():
+            success = False
         
         # Step 3a: Generate MASTER data first
         if not self.generate_master_data():

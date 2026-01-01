@@ -268,7 +268,7 @@ class CMMSDataGenerator:
         """Generate PM schedules"""
         print("Generating PM schedules...")
         
-        for asset in self.assets[:50]:  # PM for first 50 assets
+        for asset in self.assets:
             for pm_num in range(PM_SCHEDULES_PER_ASSET):
                 schedule_type = random.choice(['calendar', 'meter_based'])
                 schedule = {
@@ -491,7 +491,7 @@ class CMMSDataGenerator:
         print("Generating PM generation logs...")
         pm_logs = []
         
-        for pm_schedule in self.pm_schedules[:30]:
+        for pm_schedule in self.pm_schedules:
             log = {
                 'pm_log_id': self.generate_id('PMLOG', 'history'),
                 'pm_schedule_id': pm_schedule['pm_schedule_id'],
@@ -511,7 +511,7 @@ class CMMSDataGenerator:
         print("Generating work procedures...")
         procedures = []
         
-        for pm_schedule in self.pm_schedules[:25]:
+        for pm_schedule in self.pm_schedules:
             proc = {
                 'procedure_id': self.generate_id('PROC', 'failure'),
                 'procedure_code': f"PROC-{self.counters['failure']-1:05d}",
@@ -541,7 +541,7 @@ class CMMSDataGenerator:
         print("Generating maintenance cost records...")
         costs = []
         
-        for wo in self.work_orders[:40]:
+        for wo in self.work_orders:
             cost = {
                 'cost_id': self.generate_id('COST', 'failure'),
                 'work_order_id': wo['work_order_id'],
@@ -588,7 +588,7 @@ class CMMSDataGenerator:
         readings = []
         start_date = datetime.now() - timedelta(days=90)
         
-        for asset in self.assets[:30]:
+        for asset in self.assets:
             current_reading = asset['current_meter_reading']
             for day in range(0, 90, 7):  # Weekly readings
                 reading = {
@@ -613,7 +613,7 @@ class CMMSDataGenerator:
         print("Generating service contracts...")
         contracts = []
         
-        for i, asset in enumerate(self.assets[:25]):
+        for i, asset in enumerate(self.assets):
             contract = {
                 'contract_id': self.generate_id('SC', 'failure'),
                 'contract_number': f"SC-{i+1:06d}",
@@ -692,7 +692,7 @@ class CMMSDataGenerator:
         print("Generating asset reliability metrics...")
         metrics = []
         
-        for asset in self.assets[:30]:
+        for asset in self.assets:
             start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
             end_date = datetime.now().strftime('%Y-%m-%d')
             metric = {
@@ -762,31 +762,31 @@ class CMMSDataGenerator:
         
         data = {
             # Assets & Teams
-            'maintenance_assets': self.assets[:50],
+            'maintenance_assets': self.assets,
             'maintenance_technicians': self.technicians,
             'maintenance_teams': maintenance_teams,
             'failure_codes': self.failure_codes,
             
             # MRO Parts
-            'mro_parts': self.mro_parts[:50],
-            'mro_parts_transactions': self.parts_transactions[:100],
+            'mro_parts': self.mro_parts,
+            'mro_parts_transactions': self.parts_transactions,
             
             # Maintenance Planning
             'pm_schedules': self.pm_schedules,
             'pm_generation_log': pm_generation_log,
             
             # Work Orders
-            'work_orders': self.work_orders[:100],
-            'work_order_tasks': self.wo_tasks[:200],
+            'work_orders': self.work_orders,
+            'work_order_tasks': self.wo_tasks,
             'work_procedures': work_procedures,
             
             # Labor & Costs
-            'labor_time_entries': self.labor_entries[:100],
+            'labor_time_entries': self.labor_entries,
             'maintenance_costs': maintenance_costs,
             'maintenance_cost_centers': maintenance_cost_centers,
             
             # Maintenance History
-            'maintenance_history': self.maintenance_history[:100],
+            'maintenance_history': self.maintenance_history,
             'equipment_meter_readings': equipment_meter_readings,
             'service_contracts': service_contracts,
             'service_call_logs': service_call_logs,

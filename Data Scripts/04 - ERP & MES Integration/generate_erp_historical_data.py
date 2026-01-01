@@ -270,6 +270,106 @@ class ERPDataGenerator:
             }
             self.materials.append(material)
         
+        # Consumables
+        consumables = [
+            'Gloves Nitrile', 'Safety Glasses', 'Ear Plugs', 'Face Mask',
+            'Cleaning Solvent', 'Degreaser', 'Wipes Industrial', 'Rags Cotton',
+            'Tape Masking', 'Tape Duct', 'Marker Permanent', 'Labels Barcode'
+        ]
+        
+        for _ in range(material_types['consumable']):
+            base_name = random.choice(consumables)
+            standard_cost = round(random.uniform(5, 100), 2)
+            material = {
+                'material_id': self.generate_id('MAT', 'material'),
+                'material_code': f"CONS-{self.counters['material']:05d}",
+                'material_name': f"{base_name}",
+                'material_type': 'consumable',
+                'material_group': 'CONS',
+                'base_unit_of_measure': random.choice(['EA', 'BOX', 'PKG']),
+                'procurement_type': 'buy',
+                'lead_time_days': random.randint(3, 14),
+                'reorder_point': random.randint(50, 200),
+                'safety_stock': random.randint(25, 100),
+                'standard_cost': standard_cost,
+                'material_status': 'active',
+                'abc_classification': random.choice(['B', 'C']),
+                'blocked_for_procurement': False,
+                'blocked_for_production': False,
+                'commodity_code': f"COMM-{random.randint(10000, 99999)}",
+                'created_by': 'SYSTEM',
+                'default_supplier_id': f"SUP-{random.randint(1001, 1030):06d}" if self.suppliers else None,
+                'dimensions': f"{random.randint(5, 50)}x{random.randint(5, 50)}x{random.randint(5, 50)}mm",
+                'inspection_required': False,
+                'last_purchase_price': standard_cost * random.uniform(0.9, 1.1),
+                'lot_sizing_procedure': 'fixed_lot',
+                'maximum_stock': random.randint(500, 2000),
+                'minimum_order_quantity': random.randint(10, 100),
+                'moving_average_cost': standard_cost * random.uniform(0.95, 1.05),
+                'mrp_type': 'forecast',
+                'order_multiple': random.choice([1, 5, 10, 25]),
+                'planning_time_fence_days': random.randint(7, 30),
+                'product_family': random.choice(['SAFETY', 'CLEANING', 'OFFICE']),
+                'product_id': None,
+                'shelf_life_days': random.randint(180, 730),
+                'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'valuation_class': 'MOVING_AVG',
+                'volume_m3': round(random.uniform(0.0001, 0.1), 6),
+                'weight_kg': round(random.uniform(0.01, 10), 4),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            self.materials.append(material)
+        
+        # Packaging
+        packaging = [
+            'Box Cardboard Small', 'Box Cardboard Medium', 'Box Cardboard Large',
+            'Pallet Wood', 'Stretch Film', 'Bubble Wrap', 'Foam Insert',
+            'Corner Protector', 'Strapping Plastic', 'Tape Packing'
+        ]
+        
+        for _ in range(material_types['packaging']):
+            base_name = random.choice(packaging)
+            standard_cost = round(random.uniform(2, 50), 2)
+            material = {
+                'material_id': self.generate_id('MAT', 'material'),
+                'material_code': f"PKG-{self.counters['material']:05d}",
+                'material_name': f"{base_name}",
+                'material_type': 'packaging',
+                'material_group': 'PKG',
+                'base_unit_of_measure': random.choice(['EA', 'ROLL', 'SHEET']),
+                'procurement_type': 'buy',
+                'lead_time_days': random.randint(5, 21),
+                'reorder_point': random.randint(100, 500),
+                'safety_stock': random.randint(50, 250),
+                'standard_cost': standard_cost,
+                'material_status': 'active',
+                'abc_classification': 'C',
+                'blocked_for_procurement': False,
+                'blocked_for_production': False,
+                'commodity_code': f"COMM-{random.randint(10000, 99999)}",
+                'created_by': 'SYSTEM',
+                'default_supplier_id': f"SUP-{random.randint(1001, 1030):06d}" if self.suppliers else None,
+                'dimensions': f"{random.randint(10, 200)}x{random.randint(10, 200)}x{random.randint(10, 200)}mm",
+                'inspection_required': False,
+                'last_purchase_price': standard_cost * random.uniform(0.9, 1.1),
+                'lot_sizing_procedure': 'fixed_lot',
+                'maximum_stock': random.randint(1000, 5000),
+                'minimum_order_quantity': random.randint(50, 200),
+                'moving_average_cost': standard_cost * random.uniform(0.95, 1.05),
+                'mrp_type': 'forecast',
+                'order_multiple': random.choice([1, 5, 10, 25, 50]),
+                'planning_time_fence_days': random.randint(7, 30),
+                'product_family': 'PACKAGING',
+                'product_id': None,
+                'shelf_life_days': None,  # Packaging doesn't expire
+                'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'valuation_class': 'MOVING_AVG',
+                'volume_m3': round(random.uniform(0.01, 5), 6),
+                'weight_kg': round(random.uniform(0.1, 50), 4),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            self.materials.append(material)
+        
         print(f"Generated {len(self.materials)} materials")
     
     def generate_suppliers(self):
@@ -760,7 +860,7 @@ class ERPDataGenerator:
     def _generate_bill_of_materials(self):
         """Generate BOM records"""
         boms = []
-        for i, product in enumerate(self.products[:15]):
+        for i, product in enumerate(self.products):
             created_dt = (datetime.now() - timedelta(days=random.randint(60, 365)))
             valid_from_dt = (datetime.now() - timedelta(days=random.randint(30, 180)))
             
@@ -974,7 +1074,8 @@ class ERPDataGenerator:
     def _generate_inspection_plans(self):
         """Generate inspection plan records"""
         plans = []
-        for i, material in enumerate(self.materials[:20]):
+        # Generate inspection plans for all materials that require inspection
+        for i, material in enumerate(self.materials):
             plans.append({
                 'inspection_plan_id': f"INSP-{12001+i}",
                 'plan_number': f"PLAN-{12001+i}",

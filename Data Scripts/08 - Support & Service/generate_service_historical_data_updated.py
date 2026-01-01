@@ -604,7 +604,7 @@ class ServiceDataGenerator:
         """Generate ticket comments"""
         print("Generating ticket comments...")
         
-        for ticket in self.service_tickets[:500]:  # Comments for first 500 tickets
+        for ticket in self.service_tickets:  # Comments for all tickets
             # 1-3 comments per ticket
             for _ in range(random.randint(1, 3)):
                 ticket_create_time = datetime.strptime(ticket['created_at'], '%Y-%m-%d %H:%M:%S')
@@ -628,7 +628,7 @@ class ServiceDataGenerator:
         """Generate ticket attachments"""
         print("Generating ticket attachments...")
         
-        for ticket in self.service_tickets[:200]:  # Attachments for first 200 tickets
+        for ticket in self.service_tickets:  # Attachments for all tickets
             if random.random() > 0.6:
                 attachment = {
                     'attachment_id': self.generate_id('ATTACH', 'attach'),
@@ -831,7 +831,7 @@ class ServiceDataGenerator:
         """Generate service parts usage"""
         print("Generating service parts usage...")
         
-        for appointment in self.field_appointments[:200]:
+        for appointment in self.field_appointments:
             if random.random() > 0.5:
                 # 1-2 parts used per appointment
                 for _ in range(random.randint(1, 2)):
