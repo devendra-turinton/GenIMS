@@ -470,7 +470,7 @@ class GenIMSSetup:
     # STEP 4: LOAD DATA (Optimized Batch Dump)
     # ========================================================================
     
-    def format_value(self, val):
+    def format_value(self, val, col_name='', data_type=''):
         """Format value for SQL"""
         if val is None:
             return 'NULL'
@@ -481,7 +481,14 @@ class GenIMSSetup:
             escaped = [str(v).replace("'", "''") for v in val]
             return "'{" + ",".join(escaped) + "}'"
         if isinstance(val, str):
-            return "'" + val.replace("'", "''") + "'"
+            # Special handling for specific data types
+            if col_name.endswith('_gps') or data_type == 'point':
+                return f"'{val}'::point"
+            elif data_type in ['jsonb', 'json']:
+                # Val is already a JSON string, cast it
+                return f"'{val.replace(chr(39), chr(39)*2)}'::jsonb"
+            else:
+                return "'" + val.replace("'", "''") + "'"
         return str(val)
     
     def load_table(self, cursor, table_name, records):
@@ -564,7 +571,9 @@ class GenIMSSetup:
                             else:
                                 val = f'{c}_default'
                     
-                    row_vals.append(self.format_value(val))
+                    # Get data type for formatting
+                    col_data_type = db_col_info[c][1] if c in db_col_info else ''
+                    row_vals.append(self.format_value(val, col_name=c, data_type=col_data_type))
                 
                 values_list.append(f"({', '.join(row_vals)})")
             

@@ -184,13 +184,22 @@ class ServiceDataGenerator:
                 'agent_id': self.generate_id('AGT', 'agent'),
                 'agent_code': f"AGT{i+1:04d}",
                 'employee_id': random.choice(self.employees)['employee_id'] if self.employees else f"EMP-{random.randint(1000, 9999)}",
-                'agent_name': f"Agent {i+1}",
+                'first_name': f"Agent",
+                'last_name': f"{i+1}",
                 'email': f"agent{i+1}@company.com",
                 'phone': f"+91 {random.randint(7000000000, 9999999999)}",
                 'team_id': random.choice(self.service_teams)['team_id'],
-                'agent_level': random.choice(['L1', 'L2', 'L3']),
-                'expertise_areas': 'Technical Support, Sales, Billing',
-                'availability_status': 'available',
+                'skill_areas': '["technical", "billing", "sales"]',
+                'product_expertise': '["manufacturing", "automation"]',
+                'language_skills': '["English", "Hindi"]',
+                'avg_csat_rating': round(random.uniform(3.5, 5.0), 2),
+                'total_tickets_resolved': random.randint(10, 100),
+                'avg_resolution_time_hours': round(random.uniform(0.5, 4.0), 2),
+                'first_contact_resolution_rate': round(random.uniform(60, 95), 2),
+                'agent_status': 'available',
+                'current_ticket_count': random.randint(0, 5),
+                'max_concurrent_tickets': 5,
+                'hire_date': (datetime.now() - timedelta(days=random.randint(365, 1825))).strftime('%Y-%m-%d'),
                 'is_active': True,
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
@@ -202,20 +211,41 @@ class ServiceDataGenerator:
         """Generate field technicians"""
         print("Generating field technicians...")
         
+        first_names = ['John', 'Mike', 'Sarah', 'David', 'Emma', 'Robert', 'Lisa', 'James', 'Maria', 'Chris']
+        last_names = ['Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis', 'Rodriguez', 'Martinez']
+        skill_areas = ['Hydraulics', 'Pneumatics', 'Electrical', 'Mechanical', 'PLC Programming', 'HMI', 'Network', 'Safety Systems']
+        
         for i in range(FIELD_TECHNICIANS_COUNT):
+            first_name = random.choice(first_names)
+            last_name = random.choice(last_names)
+            # Generate certification expiry dates as list of dicts for JSON
+            cert_expiry_dates = [
+                {"cert": f"CERT-{random.randint(100, 999)}", "expiry": (datetime.now() + timedelta(days=random.randint(30, 365))).strftime('%Y-%m-%d')}
+                for _ in range(random.randint(1, 3))
+            ]
             tech = {
                 'technician_id': self.generate_id('TECH', 'tech'),
                 'technician_code': f"TECH{i+1:04d}",
                 'employee_id': random.choice(self.employees)['employee_id'] if self.employees else f"EMP-{random.randint(1000, 9999)}",
-                'technician_name': f"Technician {i+1}",
+                'first_name': first_name,
+                'last_name': last_name,
                 'email': f"tech{i+1}@company.com",
                 'phone': f"+91 {random.randint(7000000000, 9999999999)}",
-                'team_id': random.choice(self.service_teams)['team_id'],
-                'certification_level': random.choice(['Level 1', 'Level 2', 'Level 3']),
-                'assigned_zone': f"Zone {random.choice('ABCDE')}",
-                'availability': 'on_field',
+                'mobile': f"+91 {random.randint(7000000000, 9999999999)}",
+                'skill_areas': json.dumps(random.sample(skill_areas, random.randint(2, 5))),
+                'certifications': json.dumps([f"CERT-{random.randint(100, 999)}" for _ in range(random.randint(1, 3))]),
+                'certification_expiry': json.dumps(cert_expiry_dates),
+                'service_territory': f"Zone {random.choice('ABCDE')}",
+                'home_base_location': f"Depot {random.choice('12345')}",
+                'available_for_dispatch': random.choice([True, True, True, False]),
+                'current_location_gps': f"({random.uniform(10, 30):.4f},{random.uniform(70, 90):.4f})",
+                'last_location_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'avg_job_rating': round(random.uniform(3.5, 5.0), 2),
+                'total_jobs_completed': random.randint(10, 500),
+                'technician_status': random.choice(['active', 'on_leave', 'training']),
                 'is_active': True,
-                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             self.field_technicians.append(tech)
         
@@ -314,12 +344,10 @@ class ServiceDataGenerator:
         
         for res in resolutions:
             res_code = {
-                'resolution_code_id': self.generate_id('RES', 'res_code'),
-                'resolution_code': f"RES{self.counters['res_code']-1:02d}",
-                'resolution_description': res,
-                'resolution_type': 'resolved' if 'Resolved' in res else 'closed',
-                'requires_followup': 'Resolved' in res,
-                'customer_satisfaction_required': random.choice([True, False]),
+                'code_id': self.generate_id('RES', 'res_code'),
+                'code': f"RES{self.counters['res_code']-1:02d}",
+                'description': res,
+                'category': 'technical' if 'Technical' in res else 'user_error',
                 'is_active': True,
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
@@ -363,21 +391,39 @@ class ServiceDataGenerator:
             'Security best practices', 'Backup and recovery procedures'
         ]
         
+        article_types = ['Troubleshooting', 'How-To', 'Best Practices', 'FAQ', 'Reference']
+        
         for i in range(KB_ARTICLES_COUNT):
+            title = f"{random.choice(titles)} - {i+1}"
             article = {
                 'article_id': self.generate_id('KBART', 'kb_art'),
-                'article_code': f"KBART-{i+1:05d}",
-                'article_title': random.choice(titles),
+                'article_number': f"KBART-{i+1:05d}",
+                'title': title,
+                'summary': f"Summary for {title}",
+                'content': f"Detailed content for article {i+1}. This article provides comprehensive information about the topic.",
                 'category_id': random.choice(self.kb_categories)['category_id'],
-                'article_content': f"Detailed content for article {i+1}",
-                'author_id': random.choice(self.service_agents)['agent_id'] if self.service_agents else 'AGT-000001',
-                'publication_date': (datetime.now() - timedelta(days=random.randint(30, 365))).strftime('%Y-%m-%d'),
-                'last_updated_date': datetime.now().strftime('%Y-%m-%d'),
-                'views_count': random.randint(10, 1000),
-                'helpful_count': random.randint(5, 500),
+                'article_type': random.choice(article_types),
+                'products': json.dumps(random.sample([p['product_id'] for p in self.products], min(2, len(self.products))) if self.products else []),
+                'product_categories': json.dumps(['Hardware', 'Software', 'Services']),
+                'keywords': json.dumps(['troubleshooting', 'howto', 'guide', f'topic{i+1}']),
+                'tags': json.dumps(random.sample(['urgent', 'common', 'advanced', 'beginner'], random.randint(1, 3))),
                 'article_status': 'published',
+                'published_date': (datetime.now() - timedelta(days=random.randint(30, 365))).strftime('%Y-%m-%d'),
+                'published_by': random.choice(self.service_agents)['agent_id'] if self.service_agents else 'AGT-000001',
+                'version': '1.0',
+                'previous_version_id': None,
+                'view_count': random.randint(10, 1000),
+                'helpful_count': random.randint(5, 500),
+                'not_helpful_count': random.randint(0, 100),
+                'avg_rating': round(random.uniform(3.5, 5.0), 2),
+                'times_used_in_tickets': random.randint(0, 100),
+                'last_used_date': (datetime.now() - timedelta(days=random.randint(1, 30))).strftime('%Y-%m-%d'),
+                'attachments': json.dumps([]),
+                'meta_description': f"Meta description for {title}",
+                'author_id': random.choice(self.service_agents)['agent_id'] if self.service_agents else 'AGT-000001',
                 'is_active': True,
-                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             self.kb_articles.append(article)
         
@@ -417,7 +463,7 @@ class ServiceDataGenerator:
         valid_customer_ids = list(self.helper.get_valid_customer_ids())
         valid_employee_ids = list(self.helper.get_valid_employee_ids())
         
-        ticket_counters = {t['queue_id']: 0 for t in self.service_queues} if self.service_queues else {'DEFAULT': 0}
+        global_ticket_counter = 0  # Global counter for unique ticket numbers
         
         for day in range(DAYS_OF_HISTORY):
             for _ in range(random.randint(5, 15)):
@@ -425,9 +471,7 @@ class ServiceDataGenerator:
                 selected_queue = random.choice(self.service_queues) if self.service_queues else {'queue_id': 'QUE-000001'}
                 queue_id = selected_queue['queue_id']
                 
-                if queue_id not in ticket_counters:
-                    ticket_counters[queue_id] = 0
-                ticket_counters[queue_id] += 1
+                global_ticket_counter += 1
                 
                 priority = random.choice(['critical', 'urgent', 'high', 'medium', 'low'])
                 status = random.choice(['new', 'assigned', 'in_progress', 'pending_customer', 'on_hold', 'resolved', 'closed'])
@@ -510,7 +554,7 @@ class ServiceDataGenerator:
                 
                 ticket = {
                     'ticket_id': self.generate_id('TKT', 'ticket'),
-                    'ticket_number': f"TKT-{ticket_date.strftime('%Y%m%d')}-{ticket_counters[queue_id]:04d}",
+                    'ticket_number': f"TKT-{global_ticket_counter:08d}",
                     
                     # Customer Information
                     'account_id': random.choice(self.accounts)['account_id'] if self.accounts else f"ACC-{random.randint(1000, 9999)}",
@@ -572,7 +616,7 @@ class ServiceDataGenerator:
                     # Resolution
                     'resolution_summary': 'Issue was resolved by...' if resolved_datetime else None,
                     'root_cause': random.choice(['Hardware Failure', 'Configuration Error', 'User Error', 'Software Bug']) if resolved_datetime else None,
-                    'resolution_code': random.choice(self.resolution_codes)['resolution_code_id'] if self.resolution_codes else 'RES-000001',
+                    'resolution_code': random.choice(self.resolution_codes)['code_id'] if self.resolution_codes else 'RES-000001',
                     
                     # Customer Satisfaction
                     'csat_rating': csat_rating,
@@ -653,20 +697,24 @@ class ServiceDataGenerator:
         
         for ticket in escalated_tickets:
             # Create an escalation record for each escalated ticket
-            escalation_date = ticket.get('escalated_datetime', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            escalation_datetime = ticket.get('escalated_datetime', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+            escalation_dt = datetime.strptime(escalation_datetime, '%Y-%m-%d %H:%M:%S')
+            
+            # 85% of escalations are de-escalated/resolved
+            is_resolved = random.random() < 0.85
+            de_escalated_dt = escalation_dt + timedelta(days=random.randint(1, 3)) if is_resolved else None
             
             escalation = {
                 'escalation_id': self.generate_id('ESC', 'esc'),
                 'ticket_id': ticket['ticket_id'],
-                'escalation_rule_id': random.choice(self.escalation_rules)['rule_id'] if self.escalation_rules else 'ESC-000001',
+                'escalation_level': ticket.get('escalation_level', '1'),
+                'escalation_reason': ticket.get('escalation_reason', 'SLA breach or customer request'),
                 'escalated_from': random.choice(self.service_agents)['agent_id'] if self.service_agents else 'AGT-000001',
                 'escalated_to': ticket.get('escalated_to'),
-                'escalation_date': escalation_date,
-                'escalation_reason': ticket.get('escalation_reason', 'SLA breach or customer request'),
-                'escalation_level': random.choice(['L2', 'L3']),
-                # Populate resolution_date for resolved escalations (85% of time)
-                'resolution_date': (datetime.strptime(escalation_date, '%Y-%m-%d %H:%M:%S') + timedelta(days=random.randint(1, 3))).strftime('%Y-%m-%d') if random.random() < 0.85 else None,
-                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                'escalated_at': escalation_datetime,
+                'de_escalated': is_resolved,
+                'de_escalated_at': de_escalated_dt.strftime('%Y-%m-%d %H:%M:%S') if de_escalated_dt else None,
+                'de_escalation_reason': random.choice(['Resolved successfully', 'Customer satisfied', 'Timeout']) if is_resolved else None
             }
             self.ticket_escalations.append(escalation)
         
@@ -681,18 +729,38 @@ class ServiceDataGenerator:
         print("Generating warranty registrations...")
         
         for i in range(150):
+            product = random.choice(self.products) if self.products else None
+            product_name = product['product_name'] if product else f"Product {i+1}"
+            purchase_date = datetime.now() - timedelta(days=random.randint(30, 730))
+            warranty_duration = random.choice([12, 24, 36])
+            
             reg = {
-                'registration_id': self.generate_id('WAREG', 'reg'),
-                'registration_number': f"WAR-REG-{i+1:05d}",
-                'customer_id': random.choice(self.customers)['customer_id'] if self.customers else f"CUST-{random.randint(1000, 9999)}",
-                'product_id': random.choice(self.products)['product_id'] if self.products else f"PRD-{random.randint(1000, 9999)}",
+                'warranty_id': self.generate_id('WAREG', 'reg'),
+                'warranty_number': f"WAR-{i+1:06d}",
+                'account_id': random.choice(self.customers)['customer_id'] if self.customers else f"CUST-{random.randint(1000, 9999)}",
+                'contact_id': random.choice(self.contacts)['contact_id'] if self.contacts else f"CONTACT-{random.randint(1000, 9999)}",
+                'product_name': product_name,
+                'product_category': product.get('product_category', 'General') if product else 'General',
                 'serial_number': f"SN-{random.randint(100000, 999999)}",
-                'purchase_date': (datetime.now() - timedelta(days=random.randint(30, 730))).strftime('%Y-%m-%d'),
-                'warranty_start_date': (datetime.now() - timedelta(days=random.randint(30, 720))).strftime('%Y-%m-%d'),
-                'warranty_end_date': (datetime.now() + timedelta(days=random.randint(30, 730))).strftime('%Y-%m-%d'),
+                'model_number': f"MOD-{random.randint(1000, 9999)}",
+                'sales_order_id': f"SO-{random.randint(10000, 99999)}",
+                'purchase_date': purchase_date.strftime('%Y-%m-%d'),
+                'invoice_number': f"INV-{random.randint(100000, 999999)}",
                 'warranty_type': random.choice(['standard', 'extended', 'premium']),
+                'warranty_start_date': purchase_date.strftime('%Y-%m-%d'),
+                'warranty_end_date': (purchase_date + timedelta(days=warranty_duration*30)).strftime('%Y-%m-%d'),
+                'warranty_duration_months': warranty_duration,
+                'coverage_type': random.choice(['Full Coverage', 'Parts Only', 'Labor Only']),
+                'coverage_details': json.dumps({'includes': ['defect', 'manufacturing'], 'excludes': ['accidental', 'misuse']}),
+                'terms_conditions': 'Standard warranty terms and conditions apply',
                 'warranty_status': random.choice(['active', 'expired', 'claimed']),
-                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                'registered_date': datetime.now().strftime('%Y-%m-%d'),
+                'registered_by': random.choice(self.service_agents)['agent_id'] if self.service_agents else 'AGT-000001',
+                'transferred_to_account_id': None,
+                'transfer_date': None,
+                'is_active': True,
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             self.warranty_registrations.append(reg)
         
@@ -702,19 +770,38 @@ class ServiceDataGenerator:
         """Generate warranty claims"""
         print("Generating warranty claims...")
         
-        for reg in random.sample(self.warranty_registrations, len(self.warranty_registrations)//3):
+        failure_types = ['Hardware Failure', 'Defective Part', 'Manufacturing Defect', 'Malfunction']
+        failure_categories = ['Mechanical', 'Electrical', 'Software', 'Component']
+        
+        for reg in random.sample(self.warranty_registrations, min(len(self.warranty_registrations)//3, 50)):
+            claim_status = random.choice(['approved', 'rejected', 'pending'])
+            claim_date = datetime.now() - timedelta(days=random.randint(1, 180))
+            
             claim = {
                 'claim_id': self.generate_id('WACLAIM', 'claim'),
                 'claim_number': f"WCL-{self.counters['claim']-1:06d}",
-                'registration_id': reg['registration_id'],
-                'claim_date': (datetime.now() - timedelta(days=random.randint(1, 180))).strftime('%Y-%m-%d'),
-                'claim_description': 'Product failure or defect',
-                'claim_type': random.choice(['defect', 'breakdown', 'malfunction']),
-                'claim_amount': round(random.uniform(5000, 50000), 2),
-                'claim_status': random.choice(['approved', 'rejected', 'pending']),
-                'approval_date': (datetime.now() - timedelta(days=random.randint(1, 30))).strftime('%Y-%m-%d'),
-                'payment_date': (datetime.now() - timedelta(days=random.randint(1, 30))).strftime('%Y-%m-%d'),
-                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                'warranty_id': reg['warranty_id'],
+                'ticket_id': random.choice([t['ticket_id'] for t in self.service_tickets]) if self.service_tickets else None,
+                'claim_date': claim_date.strftime('%Y-%m-%d'),
+                'issue_description': 'Product failure or defect reported by customer',
+                'failure_type': random.choice(failure_types),
+                'failure_category': random.choice(failure_categories),
+                'claim_status': claim_status,
+                'approved': claim_status == 'approved',
+                'approved_by': random.choice(self.service_agents)['agent_id'] if self.service_agents else 'AGT-000001' if claim_status != 'pending' else None,
+                'approved_date': (claim_date + timedelta(days=random.randint(1, 10))).strftime('%Y-%m-%d') if claim_status != 'pending' else None,
+                'rejection_reason': random.choice(['Not covered', 'Out of warranty', 'User damage']) if claim_status == 'rejected' else None,
+                'resolution_type': random.choice(['Repair', 'Replace', 'Refund']) if claim_status == 'approved' else None,
+                'labor_cost': round(random.uniform(1000, 5000), 2) if claim_status == 'approved' else 0,
+                'parts_cost': round(random.uniform(5000, 20000), 2) if claim_status == 'approved' else 0,
+                'total_claim_amount': round(random.uniform(5000, 50000), 2),
+                'customer_responsibility': round(random.uniform(0, 5000), 2),
+                'warranty_coverage': round(random.uniform(0, 50000), 2),
+                'processed_date': (claim_date + timedelta(days=random.randint(5, 30))).strftime('%Y-%m-%d'),
+                'processed_by': random.choice(self.service_agents)['agent_id'] if self.service_agents else 'AGT-000001',
+                'notes': f'Warranty claim for {reg.get("product_name", "Product")}',
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             self.warranty_claims.append(claim)
         
@@ -1068,7 +1155,7 @@ if __name__ == "__main__":
     generator = ServiceDataGenerator()
     generator.generate_all_data()
     
-    json_file = script_dir / "service_data.json"
+    json_file = script_dir / "genims_service_data.json"
     generator.to_json(str(json_file))
     
     print("\n" + "="*80)

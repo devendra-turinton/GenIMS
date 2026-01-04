@@ -143,7 +143,7 @@ class ERPDataGenerator:
                 'material_group': 'RAW',
                 'base_unit_of_measure': random.choice(['KG', 'L', 'M']),
                 'procurement_type': 'buy',
-                'default_supplier_id': f"SUP-{random.randint(1001, 1030):06d}" if self.suppliers else f"SUP-{random.randint(1001, 1030):06d}",
+                'default_supplier_id': None,  # Will be assigned after suppliers are generated
                 'lead_time_days': random.randint(7, 30),
                 'reorder_point': random.randint(100, 500),
                 'safety_stock': random.randint(50, 200),
@@ -205,7 +205,7 @@ class ERPDataGenerator:
                 'blocked_for_production': False,
                 'commodity_code': f"COMM-{random.randint(10000, 99999)}",
                 'created_by': 'SYSTEM',
-                'default_supplier_id': f"SUP-{random.randint(1001, 1030):06d}" if self.suppliers else None,
+                'default_supplier_id': None,  # Will be assigned after suppliers are generated
                 'dimensions': f"{random.randint(1, 50)}x{random.randint(1, 50)}x{random.randint(1, 50)}mm",
                 'inspection_required': random.random() < 0.5,
                 'last_purchase_price': standard_cost * random.uniform(0.9, 1.1),
@@ -298,7 +298,7 @@ class ERPDataGenerator:
                 'blocked_for_production': False,
                 'commodity_code': f"COMM-{random.randint(10000, 99999)}",
                 'created_by': 'SYSTEM',
-                'default_supplier_id': f"SUP-{random.randint(1001, 1030):06d}" if self.suppliers else None,
+                'default_supplier_id': None,  # Will be assigned after suppliers are generated
                 'dimensions': f"{random.randint(5, 50)}x{random.randint(5, 50)}x{random.randint(5, 50)}mm",
                 'inspection_required': False,
                 'last_purchase_price': standard_cost * random.uniform(0.9, 1.1),
@@ -348,7 +348,7 @@ class ERPDataGenerator:
                 'blocked_for_production': False,
                 'commodity_code': f"COMM-{random.randint(10000, 99999)}",
                 'created_by': 'SYSTEM',
-                'default_supplier_id': f"SUP-{random.randint(1001, 1030):06d}" if self.suppliers else None,
+                'default_supplier_id': None,  # Will be assigned after suppliers are generated
                 'dimensions': f"{random.randint(10, 200)}x{random.randint(10, 200)}x{random.randint(10, 200)}mm",
                 'inspection_required': False,
                 'last_purchase_price': standard_cost * random.uniform(0.9, 1.1),
