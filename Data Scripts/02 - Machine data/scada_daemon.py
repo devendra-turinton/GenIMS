@@ -23,13 +23,6 @@ if os.path.exists(env_file):
 
 # Optional dependencies
 try:
-    from kafka import KafkaProducer
-    KAFKA_AVAILABLE = True
-except ImportError:
-    KAFKA_AVAILABLE = False
-    print("WARNING: kafka-python not installed. Install with: pip install kafka-python")
-
-try:
     import psycopg2
     from psycopg2.extras import execute_batch
     POSTGRES_AVAILABLE = True
@@ -50,11 +43,11 @@ PG_PASSWORD = os.getenv('POSTGRES_PASSWORD', 'Passw0rd123!')
 PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
 PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')  # Azure requires SSL
 
-# Streaming configuration
+# Streaming configuration - FAST GENERATION MODE
 SCADA_SAMPLING_INTERVAL = int(os.getenv('SCADA_SAMPLING_INTERVAL', '60'))
-BATCH_SIZE = int(os.getenv('BATCH_SIZE', '50'))
-KAFKA_TOPIC = os.getenv('KAFKA_TOPIC', 'genims.scada.data')
-KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092').split(',')
+BATCH_SIZE = int(os.getenv('SCADA_BATCH_SIZE', '2000'))
+RECORDS_PER_CYCLE = int(os.getenv('SCADA_RECORDS_PER_CYCLE', '100'))
+TOTAL_RECORDS = int(os.getenv('SCADA_TOTAL_RECORDS', '144000'))
 
 # Logging
 logging.basicConfig(
@@ -68,12 +61,10 @@ logger = logging.getLogger('SCADADaemon')
 # ============================================================================
 
 running = True
-kafka_producer = None
 pg_connection = None
 scada_batch = []
 stats = {
     'records_generated': 0,
-    'kafka_sent': 0,
     'postgres_inserted': 0,
     'errors': 0,
     'start_time': datetime.now()
@@ -101,6 +92,7 @@ class MachineSimulator:
         self.machine_id = machine['machine_id']
         self.line_id = machine['line_id']
         self.factory_id = machine['factory_id']
+        self.plant_id = machine.get('plant_id', machine.get('factory_id', 'PLANT-001'))
         self.machine_type = machine['machine_type']
         self.operators = operators
         self.shifts = shifts
@@ -129,7 +121,7 @@ class MachineSimulator:
     def inject_fault(self, fault_code: str, fault_description: str, duration_seconds=300):
         """Inject a fault condition"""
         self.fault_active = True
-        self.fault_start_time = time.time()
+        self.fault_start_time = datetime.now()  # Will be set in main loop with simulated time
         self.fault_duration = duration_seconds
         self.fault_code = fault_code
         self.fault_description = fault_description
@@ -143,10 +135,10 @@ class MachineSimulator:
             self.current_state = 'running'
             logger.info(f"Fault cleared: {self.machine_id}")
     
-    def get_current_shift(self) -> Dict:
-        """Get current shift based on time"""
-        current_hour = datetime.now().hour
-        day_of_week = datetime.now().strftime('%a').lower()
+    def get_current_shift(self, simulated_timestamp) -> Dict:
+        """Get current shift based on simulated time"""
+        current_hour = simulated_timestamp.hour
+        day_of_week = simulated_timestamp.strftime('%a').lower()
         
         for shift in self.shifts:
             if self.factory_id != shift['factory_id']:
@@ -165,22 +157,16 @@ class MachineSimulator:
         # Default
         return next((s for s in self.shifts if s['shift_code'] == 'G'), self.shifts[0])
     
-    def get_operator(self, shift_id: str) -> Dict:
-        """Get operator for current shift"""
-        shift_operators = [op for op in self.operators 
-                          if op['line_id'] == self.line_id]
-        return random.choice(shift_operators) if shift_operators else None
-    
-    def determine_state(self) -> str:
-        """Determine machine state based on time and conditions"""
-        if self.fault_active:
-            elapsed = time.time() - self.fault_start_time
+    def determine_state(self, simulated_timestamp) -> str:
+        """Determine machine state based on simulated time and conditions"""
+        if self.fault_active and self.fault_start_time is not None:
+            elapsed = (simulated_timestamp - self.fault_start_time).total_seconds()
             if elapsed > self.fault_duration:
                 self.clear_fault()
                 return 'running'
             return 'fault'
         
-        hour = datetime.now().hour
+        hour = simulated_timestamp.hour
         
         # Night maintenance window (2-6 AM)
         if 2 <= hour < 6:
@@ -192,145 +178,92 @@ class MachineSimulator:
             weights=[0.88, 0.10, 0.02]
         )[0]
     
-    def get_next_reading(self) -> Dict:
-        """Generate next SCADA reading"""
-        # Update state
-        self.current_state = self.determine_state()
+    def get_reading(self, timestamp_seconds_into_sim, sim_base_time):
+        """Generate reading for given absolute timestamp"""
+        current_ts = sim_base_time + timedelta(seconds=timestamp_seconds_into_sim)
+        hour = current_ts.hour
         
-        # Get shift and operator
-        shift = self.get_current_shift()
-        operator = self.get_operator(shift['shift_id'])
+        # Check fault
+        fault_detected = False
+        fault_code = None
+        fault_desc = None
         
-        # Production metrics
-        is_producing = self.current_state == 'running'
+        if self.fault_active and hasattr(self, 'fault_start_offset'):
+            fault_start = self.fault_start_offset
+            fault_end = self.fault_start_offset + 3600  # 1 hour duration
+            
+            if fault_start <= timestamp_seconds_into_sim <= fault_end:
+                fault_detected = True
+                fault_code = self.fault_code
+                fault_desc = self.fault_description
+        
+        # Determine state
+        if fault_detected:
+            operating_state = 'fault'
+        elif 2 <= hour < 6:  # Night maintenance
+            operating_state = random.choice(['idle', 'maintenance', 'idle'])
+        else:
+            operating_state = random.choices(['running', 'idle', 'setup'], weights=[0.88, 0.10, 0.02])[0]
+        
+        # Calculate metrics
+        is_producing = operating_state == 'running'
         
         if is_producing:
-            # Calculate cycle time (with some variation)
-            actual_cycle_time = self.target_cycle_time * random.uniform(0.95, 1.10)
-            
-            # Tool wear effect (gradual degradation)
-            self.tool_usage_cycles += 1
-            if self.tool_usage_cycles > 500:  # Tool getting worn
-                actual_cycle_time *= 1.1
-                if self.tool_usage_cycles > 800:  # Tool very worn
-                    actual_cycle_time *= 1.2
-                    if random.random() < 0.01:  # 1% chance to trigger tool change
-                        self.current_tool = (self.current_tool % 12) + 1
-                        self.tool_usage_cycles = 0
-                        logger.info(f"Tool change: {self.machine_id} - Tool #{self.current_tool}")
-            
-            # Parts produced in this interval
-            parts_this_interval = int(SCADA_SAMPLING_INTERVAL / actual_cycle_time)
-            self.parts_produced_shift += parts_this_interval
-            self.parts_produced_cumulative += parts_this_interval
-            
-            # Quality - reject some parts
-            if random.random() < 0.02:  # 2% base reject rate
-                self.parts_rejected_shift += random.randint(1, 3)
-            
-            self.uptime_seconds_shift += SCADA_SAMPLING_INTERVAL
+            cycle_time = self.target_cycle_time * random.uniform(0.95, 1.10)
+            parts = int(SCADA_SAMPLING_INTERVAL / cycle_time)
+            availability = 1.0
         else:
-            actual_cycle_time = 0
-            parts_this_interval = 0
-            self.downtime_seconds_shift += SCADA_SAMPLING_INTERVAL
+            cycle_time = 0
+            parts = 0
+            availability = 0.0
         
-        # OEE calculation
-        availability = 1.0 if is_producing else 0.0
-        performance = self.target_cycle_time / actual_cycle_time if actual_cycle_time > 0 else 0.0
-        quality = 1.0 - (self.parts_rejected_shift / max(self.parts_produced_shift, 1))
+        performance = 0.95 if is_producing else 0.0
+        quality = 0.98
         oee = availability * performance * quality
         
-        # Power consumption
-        if is_producing:
-            power_kw = self.rated_power * random.uniform(0.70, 0.95)
-        elif self.current_state == 'idle':
-            power_kw = self.rated_power * random.uniform(0.05, 0.15)
-        else:
-            power_kw = self.rated_power * random.uniform(0.01, 0.05)
+        # Shift info
+        shift = next((s for s in self.shifts if not (2 <= hour < 6)), self.shifts[0])
         
-        # Process parameters
-        temp_setpoint = random.uniform(40, 70)
-        temp_actual = temp_setpoint + random.uniform(-2, 2)
-        if self.fault_active and 'THERM' in self.fault_code:
-            temp_actual += 20  # Overheating
-        
-        pressure_setpoint = random.uniform(100, 150)
-        pressure_actual = pressure_setpoint + random.uniform(-5, 5)
-        if self.fault_active and 'HYD' in self.fault_code:
-            pressure_actual -= 40  # Pressure loss
-        
-        # Build record
-        record = {
+        return {
             'machine_id': self.machine_id,
             'line_id': self.line_id,
             'factory_id': self.factory_id,
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'machine_state': self.current_state,
+            'timestamp': current_ts,
+            'machine_state': operating_state,
             'operation_mode': 'auto',
-            'fault_code': self.fault_code if self.fault_active else None,
-            'fault_description': self.fault_description if self.fault_active else None,
-            'parts_produced_cumulative': self.parts_produced_cumulative,
-            'parts_produced_shift': self.parts_produced_shift,
-            'parts_rejected_shift': self.parts_rejected_shift,
+            'fault_code': fault_code,
+            'fault_description': fault_desc,
+            'parts_produced_cumulative': random.randint(10000, 500000),
+            'parts_produced_shift': random.randint(0, 100),
+            'parts_rejected_shift': random.randint(0, 5),
             'target_cycle_time_seconds': int(self.target_cycle_time),
-            'actual_cycle_time_seconds': round(actual_cycle_time, 2) if actual_cycle_time > 0 else None,
+            'actual_cycle_time_seconds': 3600 if is_producing else None,
             'availability_percentage': round(availability * 100, 2),
             'performance_percentage': round(performance * 100, 2),
             'quality_percentage': round(quality * 100, 2),
             'oee_percentage': round(oee * 100, 2),
-            'spindle_speed_rpm': random.randint(1000, 4000) if 'cnc' in self.machine_type else None,
-            'feed_rate_mm_min': round(random.uniform(100, 500), 2) if 'cnc' in self.machine_type else None,
-            'tool_number': self.current_tool if 'cnc' in self.machine_type or 'drill' in self.machine_type else None,
-            'program_number': f"NC{random.randint(1000, 9999)}" if 'cnc' in self.machine_type else None,
-            'power_consumption_kw': round(power_kw, 2),
-            'energy_consumed_kwh': round(random.uniform(1000, 50000), 4),
-            'temperature_setpoint_c': round(temp_setpoint, 2),
-            'temperature_actual_c': round(temp_actual, 2),
-            'pressure_setpoint_bar': round(pressure_setpoint, 2),
-            'pressure_actual_bar': round(pressure_actual, 2),
-            'downtime_seconds_shift': self.downtime_seconds_shift,
-            'last_fault_timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S') if self.fault_active else None,
-            'uptime_seconds_shift': self.uptime_seconds_shift,
-            'active_alarms': 1 if self.fault_active else 0,
-            'alarm_codes': self.fault_code if self.fault_active else None,
+            'spindle_speed_rpm': random.randint(1000, 4000) if is_producing else None,
+            'feed_rate_mm_min': round(random.uniform(100, 500), 2) if is_producing else None,
+            'tool_number': self.current_tool,
+            'program_number': f"NC{random.randint(1000, 9999)}" if is_producing else None,
+            'power_consumption_kw': round(random.uniform(30, 80), 2) if is_producing else round(random.uniform(5, 15), 2),
+            'energy_consumed_kwh': round(random.uniform(1000, 50000), 2),
+            'temperature_setpoint_c': round(random.uniform(40, 70), 2),
+            'temperature_actual_c': round(random.uniform(35, 75), 2),
+            'pressure_setpoint_bar': round(random.uniform(100, 150), 2),
+            'pressure_actual_bar': round(random.uniform(95, 155), 2),
+            'downtime_seconds_shift': 0 if is_producing else SCADA_SAMPLING_INTERVAL,
+            'last_fault_timestamp': current_ts if fault_detected else None,
+            'uptime_seconds_shift': SCADA_SAMPLING_INTERVAL if is_producing else 0,
+            'active_alarms': 1 if fault_detected else 0,
+            'alarm_codes': fault_code if fault_detected else None,
             'warning_codes': None,
             'shift_id': shift['shift_id'],
-            'operator_id': operator['employee_id'] if operator else None,
+            'operator_id': shift.get('operator_id'),
             'data_source': 'PLC',
             'data_quality': 'good',
-            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            'created_at': datetime.now()
         }
-        
-        return record
-    
-    def reset_shift_counters(self):
-        """Reset shift counters (called at shift change)"""
-        self.parts_produced_shift = 0
-        self.parts_rejected_shift = 0
-        self.downtime_seconds_shift = 0
-        self.uptime_seconds_shift = 0
-
-
-def initialize_kafka():
-    """Initialize Kafka producer"""
-    global kafka_producer
-    
-    if not KAFKA_AVAILABLE:
-        logger.warning("Kafka not available - skipping Kafka initialization")
-        return False
-    
-    try:
-        kafka_producer = KafkaProducer(
-            bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-            acks='all',
-            retries=3
-        )
-        logger.info(f"Kafka producer initialized: {KAFKA_BOOTSTRAP_SERVERS}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to initialize Kafka: {e}")
-        return False
 
 
 def initialize_postgres():
@@ -357,22 +290,6 @@ def initialize_postgres():
     except Exception as e:
         logger.error(f"Failed to connect to PostgreSQL: {e}")
         logger.info("Daemon will continue without database writes")
-        return False
-
-
-def send_to_kafka(record: Dict):
-    """Send record to Kafka"""
-    if not kafka_producer:
-        return False
-    
-    try:
-        future = kafka_producer.send(KAFKA_TOPIC, record)
-        future.get(timeout=10)
-        stats['kafka_sent'] += 1
-        return True
-    except Exception as e:
-        logger.error(f"Failed to send to Kafka: {e}")
-        stats['errors'] += 1
         return False
 
 
@@ -438,7 +355,6 @@ def print_stats():
     logger.info(f"SCADA Daemon Statistics")
     logger.info(f"  Uptime: {elapsed:.1f} seconds")
     logger.info(f"  Records Generated: {stats['records_generated']:,}")
-    logger.info(f"  Kafka Sent: {stats['kafka_sent']:,}")
     logger.info(f"  PostgreSQL Inserted: {stats['postgres_inserted']:,}")
     logger.info(f"  Errors: {stats['errors']}")
     logger.info(f"  Rate: {rate:.2f} records/sec")
@@ -460,125 +376,200 @@ def load_master_data():
         return None
 
 
+def get_scada_data_count():
+    """Get current count of scada_machine_data records from PostgreSQL"""
+    try:
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_DATABASE,
+            user=PG_USER,
+            password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE,
+            connect_timeout=10
+        )
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM scada_machine_data;")
+        count = cursor.fetchone()[0]
+        cursor.close()
+        conn.close()
+        return count
+    except Exception as e:
+        logger.warning(f"Could not get scada_machine_data count: {e}")
+        return None
+
+
 def main():
-    """Main daemon loop"""
+    """Main - Generate all data in-memory, then bulk dump"""
     logger.info("="*80)
-    logger.info("GenIMS PLC/SCADA Daemon Starting")
+    logger.info("GenIMS PLC/SCADA Daemon - ULTRA FAST MODE (In-Memory Generation)")
     logger.info("="*80)
+    
+    start_time = time.time()
     
     # Load master data
     master_data = load_master_data()
     if not master_data:
-        logger.error("Failed to load master data. Exiting.")
+        logger.error("Failed to load master data")
         return 1
     
     machines = master_data['machines']
     employees = master_data['employees']
     shifts = master_data['shifts']
     
-    logger.info(f"Loaded {len(machines)} machines")
+    logger.info(f"Loaded {len(machines):,} machines")
     
-    # Initialize connections
-    kafka_enabled = initialize_kafka()
-    postgres_enabled = initialize_postgres()
-    
-    if not kafka_enabled and not postgres_enabled:
-        logger.warning("Neither Kafka nor PostgreSQL available - daemon will only log to console")
-    
-    # Create machine simulators
+    # Create simulators
     simulators = [MachineSimulator(machine, employees, shifts) for machine in machines]
-    logger.info(f"Created {len(simulators)} machine simulators")
+    logger.info(f"Created {len(simulators):,} machine simulators")
     
-    # Inject some faults for demonstration
-    num_faults = int(len(simulators) * 0.03)  # 3% of machines
+    # Parse simulation times - use current date when daemon runs
+    start_date_str = datetime.now().strftime('%Y-%m-%d')
+    start_time_str = os.getenv('SIMULATION_START_TIME', '00:00:00')
+    sim_base_time = datetime.strptime(f"{start_date_str} {start_time_str}", '%Y-%m-%d %H:%M:%S')
+    
+    # Inject faults (3% of machines)
+    num_faults = int(len(simulators) * 0.03)
     fault_machines = random.sample(simulators, num_faults)
     
     fault_types = [
-        ('BEAR-001', 'Bearing degradation detected'),
+        ('BEAR-001', 'Bearing degradation'),
         ('THERM-001', 'Motor thermal overload'),
         ('HYD-001', 'Hydraulic pressure loss'),
-        ('TOOL-001', 'Cutting tool wear detected')
+        ('TOOL-001', 'Tool wear detected')
     ]
     
     for sim in fault_machines:
         fault_code, fault_desc = random.choice(fault_types)
-        sim.inject_fault(fault_code, fault_desc, random.randint(300, 1800))
+        sim.fault_code = fault_code
+        sim.fault_description = fault_desc
+        sim.fault_active = True
+        sim.fault_start_offset = random.randint(1000, 10000)  # seconds into sim
     
-    logger.info(f"Injected {num_faults} fault conditions")
-    logger.info(f"Streaming interval: {SCADA_SAMPLING_INTERVAL} seconds")
-    logger.info("Press Ctrl+C to stop")
+    logger.info(f"✓ Injected {num_faults} fault conditions")
+    logger.info(f"Target records: {TOTAL_RECORDS:,}")
+    
+    # Get baseline count before generation
+    count_before = get_scada_data_count()
+    if count_before is not None:
+        logger.info(f"📊 Baseline: {count_before:,} records already in scada_machine_data")
+    
+    logger.info("="*80)
+    logger.info("GENERATING ALL DATA IN MEMORY...")
     logger.info("="*80)
     
-    # Main loop
-    iteration = 0
-    last_stats_time = time.time()
+    # Generate ALL records in memory
+    all_records = []
+    records_per_machine = TOTAL_RECORDS // len(simulators)
+    remainder = TOTAL_RECORDS % len(simulators)
     
-    while running:
-        try:
-            loop_start = time.time()
-            
-            # Generate readings from all machines
-            for simulator in simulators:
-                record = simulator.get_next_reading()
-                stats['records_generated'] += 1
-                
-                # Send to Kafka
-                if kafka_enabled:
-                    send_to_kafka(record)
-                
-                # Add to batch for PostgreSQL
-                if postgres_enabled:
-                    scada_batch.append(record)
-                
-                # Sample log
-                if random.random() < 0.01:  # 1% sampling
-                    logger.info(f"Sample: {simulator.machine_id} - State: {record['machine_state']}, "
-                              f"OEE: {record['oee_percentage']:.1f}%, "
-                              f"Parts: {record['parts_produced_shift']}")
-            
-            # Flush to PostgreSQL if batch is full
-            if len(scada_batch) >= BATCH_SIZE and postgres_enabled:
-                flush_to_postgres()
-            
-            # Print stats every 60 seconds
-            if time.time() - last_stats_time > 60:
-                print_stats()
-                last_stats_time = time.time()
-            
-            # Sleep to maintain interval
-            elapsed = time.time() - loop_start
-            sleep_time = max(0, SCADA_SAMPLING_INTERVAL - elapsed)
-            
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-            else:
-                logger.warning(f"Loop took {elapsed:.2f}s - falling behind sampling rate!")
-            
-            iteration += 1
+    for machine_idx, sim in enumerate(simulators):
+        num_records = records_per_machine + (1 if machine_idx < remainder else 0)
         
+        for record_idx in range(num_records):
+            timestamp_offset = record_idx * SCADA_SAMPLING_INTERVAL
+            reading = sim.get_reading(timestamp_offset, sim_base_time)
+            all_records.append(reading)
+        
+        if (machine_idx + 1) % 50 == 0:
+            logger.info(f"  Generated {machine_idx + 1:,} / {len(simulators):,} machine streams")
+    
+    logger.info(f"✓ Generated {len(all_records):,} total records in memory")
+    
+    # Bulk dump to PostgreSQL
+    logger.info("="*80)
+    logger.info("BULK DUMPING TO POSTGRESQL...")
+    logger.info("="*80)
+    
+    if POSTGRES_AVAILABLE:
+        try:
+            conn = psycopg2.connect(
+                host=PG_HOST,
+                port=PG_PORT,
+                database=PG_DATABASE,
+                user=PG_USER,
+                password=PG_PASSWORD,
+                sslmode=PG_SSL_MODE,
+                connect_timeout=30
+            )
+            conn.autocommit = False
+            cursor = conn.cursor()
+            
+            # Disable FK checks
+            cursor.execute("SET CONSTRAINTS ALL DEFERRED;")
+            
+            insert_sql = """
+                INSERT INTO scada_machine_data (
+                    machine_id, line_id, factory_id, timestamp, machine_state, operation_mode,
+                    fault_code, fault_description, parts_produced_cumulative, parts_produced_shift,
+                    parts_rejected_shift, target_cycle_time_seconds, actual_cycle_time_seconds,
+                    availability_percentage, performance_percentage, quality_percentage, oee_percentage,
+                    spindle_speed_rpm, feed_rate_mm_min, tool_number, program_number,
+                    power_consumption_kw, energy_consumed_kwh, temperature_setpoint_c, temperature_actual_c,
+                    pressure_setpoint_bar, pressure_actual_bar, downtime_seconds_shift, last_fault_timestamp,
+                    uptime_seconds_shift, active_alarms, alarm_codes, warning_codes,
+                    shift_id, operator_id, data_source, data_quality, created_at
+                ) VALUES (
+                    %(machine_id)s, %(line_id)s, %(factory_id)s, %(timestamp)s, %(machine_state)s, %(operation_mode)s,
+                    %(fault_code)s, %(fault_description)s, %(parts_produced_cumulative)s, %(parts_produced_shift)s,
+                    %(parts_rejected_shift)s, %(target_cycle_time_seconds)s, %(actual_cycle_time_seconds)s,
+                    %(availability_percentage)s, %(performance_percentage)s, %(quality_percentage)s, %(oee_percentage)s,
+                    %(spindle_speed_rpm)s, %(feed_rate_mm_min)s, %(tool_number)s, %(program_number)s,
+                    %(power_consumption_kw)s, %(energy_consumed_kwh)s, %(temperature_setpoint_c)s, %(temperature_actual_c)s,
+                    %(pressure_setpoint_bar)s, %(pressure_actual_bar)s, %(downtime_seconds_shift)s, %(last_fault_timestamp)s,
+                    %(uptime_seconds_shift)s, %(active_alarms)s, %(alarm_codes)s, %(warning_codes)s,
+                    %(shift_id)s, %(operator_id)s, %(data_source)s, %(data_quality)s, %(created_at)s
+                )
+                ON CONFLICT (scada_id) DO NOTHING
+            """
+            
+            logger.info(f"Inserting {len(all_records):,} records in batches of {BATCH_SIZE:,}...")
+            
+            inserted_count = 0
+            for i in range(0, len(all_records), BATCH_SIZE):
+                batch = all_records[i:i+BATCH_SIZE]
+                try:
+                    execute_batch(cursor, insert_sql, batch, page_size=1000)
+                    conn.commit()
+                    inserted_count += len(batch)
+                    logger.info(f"  Flushed {inserted_count:,} / {len(all_records):,} records")
+                except psycopg2.IntegrityError as e:
+                    logger.warning(f"Integrity error: {str(e)[:80]}... - Skipping batch")
+                    conn.rollback()
+                    continue
+                except Exception as e:
+                    logger.error(f"Batch error: {e}")
+                    conn.rollback()
+                    continue
+            
+            cursor.close()
+            conn.close()
+            
+            logger.info(f"✓ Inserted {inserted_count:,} records successfully")
+            
         except Exception as e:
-            logger.error(f"Error in main loop: {e}", exc_info=True)
-            stats['errors'] += 1
-            time.sleep(1)
+            logger.error(f"PostgreSQL error: {e}")
+            return 1
     
-    # Cleanup
-    logger.info("Shutting down...")
+    elapsed = time.time() - start_time
+    rate = len(all_records) / elapsed if elapsed > 0 else 0
     
-    # Flush remaining records
-    if postgres_enabled and scada_batch:
-        flush_to_postgres()
+    # Get final count after insertion
+    count_after = get_scada_data_count()
     
-    # Close connections
-    if kafka_producer:
-        kafka_producer.close()
-        logger.info("Kafka producer closed")
+    logger.info("="*80)
+    logger.info("GENERATION COMPLETE")
+    logger.info(f"  Total time: {elapsed:.1f} seconds")
+    logger.info(f"  Records generated: {len(all_records):,}")
+    logger.info(f"  Generation rate: {rate:,.0f} records/sec")
     
-    if pg_connection:
-        pg_connection.close()
-        logger.info("PostgreSQL connection closed")
+    if count_before is not None and count_after is not None:
+        inserted = count_after - count_before
+        logger.info(f"📊 Database before: {count_before:,} records")
+        logger.info(f"📊 Database after:  {count_after:,} records")
+        logger.info(f"📊 Records inserted: {inserted:,}")
     
-    print_stats()
-    logger.info("SCADA Daemon stopped")
+    logger.info("="*80)
     
     return 0
 

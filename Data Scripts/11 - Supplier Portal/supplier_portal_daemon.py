@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-GenIMS Supplier Portal Daemon
-Handles automated operations for supplier management, RFQ processing,
-performance tracking, invoice matching, and supplier notifications
+GenIMS Supplier Portal Daemon - ULTRA FAST MODE
+Generates complete supplier portal operations in-memory, then bulk dumps to PostgreSQL
 """
 
 import sys
@@ -12,10 +11,8 @@ import logging
 import signal
 from datetime import datetime, timedelta
 import random
-import json
 from dotenv import load_dotenv
 
-# Load environment variables
 env_file = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'config.env')
 if os.path.exists(env_file):
     load_dotenv(env_file)
@@ -26,20 +23,24 @@ try:
     POSTGRES_AVAILABLE = True
 except ImportError:
     POSTGRES_AVAILABLE = False
-    print("WARNING: psycopg2 not installed")
 
 # Configuration
 PG_HOST = os.getenv('POSTGRES_HOST', 'localhost')
 PG_PORT = int(os.getenv('POSTGRES_PORT', '5432'))
-PG_DATABASE = os.getenv('DB_SUPPLIER', 'genims_supplier_db')
 PG_USER = os.getenv('POSTGRES_USER', 'postgres')
 PG_PASSWORD = os.getenv('POSTGRES_PASSWORD', '')
 PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
 
-# Logging configuration
+PG_SUPPLIER_DB = os.getenv('DB_SUPPLIER', 'genims_supplier_db')
+
+BATCH_SIZE = 5000
+TOTAL_RECORDS = 14400  # 30 days worth
+
+# Logging
 log_dir = os.getenv('DAEMON_LOG_DIR', os.path.join(os.path.dirname(__file__), '..', '..', 'logs'))
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, 'supplier_portal_daemon.log')
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -48,27 +49,18 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('Supplier Portal')
+logger = logging.getLogger('SupplierPortalDaemon')
 
-
-
-running = True
+# Global State
 pg_connection = None
-stats = {
-    'cycles': 0,
-    'rfq_notifications': 0,
-    'performance_calculations': 0,
-    'scorecards_generated': 0,
-    'invoices_matched': 0,
-    'document_alerts': 0,
-    'contract_updates': 0,
-    'start_time': datetime.now()
+master_data = {}
+counters = {
+    'requisition': 1, 'rfq': 1, 'invoice': 1, 'audit': 1, 'performance': 1
 }
 
 def signal_handler(sig, frame):
-    global running
     logger.info("Shutdown signal received")
-    running = False
+    sys.exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
@@ -79,633 +71,425 @@ def initialize_database():
         return False
     try:
         pg_connection = psycopg2.connect(
-            host=PG_HOST, port=PG_PORT, database=PG_DATABASE,
-            user=PG_USER, password=PG_PASSWORD,
-            sslmode=PG_SSL_MODE
+            host=PG_HOST, port=PG_PORT, database=PG_SUPPLIER_DB,
+            user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE, connect_timeout=30
         )
         pg_connection.autocommit = False
-        logger.info("PostgreSQL connected")
+        logger.info(f"PostgreSQL connection established: {PG_HOST}:{PG_PORT}/{PG_SUPPLIER_DB}")
         return True
     except Exception as e:
-        logger.error(f"DB connection failed: {e}")
+        logger.error(f"PostgreSQL connection failed: {e}")
         return False
 
-def generate_id(prefix: str) -> str:
-    return f"{prefix}-{datetime.now().strftime('%Y%m%d%H%M%S')}-{random.randint(1000, 9999)}"
-
-# ============================================================================
-# RFQ MANAGEMENT
-# ============================================================================
-
-def monitor_rfq_deadlines():
-    """Monitor RFQ response deadlines and send reminders"""
-    logger.info("Monitoring RFQ deadlines...")
-    
+def get_table_count(table_name):
     try:
-        cursor = pg_connection.cursor()
-        
-        # Find RFQs with upcoming deadlines (3 days)
-        cursor.execute("""
-            SELECT rh.rfq_id, rh.rfq_number, rh.rfq_title,
-                   rh.response_deadline, rs.supplier_id
-            FROM rfq_headers rh
-            JOIN rfq_suppliers rs ON rh.rfq_id = rs.rfq_id
-            WHERE rh.rfq_status = 'response_period'
-            AND rs.response_status = 'pending'
-            AND rh.response_deadline BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '3 days'
-        """)
-        
-        pending_responses = cursor.fetchall()
-        
-        for rfq_id, rfq_number, title, deadline, supplier_id in pending_responses:
-            # Create notification
-            cursor.execute("""
-                INSERT INTO supplier_notifications (
-                    notification_id, supplier_id, notification_type,
-                    notification_title, notification_message,
-                    reference_type, reference_id, priority, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (generate_id('NOTIF'), supplier_id, 'rfq_deadline_reminder',
-                  f'RFQ Response Deadline Approaching: {rfq_number}',
-                  f'Please submit your response for RFQ "{title}" by {deadline}',
-                  'rfq', rfq_id, 'high', datetime.now()))
-            
-            stats['rfq_notifications'] += 1
-        
-        pg_connection.commit()
+        conn = psycopg2.connect(host=PG_HOST, port=PG_PORT, database=PG_SUPPLIER_DB,
+            user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE, connect_timeout=10)
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT COUNT(*) FROM {table_name};")
+        count = cursor.fetchone()[0]
         cursor.close()
-        
-        if pending_responses:
-            logger.info(f"Sent {len(pending_responses)} RFQ deadline reminders")
+        conn.close()
+        return count
     except Exception as e:
-        logger.error(f"Error monitoring RFQ deadlines: {e}")
-        pg_connection.rollback()
+        logger.warning(f"Could not get {table_name} count: {e}")
+        return None
 
-def close_expired_rfqs():
-    """Close RFQs that have passed deadline"""
-    logger.info("Checking for expired RFQs...")
-    
+def get_all_table_counts():
+    tables = ['purchase_requisitions', 'rfq_headers', 'supplier_invoices', 'supplier_audits', 'supplier_performance_metrics']
+    counts = {}
+    for table in tables:
+        counts[table] = get_table_count(table)
+    return counts
+
+def get_max_id_counter(table_name, id_column):
+    """Get the next ID counter for a given table"""
     try:
         cursor = pg_connection.cursor()
-        
-        # Find RFQs past deadline
-        cursor.execute("""
-            UPDATE rfq_headers
-            SET rfq_status = 'evaluation'
-            WHERE rfq_status = 'response_period'
-            AND response_deadline < CURRENT_DATE
-            RETURNING rfq_id, rfq_number
-        """)
-        
-        closed_rfqs = cursor.fetchall()
-        
-        # Mark pending suppliers as 'no_response'
-        for rfq_id, rfq_number in closed_rfqs:
-            cursor.execute("""
-                UPDATE rfq_suppliers
-                SET response_status = 'no_response'
-                WHERE rfq_id = %s
-                AND response_status = 'pending'
-            """, (rfq_id,))
-            
-            logger.info(f"Closed RFQ {rfq_number}")
-        
-        pg_connection.commit()
+        cursor.execute(f"SELECT MAX(CAST(SUBSTRING({id_column}, '\\d+$') AS INTEGER)) FROM {table_name}")
+        max_id = cursor.fetchone()[0]
         cursor.close()
-        
-        if closed_rfqs:
-            logger.info(f"Closed {len(closed_rfqs)} expired RFQs")
+        return (max_id or 0) + 1
     except Exception as e:
-        logger.error(f"Error closing expired RFQs: {e}")
-        pg_connection.rollback()
+        logger.debug(f"Could not get max ID from {table_name}.{id_column}: {e}")
+        return 1
 
-# ============================================================================
-# SUPPLIER PERFORMANCE
-# ============================================================================
-
-def calculate_monthly_performance():
-    """Calculate supplier performance metrics for last month"""
-    logger.info("Calculating supplier performance metrics...")
-    
+def initialize_id_counters():
+    """Initialize counters from existing data in database"""
+    global counters
     try:
-        cursor = pg_connection.cursor()
+        counters['requisition'] = get_max_id_counter('purchase_requisitions', 'requisition_id')
+        counters['rfq'] = get_max_id_counter('rfq_headers', 'rfq_id')
+        counters['invoice'] = get_max_id_counter('supplier_invoices', 'invoice_id')
+        counters['audit'] = get_max_id_counter('supplier_audits', 'audit_id')
+        counters['performance'] = get_max_id_counter('supplier_performance_metrics', 'metric_id')
         
-        # Check if we need to calculate (1st day of month)
-        if datetime.now().day != 1:
-            return
-        
-        last_month = (datetime.now().replace(day=1) - timedelta(days=1))
-        metric_period = last_month.strftime('%Y-%m')
-        
-        # Get all active suppliers
-        cursor.execute("SELECT supplier_id FROM suppliers WHERE is_active = true")
-        suppliers = cursor.fetchall()
-        
-        for (supplier_id,) in suppliers:
-            # Calculate delivery performance
-            cursor.execute("""
-                SELECT 
-                    COUNT(*) as total_pos,
-                    COUNT(*) FILTER (WHERE actual_delivery_date <= promised_delivery_date) as ontime
-                FROM purchase_orders
-                WHERE supplier_id = %s
-                AND order_date >= %s AND order_date < %s
-                AND order_status IN ('delivered', 'completed')
-            """, (supplier_id, last_month.replace(day=1), last_month.replace(day=1) + timedelta(days=32)))
-            
-            delivery_data = cursor.fetchone()
-            total_pos = delivery_data[0] if delivery_data[0] else 0
-            ontime_pos = delivery_data[1] if delivery_data[1] else 0
-            ontime_pct = (ontime_pos / total_pos * 100) if total_pos > 0 else 0
-            
-            # Calculate quality performance (would integrate with WMS/Quality tables)
-            # Simplified for demonstration
-            defect_ppm = random.randint(50, 500)  # Parts per million
-            quality_pct = 100 - (defect_ppm / 10000)
-            
-            # Calculate responsiveness (from RFQs)
-            cursor.execute("""
-                SELECT 
-                    COUNT(*) as rfqs_sent,
-                    COUNT(*) FILTER (WHERE response_status = 'responded') as responded
-                FROM rfq_suppliers
-                WHERE supplier_id = %s
-                AND invited_date >= %s AND invited_date < %s
-            """, (supplier_id, last_month.replace(day=1), last_month.replace(day=1) + timedelta(days=32)))
-            
-            rfq_data = cursor.fetchone()
-            rfqs_sent = rfq_data[0] if rfq_data[0] else 0
-            rfqs_responded = rfq_data[1] if rfq_data[1] else 0
-            response_rate = (rfqs_responded / rfqs_sent * 100) if rfqs_sent > 0 else 0
-            
-            # Calculate overall score
-            overall_score = (
-                ontime_pct * 0.3 +
-                quality_pct * 0.4 +
-                response_rate * 0.2 +
-                95.0 * 0.1  # Commercial score placeholder
-            )
-            
-            # Determine rating
-            if overall_score >= 95:
-                rating = 'excellent'
-            elif overall_score >= 85:
-                rating = 'good'
-            elif overall_score >= 75:
-                rating = 'acceptable'
-            elif overall_score >= 60:
-                rating = 'needs_improvement'
-            else:
-                rating = 'poor'
-            
-            # Insert metric
-            cursor.execute("""
-                INSERT INTO supplier_performance_metrics (
-                    metric_id, supplier_id, metric_period,
-                    total_pos_issued, pos_delivered_ontime, ontime_delivery_pct,
-                    defect_ppm, quality_acceptance_pct,
-                    rfqs_sent, rfqs_responded, response_rate_pct,
-                    overall_score, performance_rating, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (supplier_id, metric_period) DO NOTHING
-            """, (generate_id('METRIC'), supplier_id, metric_period,
-                  total_pos, ontime_pos, round(ontime_pct, 2),
-                  defect_ppm, round(quality_pct, 2),
-                  rfqs_sent, rfqs_responded, round(response_rate, 2),
-                  round(overall_score, 2), rating, datetime.now()))
-            
-            stats['performance_calculations'] += 1
-        
-        pg_connection.commit()
-        cursor.close()
-        
-        logger.info(f"Calculated performance for {len(suppliers)} suppliers")
+        logger.info(f"ID Counters initialized: {counters}")
+        return True
     except Exception as e:
-        logger.error(f"Error calculating performance: {e}")
-        pg_connection.rollback()
+        logger.error(f"Failed to initialize ID counters: {e}")
+        return False
 
-def generate_supplier_scorecards():
-    """Generate monthly supplier scorecards"""
-    logger.info("Generating supplier scorecards...")
-    
+def load_master_data():
+    global master_data
     try:
-        cursor = pg_connection.cursor()
+        conn = psycopg2.connect(
+            host=PG_HOST, port=PG_PORT, database=PG_SUPPLIER_DB,
+            user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE, connect_timeout=30
+        )
+        cursor = conn.cursor()
         
-        # Only on 1st of month
-        if datetime.now().day != 1:
-            return
+        # Load suppliers from supplier_contracts or other tables
+        cursor.execute("SELECT DISTINCT supplier_id FROM supplier_contracts LIMIT 50")
+        suppliers = [row[0] for row in cursor.fetchall()]
         
-        last_month = (datetime.now().replace(day=1) - timedelta(days=1))
-        scorecard_period = last_month.strftime('%Y-%m')
+        # Load users
+        cursor.execute("SELECT portal_user_id FROM supplier_portal_users LIMIT 30")
+        users = [row[0] for row in cursor.fetchall()]
         
-        # Get performance metrics for last month
+        # Load departments (might be in another DB, use placeholders)
+        departments = [f"DEPT-{i:03d}" for i in range(1, 11)]
+        
+        # Load existing performance metrics to avoid duplicates on (supplier_id, metric_period)
         cursor.execute("""
-            SELECT supplier_id, ontime_delivery_pct, quality_acceptance_pct,
-                   response_rate_pct, overall_score, performance_rating
+            SELECT supplier_id, metric_period
             FROM supplier_performance_metrics
-            WHERE metric_period = %s
-        """, (scorecard_period,))
+        """)
+        existing_metrics = set(cursor.fetchall())
         
-        metrics = cursor.fetchall()
-        
-        for supplier_id, delivery_score, quality_score, resp_score, overall_score, rating in metrics:
-            # Generate scorecard
-            cursor.execute("""
-                INSERT INTO supplier_scorecards (
-                    scorecard_id, supplier_id, scorecard_period,
-                    scorecard_type, delivery_score, quality_score,
-                    responsiveness_score, commercial_score, sustainability_score,
-                    overall_score, supplier_rating, action_required,
-                    published_to_supplier, published_date, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (supplier_id, scorecard_period) DO NOTHING
-            """, (generate_id('SCORECARD'), supplier_id, scorecard_period,
-                  'monthly', delivery_score, quality_score, resp_score,
-                  95.0,  # Commercial score
-                  85.0,  # Sustainability score
-                  overall_score, rating,
-                  overall_score < 75,  # Action required if < 75
-                  True, datetime.now(), datetime.now()))
-            
-            # Send notification to supplier
-            cursor.execute("""
-                INSERT INTO supplier_notifications (
-                    notification_id, supplier_id, notification_type,
-                    notification_title, notification_message,
-                    reference_type, priority, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, (generate_id('NOTIF'), supplier_id, 'performance_review',
-                  f'Performance Scorecard - {scorecard_period}',
-                  f'Your performance scorecard for {scorecard_period} is available. Overall rating: {rating}',
-                  'scorecard', 'normal', datetime.now()))
-            
-            stats['scorecards_generated'] += 1
-        
-        pg_connection.commit()
         cursor.close()
+        conn.close()
         
-        logger.info(f"Generated {len(metrics)} scorecards")
-    except Exception as e:
-        logger.error(f"Error generating scorecards: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# INVOICE 3-WAY MATCHING
-# ============================================================================
-
-def process_invoice_matching():
-    """Process 3-way matching for new invoices"""
-    logger.info("Processing invoice 3-way matching...")
-    
-    try:
-        cursor = pg_connection.cursor()
+        master_data['suppliers'] = suppliers or ['SUP-000001', 'SUP-000002']
+        master_data['users'] = users or ['USER-000001']
+        master_data['departments'] = departments
+        master_data['existing_metrics'] = existing_metrics
         
-        # Get pending invoices
-        cursor.execute("""
-            SELECT si.invoice_id, si.supplier_id, si.purchase_order_id,
-                   si.total_amount, si.subtotal
-            FROM supplier_invoices si
-            WHERE si.matching_status = 'pending'
-            AND si.invoice_status = 'received'
-            LIMIT 20
-        """)
-        
-        pending_invoices = cursor.fetchall()
-        
-        for invoice_id, supplier_id, po_id, total_amount, subtotal in pending_invoices:
-            try:
-                # Get PO total
-                cursor.execute("""
-                    SELECT total_amount FROM purchase_orders
-                    WHERE purchase_order_id = %s
-                """, (po_id,))
-                
-                po_data = cursor.fetchone()
-                if not po_data:
-                    continue
-                
-                po_total = po_data[0]
-                
-                # Calculate variance
-                variance_amount = total_amount - po_total
-                variance_pct = (variance_amount / po_total * 100) if po_total > 0 else 0
-                
-                # Determine if within tolerance (2%)
-                within_tolerance = abs(variance_pct) <= 2.0
-                
-                # Determine matching result
-                if abs(variance_pct) < 0.1:
-                    match_result = 'matched'
-                    match_status = 'matched'
-                    action = 'auto_approved'
-                elif within_tolerance:
-                    match_result = 'matched'
-                    match_status = 'matched'
-                    action = 'auto_approved'
-                else:
-                    match_result = 'variance'
-                    match_status = 'variance'
-                    action = 'pending_review'
-                
-                # Update invoice
-                cursor.execute("""
-                    UPDATE supplier_invoices
-                    SET matching_status = %s,
-                        po_match = true,
-                        price_match = %s,
-                        total_variance = %s,
-                        invoice_status = CASE 
-                            WHEN %s = 'matched' THEN 'approved'
-                            ELSE 'under_review'
-                        END
-                    WHERE invoice_id = %s
-                """, (match_status, abs(variance_pct) < 2, variance_amount,
-                      match_status, invoice_id))
-                
-                # Create 3-way match log
-                cursor.execute("""
-                    INSERT INTO three_way_match_log (
-                        log_id, invoice_id, match_timestamp, match_type,
-                        po_id, match_result, expected_amount, actual_amount,
-                        variance_amount, variance_pct, within_tolerance,
-                        tolerance_pct, action_taken
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, (generate_id('MATCH'), invoice_id, datetime.now(), 'automatic',
-                      po_id, match_result, po_total, total_amount,
-                      variance_amount, round(variance_pct, 2), within_tolerance,
-                      2.0, action))
-                
-                # If variance, send notification
-                if match_status == 'variance':
-                    cursor.execute("""
-                        INSERT INTO supplier_notifications (
-                            notification_id, supplier_id, notification_type,
-                            notification_title, notification_message,
-                            reference_type, reference_id, priority, created_at
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """, (generate_id('NOTIF'), supplier_id, 'invoice_variance',
-                          'Invoice Variance Detected',
-                          f'Invoice variance of {variance_pct:.2f}% requires review',
-                          'invoice', invoice_id, 'high', datetime.now()))
-                
-                stats['invoices_matched'] += 1
-                
-            except Exception as e:
-                logger.error(f"Error matching invoice {invoice_id}: {e}")
-                continue
-        
-        pg_connection.commit()
-        cursor.close()
-        
-        if pending_invoices:
-            logger.info(f"Processed {len(pending_invoices)} invoice matches")
-    except Exception as e:
-        logger.error(f"Error processing invoice matching: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# DOCUMENT EXPIRY MONITORING
-# ============================================================================
-
-def check_document_expiry():
-    """Check for expiring supplier documents"""
-    logger.info("Checking document expiry...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Find documents expiring in next 60 days
-        cursor.execute("""
-            SELECT sd.document_id, sd.supplier_id, sd.document_type,
-                   sd.document_name, sd.expiry_date,
-                   sd.expiry_date - CURRENT_DATE as days_to_expiry
-            FROM supplier_documents sd
-            WHERE sd.document_status = 'verified'
-            AND sd.expiry_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '60 days'
-            AND sd.expiry_alert_sent = false
-        """)
-        
-        expiring_docs = cursor.fetchall()
-        
-        for doc_id, supplier_id, doc_type, doc_name, expiry_date, days_to_expiry in expiring_docs:
-            # Determine priority
-            if days_to_expiry <= 30:
-                priority = 'urgent'
-            else:
-                priority = 'high'
-            
-            # Send notification
-            cursor.execute("""
-                INSERT INTO supplier_notifications (
-                    notification_id, supplier_id, notification_type,
-                    notification_title, notification_message,
-                    reference_type, priority, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, (generate_id('NOTIF'), supplier_id, 'document_expiring',
-                  f'Document Expiring: {doc_type}',
-                  f'{doc_name} will expire on {expiry_date} ({days_to_expiry} days)',
-                  'document', priority, datetime.now()))
-            
-            # Mark alert sent
-            cursor.execute("""
-                UPDATE supplier_documents
-                SET expiry_alert_sent = true,
-                    days_to_expiry = %s
-                WHERE document_id = %s
-            """, (days_to_expiry, doc_id))
-            
-            stats['document_alerts'] += 1
-        
-        # Mark expired documents
-        cursor.execute("""
-            UPDATE supplier_documents
-            SET document_status = 'expired'
-            WHERE expiry_date < CURRENT_DATE
-            AND document_status = 'verified'
-        """)
-        
-        pg_connection.commit()
-        cursor.close()
-        
-        if expiring_docs:
-            logger.info(f"Sent {len(expiring_docs)} document expiry alerts")
-    except Exception as e:
-        logger.error(f"Error checking document expiry: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# CONTRACT MANAGEMENT
-# ============================================================================
-
-def update_contract_status():
-    """Update contract status based on dates"""
-    logger.info("Updating contract status...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Mark expired contracts
-        cursor.execute("""
-            UPDATE supplier_contracts
-            SET contract_status = 'expired'
-            WHERE end_date < CURRENT_DATE
-            AND contract_status = 'active'
-            RETURNING contract_id, supplier_id, contract_number
-        """)
-        
-        expired_contracts = cursor.fetchall()
-        
-        for contract_id, supplier_id, contract_number in expired_contracts:
-            # Send notification
-            cursor.execute("""
-                INSERT INTO supplier_notifications (
-                    notification_id, supplier_id, notification_type,
-                    notification_title, notification_message,
-                    reference_type, reference_id, priority, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (generate_id('NOTIF'), supplier_id, 'contract_expired',
-                  f'Contract Expired: {contract_number}',
-                  f'Contract {contract_number} has expired. Please contact us for renewal.',
-                  'contract', contract_id, 'high', datetime.now()))
-            
-            # Mark pricing as inactive
-            cursor.execute("""
-                UPDATE contract_pricing
-                SET is_active = false
-                WHERE contract_id = %s
-            """, (contract_id,))
-            
-            stats['contract_updates'] += 1
-        
-        # Notify about contracts expiring in 60 days
-        cursor.execute("""
-            SELECT sc.contract_id, sc.supplier_id, sc.contract_number, sc.end_date
-            FROM supplier_contracts sc
-            WHERE sc.contract_status = 'active'
-            AND sc.end_date BETWEEN CURRENT_DATE + INTERVAL '55 days' 
-                                AND CURRENT_DATE + INTERVAL '65 days'
-            AND NOT EXISTS (
-                SELECT 1 FROM supplier_notifications
-                WHERE supplier_id = sc.supplier_id
-                AND reference_id = sc.contract_id
-                AND notification_type = 'contract_expiring'
-                AND created_at > CURRENT_DATE - INTERVAL '30 days'
-            )
-        """)
-        
-        expiring_contracts = cursor.fetchall()
-        
-        for contract_id, supplier_id, contract_number, end_date in expiring_contracts:
-            cursor.execute("""
-                INSERT INTO supplier_notifications (
-                    notification_id, supplier_id, notification_type,
-                    notification_title, notification_message,
-                    reference_type, reference_id, priority, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (generate_id('NOTIF'), supplier_id, 'contract_expiring',
-                  f'Contract Expiring Soon: {contract_number}',
-                  f'Contract {contract_number} will expire on {end_date}. Please initiate renewal discussions.',
-                  'contract', contract_id, 'high', datetime.now()))
-        
-        pg_connection.commit()
-        cursor.close()
-        
-        if expired_contracts or expiring_contracts:
-            logger.info(f"Updated {len(expired_contracts)} expired contracts, notified {len(expiring_contracts)} expiring")
-    except Exception as e:
-        logger.error(f"Error updating contract status: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# MAIN CYCLE
-# ============================================================================
-
-def run_supplier_portal_cycle():
-    """Execute complete supplier portal cycle"""
-    logger.info("=== Supplier Portal Cycle Starting ===")
-    
-    try:
-        # RFQ Management
-        monitor_rfq_deadlines()
-        close_expired_rfqs()
-        
-        # Performance Management (monthly on 1st)
-        calculate_monthly_performance()
-        generate_supplier_scorecards()
-        
-        # Invoice Processing
-        process_invoice_matching()
-        
-        # Document & Contract Management
-        check_document_expiry()
-        update_contract_status()
-        
-        stats['cycles'] += 1
-        logger.info("=== Supplier Portal Cycle Complete ===")
+        logger.info(f"Master data loaded: {len(suppliers)} suppliers, {len(users)} users")
         return True
     except Exception as e:
-        logger.error(f"Cycle error: {e}")
+        logger.error(f"Failed to load master data: {e}")
         return False
 
-def print_stats():
-    """Print daemon statistics"""
-    elapsed = (datetime.now() - stats['start_time']).total_seconds()
-    hours = elapsed / 3600
+def insert_batch_parallel(cursor, insert_sql, data, table_name, batch_size, connection=None):
+    """Insert data in batches"""
+    total_batches = (len(data) + batch_size - 1) // batch_size
     
-    logger.info("="*80)
-    logger.info(f"Supplier Portal Daemon Statistics")
-    logger.info(f"  Uptime: {hours:.1f} hours")
-    logger.info(f"  Cycles: {stats['cycles']}")
-    logger.info(f"  RFQ Notifications: {stats['rfq_notifications']}")
-    logger.info(f"  Performance Calculations: {stats['performance_calculations']}")
-    logger.info(f"  Scorecards Generated: {stats['scorecards_generated']}")
-    logger.info(f"  Invoices Matched: {stats['invoices_matched']}")
-    logger.info(f"  Document Alerts: {stats['document_alerts']}")
-    logger.info(f"  Contract Updates: {stats['contract_updates']}")
-    logger.info("="*80)
+    for batch_idx in range(total_batches):
+        try:
+            batch_start = batch_idx * batch_size
+            batch_end = min((batch_idx + 1) * batch_size, len(data))
+            batch = data[batch_start:batch_end]
+            
+            execute_batch(cursor, insert_sql, batch, page_size=5000)
+            if connection:
+                connection.commit()
+            
+            logger.info(f"  Flushed {batch_end:,} / {len(data):,} {table_name}")
+        except psycopg2.IntegrityError as e:
+            logger.warning(f"  Batch {batch_idx + 1}/{total_batches} - Integrity error, skipping")
+            if connection:
+                connection.rollback()
+        except Exception as e:
+            logger.error(f"  Batch {batch_idx + 1}/{total_batches} error: {e}")
+            if connection:
+                connection.rollback()
 
 def main():
-    """Main daemon loop"""
+    """Main - Generate all supplier portal data in-memory, then bulk dump"""
     logger.info("="*80)
-    logger.info("GenIMS Supplier Portal Daemon Starting")
-    logger.info("Cycle Interval: Every 5 minutes")
+    logger.info("GenIMS Supplier Portal Daemon - ULTRA FAST MODE (In-Memory Generation)")
+    logger.info("="*80)
+    logger.info(f"Configuration:")
+    logger.info(f"  Database: {PG_SUPPLIER_DB}")
+    logger.info(f"  Batch Size: {BATCH_SIZE}")
     logger.info("="*80)
     
+    start_time = time.time()
+    
+    # Initialize
     if not initialize_database():
         return 1
     
-    logger.info("Press Ctrl+C to stop")
+    if not initialize_id_counters():
+        return 1
     
-    last_cycle = datetime.now() - timedelta(hours=1)
+    if not load_master_data():
+        return 1
     
-    while running:
-        try:
-            now = datetime.now()
-            
-            # Run every 5 minutes
-            if (now - last_cycle).total_seconds() >= CYCLE_INTERVAL_SECONDS:
-                run_supplier_portal_cycle()
-                last_cycle = now
-            
-            # Print stats every hour
-            if now.minute == 0:
-                print_stats()
-            
-            time.sleep(30)  # Check every 30 seconds
-            
-        except Exception as e:
-            logger.error(f"Error in main loop: {e}", exc_info=True)
-            time.sleep(30)
+    logger.info("="*80)
+    logger.info("📊 BASELINE DATABASE COUNTS (Before Generation)")
+    logger.info("="*80)
+    counts_before = get_all_table_counts()
+    for table, count in counts_before.items():
+        if count is not None:
+            logger.info(f"  {table:.<40} {count:>10,} records")
+    logger.info("="*80)
     
-    logger.info("Shutting down...")
+    logger.info("="*80)
+    logger.info("GENERATING ALL DATA IN MEMORY...")
+    logger.info("="*80)
+    
+    # Generate data
+    requisitions = []
+    rfq_headers = []
+    invoices = []
+    audits = []
+    performance_metrics = []
+    
+    sim_base_time = datetime.strptime(datetime.now().strftime('%Y-%m-%d 00:00:00'), '%Y-%m-%d %H:%M:%S')
+    run_timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    
+    # Track unique combinations to avoid UNIQUE constraint violations
+    # Load existing combinations from database
+    performance_metrics_seen = set(master_data.get('existing_metrics', []))
+    
+    # Generate supplier portal records
+    for i in range(TOTAL_RECORDS):
+        timestamp_offset = i * 300  # 5 minute intervals
+        current_ts = sim_base_time + timedelta(seconds=timestamp_offset)
+        current_date = current_ts.date()
+        
+        supplier = random.choice(master_data['suppliers'])
+        user = random.choice(master_data['users'])
+        department = random.choice(master_data['departments'])
+        
+        # Purchase Requisitions (1 per 100 records)
+        if i % 100 == 0:
+            req_id = f"REQ-{(counters['requisition'] + i // 100):06d}"
+            req_num = f"PR-{run_timestamp}-{i // 100:04d}"
+            requisitions.append({
+                'requisition_id': req_id,
+                'requisition_number': req_num,
+                'requested_by': user,
+                'department_id': department,
+                'requisition_date': current_date,
+                'required_by_date': current_date + timedelta(days=random.randint(7, 30)),
+                'requisition_type': random.choice(['Standard', 'Emergency', 'Blanket', 'Capital']),
+                'requisition_status': random.choice(['Draft', 'Submitted', 'Approved', 'Rejected', 'Converted']),
+                'estimated_total': round(random.uniform(1000, 50000), 2),
+                'created_at': current_ts
+            })
+        
+        # RFQ Headers (1 per 150 records)
+        if i % 150 == 0:
+            rfq_id = f"RFQ-{(counters['rfq'] + i // 150):06d}"
+            rfq_num = f"RFQ-{run_timestamp}-{i // 150:04d}"
+            rfq_headers.append({
+                'rfq_id': rfq_id,
+                'rfq_number': rfq_num,
+                'rfq_title': f"RFQ for Items {i // 150}",
+                'rfq_type': random.choice(['Standard', 'Spot Buy', 'Contract', 'Service']),
+                'requested_by': user,
+                'department_id': department,
+                'rfq_date': current_date,
+                'response_deadline': current_date + timedelta(days=random.randint(5, 15)),
+                'expected_delivery_date': current_date + timedelta(days=random.randint(20, 60)),
+                'rfq_status': random.choice(['Draft', 'Published', 'Responses Received', 'Evaluated', 'Awarded', 'Cancelled']),
+                'total_estimated_value': round(random.uniform(5000, 100000), 2),
+                'currency_code': 'USD',
+                'created_at': current_ts
+            })
+        
+        # Supplier Invoices (1 per 75 records)
+        if i % 75 == 0:
+            inv_id = f"INV-{(counters['invoice'] + i // 75):06d}"
+            inv_num = f"SI-{run_timestamp}-{i // 75:04d}"
+            supplier_inv_num = f"SUPINV-{random.randint(100000, 999999)}"
+            
+            subtotal = round(random.uniform(1000, 50000), 2)
+            tax = round(subtotal * 0.1, 2)
+            total = subtotal + tax
+            
+            invoices.append({
+                'invoice_id': inv_id,
+                'invoice_number': inv_num,
+                'supplier_invoice_number': supplier_inv_num,
+                'supplier_id': supplier,
+                'invoice_date': current_date,
+                'due_date': current_date + timedelta(days=random.randint(15, 45)),
+                'subtotal': subtotal,
+                'tax_amount': tax,
+                'total_amount': total,
+                'currency_code': 'USD',
+                'invoice_status': random.choice(['Pending', 'Approved', 'Paid', 'Disputed', 'Rejected']),
+                'payment_status': random.choice(['Unpaid', 'Partially Paid', 'Paid']),
+                'paid_date': current_date + timedelta(days=random.randint(20, 50)) if random.random() > 0.5 else None,
+                'created_at': current_ts
+            })
+        
+        # Supplier Audits (1 per 200 records)
+        if i % 200 == 0:
+            audit_id = f"AUD-{(counters['audit'] + i // 200):06d}"
+            audit_num = f"AUDIT-{run_timestamp}-{i // 200:04d}"
+            audits.append({
+                'audit_id': audit_id,
+                'audit_number': audit_num,
+                'supplier_id': supplier,
+                'audit_type': random.choice(['Quality', 'Financial', 'Compliance', 'Security', 'Performance']),
+                'actual_date': current_date,
+                'lead_auditor': user,
+                'audit_status': random.choice(['Scheduled', 'In Progress', 'Completed', 'Reported']),
+                'audit_score': round(random.uniform(60, 100), 1),
+                'audit_rating': random.choice(['Pass', 'Conditional Pass', 'Fail']),
+                'followup_date': current_date + timedelta(days=random.randint(180, 365)),
+                'created_at': current_ts
+            })
+        
+        # Supplier Performance Metrics (1 per 50 records)
+        # UNIQUE constraint: (supplier_id, metric_period)
+        if i % 50 == 0:
+            # Use year-month format for metric_period (natural business requirement)
+            metric_period = f"{current_date.year}-{current_date.month:02d}"
+            metric_key = (supplier, metric_period)
+            
+            # Only add if this supplier+period combination hasn't been seen
+            if metric_key not in performance_metrics_seen:
+                performance_metrics_seen.add(metric_key)
+                metric_id = f"METRIC-{(counters['performance'] + len(performance_metrics)):06d}"
+                performance_metrics.append({
+                    'metric_id': metric_id,
+                    'supplier_id': supplier,
+                    'metric_period': metric_period,
+                    'total_pos_issued': random.randint(10, 100),
+                    'pos_delivered_ontime': random.randint(8, 95),
+                    'ontime_delivery_pct': round(random.uniform(85, 100), 1),
+                    'average_lead_time_days': round(random.uniform(5, 30), 1),
+                    'quality_acceptance_pct': round(random.uniform(95, 100), 1),
+                    'defect_ppm': random.randint(0, 100),
+                    'rfqs_sent': random.randint(5, 20),
+                    'rfqs_responded': random.randint(3, 18),
+                    'response_rate_pct': round(random.uniform(70, 100), 1),
+                    'total_spend': round(random.uniform(10000, 500000), 2),
+                    'invoice_accuracy_pct': round(random.uniform(90, 100), 1),
+                    'overall_score': round(random.uniform(70, 100), 1),
+                    'performance_rating': random.choice(['Excellent', 'Good', 'Fair', 'Poor']),
+                    'created_at': current_ts
+                })
+        
+        if (i + 1) % 1000 == 0:
+            logger.info(f"  Generated {i + 1:,} / {TOTAL_RECORDS:,} records")
+    
+    logger.info(f"✓ Generated {len(requisitions):,} purchase requisitions")
+    logger.info(f"✓ Generated {len(rfq_headers):,} RFQ headers")
+    logger.info(f"✓ Generated {len(invoices):,} supplier invoices")
+    logger.info(f"✓ Generated {len(audits):,} supplier audits")
+    logger.info(f"✓ Generated {len(performance_metrics):,} performance metrics")
+    
+    # Bulk dump to PostgreSQL
+    logger.info("="*80)
+    logger.info("BULK DUMPING TO POSTGRESQL...")
+    logger.info("="*80)
+    
+    try:
+        cursor = pg_connection.cursor()
+        cursor.execute("SET CONSTRAINTS ALL DEFERRED;")
+        
+        # Insert requisitions
+        if requisitions:
+            insert_sql = """INSERT INTO purchase_requisitions (
+                requisition_id, requisition_number, requested_by, department_id, requisition_date,
+                required_by_date, requisition_type, requisition_status, estimated_total, created_at
+            ) VALUES (%(requisition_id)s, %(requisition_number)s, %(requested_by)s, %(department_id)s,
+                %(requisition_date)s, %(required_by_date)s, %(requisition_type)s, %(requisition_status)s,
+                %(estimated_total)s, %(created_at)s)
+            ON CONFLICT (requisition_number) DO NOTHING"""
+            logger.info(f"Inserting {len(requisitions):,} purchase requisitions...")
+            insert_batch_parallel(cursor, insert_sql, requisitions, "purchase_requisitions", BATCH_SIZE, pg_connection)
+        
+        # Insert RFQ headers
+        if rfq_headers:
+            insert_sql = """INSERT INTO rfq_headers (
+                rfq_id, rfq_number, rfq_title, rfq_type, requested_by, department_id,
+                rfq_date, response_deadline, expected_delivery_date, rfq_status,
+                total_estimated_value, currency_code, created_at
+            ) VALUES (%(rfq_id)s, %(rfq_number)s, %(rfq_title)s, %(rfq_type)s, %(requested_by)s,
+                %(department_id)s, %(rfq_date)s, %(response_deadline)s, %(expected_delivery_date)s,
+                %(rfq_status)s, %(total_estimated_value)s, %(currency_code)s, %(created_at)s)
+            ON CONFLICT (rfq_number) DO NOTHING"""
+            logger.info(f"Inserting {len(rfq_headers):,} RFQ headers...")
+            insert_batch_parallel(cursor, insert_sql, rfq_headers, "rfq_headers", BATCH_SIZE, pg_connection)
+        
+        # Insert invoices
+        if invoices:
+            insert_sql = """INSERT INTO supplier_invoices (
+                invoice_id, invoice_number, supplier_invoice_number, supplier_id, invoice_date,
+                due_date, subtotal, tax_amount, total_amount, currency_code, invoice_status,
+                payment_status, paid_date, created_at
+            ) VALUES (%(invoice_id)s, %(invoice_number)s, %(supplier_invoice_number)s, %(supplier_id)s,
+                %(invoice_date)s, %(due_date)s, %(subtotal)s, %(tax_amount)s, %(total_amount)s,
+                %(currency_code)s, %(invoice_status)s, %(payment_status)s, %(paid_date)s, %(created_at)s)
+            ON CONFLICT (invoice_id) DO NOTHING"""
+            logger.info(f"Inserting {len(invoices):,} supplier invoices...")
+            insert_batch_parallel(cursor, insert_sql, invoices, "supplier_invoices", BATCH_SIZE, pg_connection)
+        
+        # Insert audits
+        if audits:
+            insert_sql = """INSERT INTO supplier_audits (
+                audit_id, audit_number, supplier_id, audit_type, actual_date, lead_auditor,
+                audit_status, audit_score, audit_rating, followup_date, created_at
+            ) VALUES (%(audit_id)s, %(audit_number)s, %(supplier_id)s, %(audit_type)s,
+                %(actual_date)s, %(lead_auditor)s, %(audit_status)s, %(audit_score)s,
+                %(audit_rating)s, %(followup_date)s, %(created_at)s)
+            ON CONFLICT (audit_number) DO NOTHING"""
+            logger.info(f"Inserting {len(audits):,} supplier audits...")
+            insert_batch_parallel(cursor, insert_sql, audits, "supplier_audits", BATCH_SIZE, pg_connection)
+        
+        # Insert performance metrics
+        if performance_metrics:
+            insert_sql = """INSERT INTO supplier_performance_metrics (
+                metric_id, supplier_id, metric_period, total_pos_issued, pos_delivered_ontime,
+                ontime_delivery_pct, average_lead_time_days, quality_acceptance_pct, defect_ppm,
+                rfqs_sent, rfqs_responded, response_rate_pct, total_spend, invoice_accuracy_pct,
+                overall_score, performance_rating, created_at
+            ) VALUES (%(metric_id)s, %(supplier_id)s, %(metric_period)s, %(total_pos_issued)s,
+                %(pos_delivered_ontime)s, %(ontime_delivery_pct)s, %(average_lead_time_days)s,
+                %(quality_acceptance_pct)s, %(defect_ppm)s, %(rfqs_sent)s, %(rfqs_responded)s,
+                %(response_rate_pct)s, %(total_spend)s, %(invoice_accuracy_pct)s, %(overall_score)s,
+                %(performance_rating)s, %(created_at)s)
+            ON CONFLICT (supplier_id, metric_period) DO NOTHING"""
+            logger.info(f"Inserting {len(performance_metrics):,} performance metrics...")
+            insert_batch_parallel(cursor, insert_sql, performance_metrics, "supplier_performance_metrics", BATCH_SIZE, pg_connection)
+        
+        cursor.close()
+        
+        # Commit all data
+        pg_connection.commit()
+        
+        logger.info(f"✓ All records inserted successfully")
+    except Exception as e:
+        logger.error(f"PostgreSQL error: {e}")
+        return 1
+    
+    elapsed = time.time() - start_time
+    
+    # Get final counts
+    counts_after = get_all_table_counts()
+    
+    logger.info("="*80)
+    logger.info("GENERATION & INSERTION COMPLETE")
+    logger.info("="*80)
+    logger.info(f"  Total time: {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
+    logger.info("")
+    logger.info("📊 DATABASE SUMMARY")
+    logger.info("="*80)
+    
+    tables_list = ['purchase_requisitions', 'rfq_headers', 'supplier_invoices', 'supplier_audits', 'supplier_performance_metrics']
+    for table in tables_list:
+        before = counts_before.get(table)
+        after = counts_after.get(table)
+        
+        if before is not None and after is not None:
+            inserted = after - before
+            logger.info(f"{table:.<40} Before: {before:>10,} | After: {after:>10,} | Inserted: {inserted:>10,}")
+    
+    logger.info("="*80)
+    
     if pg_connection:
         pg_connection.close()
     
-    print_stats()
-    logger.info("Supplier Portal Daemon stopped")
     return 0
 
 if __name__ == "__main__":
-    import os
     os.makedirs('logs', exist_ok=True)
     sys.exit(main())

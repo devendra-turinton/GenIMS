@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-GenIMS IoT Daemon
-Continuous sensor data streaming daemon
-Simulates real IoT sensor data and pushes to Kafka and PostgreSQL
+GenIMS IoT Daemon - ULTRA FAST MODE
+Generates complete synthetic sensor data in-memory, then bulk dumps to PostgreSQL
+No streaming delays - pure speed generation with graceful error handling
 """
 
 import sys
@@ -12,42 +12,34 @@ import json
 import random
 import signal
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List
-import math
 import numpy as np
 from dotenv import load_dotenv
 
-# Load environment variables from parent directory config
+# Load environment variables
 env_file = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'config.env')
 if os.path.exists(env_file):
     load_dotenv(env_file)
 
-# Optional dependencies - will work without them but log warnings
-try:
-    from kafka import KafkaProducer
-    KAFKA_AVAILABLE = True
-except ImportError:
-    KAFKA_AVAILABLE = False
-    print("WARNING: kafka-python not installed. Install with: pip install kafka-python")
-
+# PostgreSQL
 try:
     import psycopg2
     from psycopg2.extras import execute_batch
     POSTGRES_AVAILABLE = True
 except ImportError:
     POSTGRES_AVAILABLE = False
-    print("WARNING: psycopg2 not installed. Install with: pip install psycopg2-binary")
+    print("WARNING: psycopg2 not installed")
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-# Streaming configuration
+# Streaming configuration - FAST GENERATION MODE
 SENSOR_SAMPLING_INTERVAL = int(os.getenv('IOT_SAMPLING_INTERVAL', '10'))
-BATCH_SIZE = int(os.getenv('IOT_BATCH_SIZE', '100'))
-KAFKA_TOPIC = os.getenv('KAFKA_IOT_TOPIC', 'genims.sensor.data')
-KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092').split(',')
+BATCH_SIZE = int(os.getenv('IOT_BATCH_SIZE', '1000'))  # Smaller batch for more frequent flushes
+RECORDS_PER_CYCLE = int(os.getenv('IOT_RECORDS_PER_CYCLE', '50'))  # Fewer records per cycle for safer generation
+TOTAL_RECORDS = int(os.getenv('IOT_TOTAL_RECORDS', '50000'))  # Start with smaller test size
 
 # PostgreSQL configuration - from Azure Cloud via config.env
 PG_HOST = os.getenv('POSTGRES_HOST', 'localhost')
@@ -69,12 +61,10 @@ logger = logging.getLogger('IoTDaemon')
 # ============================================================================
 
 running = True
-kafka_producer = None
 pg_connection = None
 sensor_batch = []
 stats = {
     'records_generated': 0,
-    'kafka_sent': 0,
     'postgres_inserted': 0,
     'errors': 0,
     'start_time': datetime.now()
@@ -100,6 +90,9 @@ class SensorSimulator:
         self.sensor_id = sensor['sensor_id']
         self.machine_id = sensor['machine_id']
         self.sensor_type = sensor['sensor_type']
+        self.measurement_unit = sensor['measurement_unit']
+        self.line_id = sensor.get('line_id', 'LINE-001')
+        self.factory_id = sensor.get('factory_id', 'FAC-001')
         
         # Operating ranges
         self.normal_min = sensor['normal_operating_min']
@@ -116,145 +109,93 @@ class SensorSimulator:
         self.fault_duration = 0
         self.fault_severity = 0.0
         
-        # History for statistical calculations
-        self.history = []
-        self.history_size = 6  # 1 minute of history at 10-second intervals
+        # Fast generation mode: Use simulated time instead of wall-clock
+        self.simulated_time = None  # Will be set externally
+        self.last_history_timestamp = None
+        self.history_window_seconds = 60  # 1 minute window
+        self.history = []  # Will store (timestamp, value) tuples
     
-    def inject_fault(self, duration_seconds=300, severity=0.7):
-        """Inject a fault condition"""
+    def set_simulated_time(self, timestamp):
+        """Set the current simulated time"""
+        self.simulated_time = timestamp
+    
+    def inject_fault(self, start_offset_seconds, duration_seconds, severity):
+        """Pre-inject fault with absolute time offset"""
         self.fault_active = True
-        self.fault_start_time = time.time()
+        self.fault_start_offset = start_offset_seconds
         self.fault_duration = duration_seconds
         self.fault_severity = severity
-        logger.info(f"Fault injected: {self.sensor_id} ({self.sensor_type}), "
-                   f"severity={severity:.2f}, duration={duration_seconds}s")
     
-    def get_next_reading(self) -> Dict:
-        """Generate next sensor reading"""
-        current_time = time.time()
+    def get_reading(self, timestamp_seconds_into_sim, sim_base_time):
+        """Generate reading for given absolute timestamp"""
+        current_ts = sim_base_time + timedelta(seconds=timestamp_seconds_into_sim)
+        current_value = random.uniform(self.normal_min, self.normal_max)
         
-        # Check if fault is still active
+        # Check if in fault window
         fault_factor = 0.0
-        if self.fault_active:
-            elapsed = current_time - self.fault_start_time
-            if elapsed > self.fault_duration:
-                self.fault_active = False
-                logger.info(f"Fault ended: {self.sensor_id}")
-            else:
-                # Calculate fault progression
-                progress = elapsed / self.fault_duration
-                fault_factor = self.fault_severity * (0.3 + 0.7 * progress)  # Gradual increase
-        
-        # Generate base value
-        target_value = random.uniform(self.normal_min, self.normal_max)
-        
-        # Apply smooth transition (avoid sudden jumps)
-        if self.current_value:
-            max_change = (self.normal_max - self.normal_min) * 0.1  # Max 10% change per reading
-            target_value = self.current_value + np.clip(
-                target_value - self.current_value, 
-                -max_change, 
-                max_change
-            )
+        if self.fault_active and hasattr(self, 'fault_start_offset'):
+            fault_start = self.fault_start_offset
+            fault_end = self.fault_start_offset + self.fault_duration
+            
+            if fault_start <= timestamp_seconds_into_sim <= fault_end:
+                progress = (timestamp_seconds_into_sim - fault_start) / self.fault_duration
+                fault_factor = self.fault_severity * (0.3 + 0.7 * progress)
         
         # Apply fault effects
         if fault_factor > 0:
             if self.sensor_type == 'vibration':
-                value = target_value + fault_factor * (self.critical_max - self.normal_max)
+                current_value = current_value + fault_factor * (self.critical_max - self.normal_max)
             elif self.sensor_type == 'temperature':
-                value = target_value + fault_factor * (self.critical_max - self.normal_max)
+                current_value = current_value + fault_factor * (self.critical_max - self.normal_max)
             elif self.sensor_type == 'pressure':
-                value = target_value - fault_factor * (self.normal_min - self.critical_min)
+                current_value = current_value - fault_factor * (self.normal_min - self.critical_min)
             elif self.sensor_type == 'current':
-                value = target_value * (1.0 + fault_factor * 0.5)
+                current_value = current_value * (1.0 + fault_factor * 0.5)
             elif self.sensor_type == 'flow':
-                value = target_value * random.choice([0.7, 1.3]) if fault_factor > 0.5 else target_value
+                current_value = current_value * (0.7 if fault_factor > 0.5 else 1.3)
             else:
-                value = target_value * (1.0 + random.uniform(-0.2, 0.2) * fault_factor)
-        else:
-            # Small random variation
-            value = target_value + random.gauss(0, (self.normal_max - self.normal_min) * 0.02)
+                current_value = current_value * (1.0 + random.uniform(-0.2, 0.2) * fault_factor)
         
-        # Ensure physical limits
-        value = max(self.critical_min, min(self.critical_max, value))
-        self.current_value = value
-        
-        # Update history
-        self.history.append(value)
-        if len(self.history) > self.history_size:
-            self.history.pop(0)
-        
-        # Calculate statistics
-        if len(self.history) >= 2:
-            min_1min = min(self.history)
-            max_1min = max(self.history)
-            avg_1min = sum(self.history) / len(self.history)
-            std_1min = float(np.std(self.history))  # Convert numpy float to Python float
-        else:
-            min_1min = max_1min = avg_1min = value
-            std_1min = 0.0
+        current_value = max(self.critical_min, min(self.critical_max, current_value))
         
         # Determine status
-        if value < self.critical_min or value > self.critical_max:
+        status = 'normal'
+        is_below_warning = current_value < self.warning_min
+        is_above_warning = current_value > self.warning_max
+        is_below_critical = current_value < self.critical_min
+        is_above_critical = current_value > self.critical_max
+        
+        if is_below_critical or is_above_critical:
             status = 'critical'
-        elif value < self.warning_min or value > self.warning_max:
+        elif is_below_warning or is_above_warning:
             status = 'warning'
-        else:
-            status = 'normal'
         
-        # Anomaly detection
-        anomaly_score = float(fault_factor * random.uniform(0.7, 1.0) if fault_factor > 0.5 else random.uniform(0, 0.3))
-        is_anomaly = anomaly_score > 0.7
+        quality = 95 if status == 'normal' else (85 if status == 'warning' else 50)
         
-        # Build record - Convert all numpy types to Python native types for psycopg2
-        record = {
+        return {
             'sensor_id': self.sensor_id,
             'machine_id': self.machine_id,
-            'line_id': self.sensor['line_id'],
-            'factory_id': self.sensor['factory_id'],
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
-            'measurement_value': float(round(value, 4)),  # Convert numpy float to Python float
-            'measurement_unit': self.sensor['measurement_unit'],
+            'line_id': self.line_id,
+            'factory_id': self.factory_id,
+            'timestamp': current_ts,
+            'measurement_value': round(current_value, 2),
+            'measurement_unit': self.measurement_unit,
             'status': status,
-            'quality': 'good',
-            'is_below_warning': bool(value < self.warning_min),
-            'is_above_warning': bool(value > self.warning_max),
-            'is_below_critical': bool(value < self.critical_min),
-            'is_above_critical': bool(value > self.critical_max),
-            'min_value_1min': float(round(min_1min, 4)),  # Convert to Python float
-            'max_value_1min': float(round(max_1min, 4)),  # Convert to Python float
-            'avg_value_1min': float(round(avg_1min, 4)),  # Convert to Python float
-            'std_dev_1min': float(round(std_1min, 4)),    # Convert to Python float
-            'anomaly_score': float(round(anomaly_score, 4)),  # Convert to Python float
-            'is_anomaly': bool(is_anomaly),
-            'data_source': 'IoT',
-            'protocol': self.sensor['data_protocol'],
-            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+            'quality': quality,
+            'is_below_warning': is_below_warning,
+            'is_above_warning': is_above_warning,
+            'is_below_critical': is_below_critical,
+            'is_above_critical': is_above_critical,
+            'min_value_1min': round(current_value * 0.95, 2),
+            'max_value_1min': round(current_value * 1.05, 2),
+            'avg_value_1min': round(current_value, 2),
+            'std_dev_1min': round(current_value * 0.02, 2),
+            'anomaly_score': random.uniform(0, 0.1) if status != 'normal' else random.uniform(0, 0.02),
+            'is_anomaly': status != 'normal',
+            'data_source': 'IOT_SENSOR',
+            'protocol': 'MQTT',
+            'created_at': datetime.now()
         }
-        
-        return record
-
-
-def initialize_kafka():
-    """Initialize Kafka producer"""
-    global kafka_producer
-    
-    if not KAFKA_AVAILABLE:
-        logger.warning("Kafka not available - skipping Kafka initialization")
-        return False
-    
-    try:
-        kafka_producer = KafkaProducer(
-            bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-            acks='all',
-            retries=3
-        )
-        logger.info(f"Kafka producer initialized: {KAFKA_BOOTSTRAP_SERVERS}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to initialize Kafka: {e}")
-        return False
 
 
 def initialize_postgres():
@@ -272,7 +213,8 @@ def initialize_postgres():
             database=PG_DATABASE,
             user=PG_USER,
             password=PG_PASSWORD,
-            sslmode=PG_SSL_MODE
+            sslmode=PG_SSL_MODE,
+            connect_timeout=10
         )
         pg_connection.autocommit = False
         logger.info(f"PostgreSQL connection established: {PG_HOST}:{PG_PORT}/{PG_DATABASE}")
@@ -283,65 +225,117 @@ def initialize_postgres():
         return False
 
 
-def send_to_kafka(record: Dict):
-    """Send record to Kafka"""
-    if not kafka_producer:
+def is_connection_alive():
+    """Check if PostgreSQL connection is still alive"""
+    global pg_connection
+    
+    if not pg_connection:
         return False
     
     try:
-        future = kafka_producer.send(KAFKA_TOPIC, record)
-        future.get(timeout=10)  # Wait for confirmation
-        stats['kafka_sent'] += 1
+        cursor = pg_connection.cursor()
+        cursor.execute("SELECT 1")
+        cursor.close()
+        return True
+    except Exception:
+        return False
+
+
+def reconnect_postgres():
+    """Reconnect to PostgreSQL if connection is lost"""
+    global pg_connection
+    
+    try:
+        if pg_connection:
+            try:
+                pg_connection.close()
+            except:
+                pass
+        
+        pg_connection = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_DATABASE,
+            user=PG_USER,
+            password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE,
+            connect_timeout=10
+        )
+        pg_connection.autocommit = False
+        logger.info("PostgreSQL connection re-established")
         return True
     except Exception as e:
-        logger.error(f"Failed to send to Kafka: {e}")
-        stats['errors'] += 1
+        logger.error(f"Failed to reconnect to PostgreSQL: {e}")
         return False
 
 
 def flush_to_postgres():
     """Batch insert records to PostgreSQL"""
-    global sensor_batch
+    global sensor_batch, pg_connection
     
-    if not pg_connection or not sensor_batch:
+    if not sensor_batch:
         return
     
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Prepare batch insert
-        insert_sql = """
-            INSERT INTO sensor_data (
-                sensor_id, machine_id, line_id, factory_id, timestamp,
-                measurement_value, measurement_unit, status, quality,
-                is_below_warning, is_above_warning, is_below_critical, is_above_critical,
-                min_value_1min, max_value_1min, avg_value_1min, std_dev_1min,
-                anomaly_score, is_anomaly, data_source, protocol, created_at
-            ) VALUES (
-                %(sensor_id)s, %(machine_id)s, %(line_id)s, %(factory_id)s, %(timestamp)s,
-                %(measurement_value)s, %(measurement_unit)s, %(status)s, %(quality)s,
-                %(is_below_warning)s, %(is_above_warning)s, %(is_below_critical)s, %(is_above_critical)s,
-                %(min_value_1min)s, %(max_value_1min)s, %(avg_value_1min)s, %(std_dev_1min)s,
-                %(anomaly_score)s, %(is_anomaly)s, %(data_source)s, %(protocol)s, %(created_at)s
-            )
-        """
-        
-        execute_batch(cursor, insert_sql, sensor_batch)
-        pg_connection.commit()
-        
-        stats['postgres_inserted'] += len(sensor_batch)
-        logger.info(f"Inserted {len(sensor_batch)} records to PostgreSQL")
-        
-        sensor_batch = []
-        cursor.close()
-        return True
+    max_retries = 3
+    retry_count = 0
     
-    except Exception as e:
-        logger.error(f"Failed to insert to PostgreSQL: {e}")
-        pg_connection.rollback()
-        stats['errors'] += 1
-        sensor_batch = []
-        return False
+    while retry_count < max_retries:
+        # Check and reconnect if needed
+        if not is_connection_alive():
+            logger.warning(f"PostgreSQL connection lost (retry {retry_count + 1}/{max_retries}), attempting reconnect...")
+            if not reconnect_postgres():
+                retry_count += 1
+                if retry_count < max_retries:
+                    time.sleep(2)  # Wait before retry
+                    continue
+                else:
+                    logger.error("Failed to reconnect to PostgreSQL after retries, skipping batch")
+                    sensor_batch = []
+                    return
+        
+        try:
+            cursor = pg_connection.cursor()
+            
+            # Prepare batch insert
+            insert_sql = """
+                INSERT INTO sensor_data (
+                    sensor_id, machine_id, line_id, factory_id, timestamp,
+                    measurement_value, measurement_unit, status, quality,
+                    is_below_warning, is_above_warning, is_below_critical, is_above_critical,
+                    min_value_1min, max_value_1min, avg_value_1min, std_dev_1min,
+                    anomaly_score, is_anomaly, data_source, protocol, created_at
+                ) VALUES (
+                    %(sensor_id)s, %(machine_id)s, %(line_id)s, %(factory_id)s, %(timestamp)s,
+                    %(measurement_value)s, %(measurement_unit)s, %(status)s, %(quality)s,
+                    %(is_below_warning)s, %(is_above_warning)s, %(is_below_critical)s, %(is_above_critical)s,
+                    %(min_value_1min)s, %(max_value_1min)s, %(avg_value_1min)s, %(std_dev_1min)s,
+                    %(anomaly_score)s, %(is_anomaly)s, %(data_source)s, %(protocol)s, %(created_at)s
+                )
+            """
+            
+            execute_batch(cursor, insert_sql, sensor_batch)
+            pg_connection.commit()
+            
+            stats['postgres_inserted'] += len(sensor_batch)
+            logger.info(f"Inserted {len(sensor_batch)} records to PostgreSQL")
+            
+            sensor_batch = []
+            cursor.close()
+            return  # Success - break retry loop
+            
+        except Exception as e:
+            logger.error(f"Failed to insert to PostgreSQL: {e}")
+            try:
+                pg_connection.rollback()
+            except:
+                pass  # Connection may already be closed
+            stats['errors'] += 1
+            retry_count += 1
+            if retry_count < max_retries:
+                time.sleep(1)  # Wait before retry
+            else:
+                sensor_batch = []
+                return
 
 
 def print_stats():
@@ -353,7 +347,6 @@ def print_stats():
     logger.info(f"IoT Daemon Statistics")
     logger.info(f"  Uptime: {elapsed:.1f} seconds")
     logger.info(f"  Records Generated: {stats['records_generated']:,}")
-    logger.info(f"  Kafka Sent: {stats['kafka_sent']:,}")
     logger.info(f"  PostgreSQL Inserted: {stats['postgres_inserted']:,}")
     logger.info(f"  Errors: {stats['errors']}")
     logger.info(f"  Rate: {rate:.2f} records/sec")
@@ -376,114 +369,183 @@ def load_sensors() -> List[Dict]:
         return []
 
 
+def get_sensor_data_count():
+    """Get current count of sensor_data records from PostgreSQL"""
+    try:
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_DATABASE,
+            user=PG_USER,
+            password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE,
+            connect_timeout=10
+        )
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM sensor_data;")
+        count = cursor.fetchone()[0]
+        cursor.close()
+        conn.close()
+        return count
+    except Exception as e:
+        logger.warning(f"Could not get sensor_data count: {e}")
+        return None
+
+
 def main():
-    """Main daemon loop"""
+    """Main - Generate all data in-memory, then bulk dump"""
     logger.info("="*80)
-    logger.info("GenIMS IoT Daemon Starting")
+    logger.info("GenIMS IoT Daemon - ULTRA FAST MODE (In-Memory Generation)")
     logger.info("="*80)
+    
+    start_time = time.time()
     
     # Load sensors
     sensors = load_sensors()
     if not sensors:
-        logger.error("No sensors loaded. Exiting.")
+        logger.error("No sensors loaded!")
         return 1
     
-    logger.info(f"Loaded {len(sensors)} sensors")
+    logger.info(f"Loaded {len(sensors):,} sensors")
     
-    # Initialize connections
-    kafka_enabled = initialize_kafka()
-    postgres_enabled = initialize_postgres()
+    # Create simulators
+    simulators = [SensorSimulator(s) for s in sensors]
+    logger.info(f"Created {len(simulators):,} sensor simulators")
     
-    if not kafka_enabled and not postgres_enabled:
-        logger.warning("Neither Kafka nor PostgreSQL available - daemon will only log to console")
-    
-    # Create sensor simulators
-    simulators = [SensorSimulator(sensor) for sensor in sensors]
-    logger.info(f"Created {len(simulators)} sensor simulators")
-    
-    # Randomly inject some faults for demonstration
-    num_faults = int(len(simulators) * 0.05)  # 5% of sensors
+    # Inject faults (5% of sensors)
+    num_faults = int(len(simulators) * 0.05)
     fault_sensors = random.sample(simulators, num_faults)
-    for sim in fault_sensors:
-        sim.inject_fault(
-            duration_seconds=random.randint(300, 3600),
-            severity=random.uniform(0.5, 0.9)
-        )
     
-    logger.info(f"Injected {num_faults} fault conditions")
-    logger.info(f"Streaming interval: {SENSOR_SAMPLING_INTERVAL} seconds")
-    logger.info("Press Ctrl+C to stop")
+    # Parse simulation times - use current date when daemon runs
+    start_date_str = datetime.now().strftime('%Y-%m-%d')
+    start_time_str = os.getenv('SIMULATION_START_TIME', '00:00:00')
+    sim_base_time = datetime.strptime(f"{start_date_str} {start_time_str}", '%Y-%m-%d %H:%M:%S')
+    
+    fault_count = 0
+    for sim in fault_sensors:
+        offset = random.randint(100, max(2000, TOTAL_RECORDS // len(simulators) // 2))
+        duration = random.randint(300, 3600)
+        severity = random.uniform(0.5, 0.9)
+        sim.inject_fault(offset, duration, severity)
+        fault_count += 1
+    
+    logger.info(f"✓ Injected {fault_count} fault conditions")
+    logger.info(f"Target records: {TOTAL_RECORDS:,}")
+    
+    # Get baseline count before generation
+    count_before = get_sensor_data_count()
+    if count_before is not None:
+        logger.info(f"📊 Baseline: {count_before:,} records already in sensor_data")
+    
+    logger.info("="*80)
+    logger.info("GENERATING ALL DATA IN MEMORY...")
     logger.info("="*80)
     
-    # Main loop
-    iteration = 0
-    last_stats_time = time.time()
+    # Generate ALL records in memory
+    all_records = []
+    records_per_sensor = TOTAL_RECORDS // len(simulators)
+    remainder = TOTAL_RECORDS % len(simulators)
     
-    while running:
-        try:
-            loop_start = time.time()
-            
-            # Generate readings from all sensors
-            for simulator in simulators:
-                record = simulator.get_next_reading()
-                stats['records_generated'] += 1
-                
-                # Send to Kafka
-                if kafka_enabled:
-                    send_to_kafka(record)
-                
-                # Add to batch for PostgreSQL
-                if postgres_enabled:
-                    sensor_batch.append(record)
-                
-                # Sample log (don't log every record)
-                if random.random() < 0.001:  # 0.1% sampling
-                    logger.info(f"Sample: {simulator.sensor_type} = {record['measurement_value']:.2f} "
-                              f"{record['measurement_unit']} [{record['status']}]")
-            
-            # Flush to PostgreSQL if batch is full
-            if len(sensor_batch) >= BATCH_SIZE and postgres_enabled:
-                flush_to_postgres()
-            
-            # Print stats every 60 seconds
-            if time.time() - last_stats_time > 60:
-                print_stats()
-                last_stats_time = time.time()
-            
-            # Sleep to maintain interval
-            elapsed = time.time() - loop_start
-            sleep_time = max(0, SENSOR_SAMPLING_INTERVAL - elapsed)
-            
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-            else:
-                logger.warning(f"Loop took {elapsed:.2f}s - falling behind sampling rate!")
-            
-            iteration += 1
+    for sensor_idx, sim in enumerate(simulators):
+        num_records = records_per_sensor + (1 if sensor_idx < remainder else 0)
         
+        for record_idx in range(num_records):
+            timestamp_offset = record_idx * SENSOR_SAMPLING_INTERVAL
+            reading = sim.get_reading(timestamp_offset, sim_base_time)
+            all_records.append(reading)
+        
+        if (sensor_idx + 1) % 200 == 0:
+            logger.info(f"  Generated {sensor_idx + 1:,} / {len(simulators):,} sensor streams")
+    
+    logger.info(f"✓ Generated {len(all_records):,} total records in memory")
+    
+    # Bulk dump to PostgreSQL
+    logger.info("="*80)
+    logger.info("BULK DUMPING TO POSTGRESQL...")
+    logger.info("="*80)
+    
+    if POSTGRES_AVAILABLE:
+        try:
+            conn = psycopg2.connect(
+                host=PG_HOST,
+                port=PG_PORT,
+                database=PG_DATABASE,
+                user=PG_USER,
+                password=PG_PASSWORD,
+                sslmode=PG_SSL_MODE,
+                connect_timeout=30
+            )
+            conn.autocommit = False
+            cursor = conn.cursor()
+            
+            # Disable FK checks for synthetic data
+            cursor.execute("SET CONSTRAINTS ALL DEFERRED;")
+            
+            insert_sql = """
+                INSERT INTO sensor_data (
+                    sensor_id, machine_id, line_id, factory_id, timestamp,
+                    measurement_value, measurement_unit, status, quality,
+                    is_below_warning, is_above_warning, is_below_critical, is_above_critical,
+                    min_value_1min, max_value_1min, avg_value_1min, std_dev_1min,
+                    anomaly_score, is_anomaly, data_source, protocol, created_at
+                ) VALUES (
+                    %(sensor_id)s, %(machine_id)s, %(line_id)s, %(factory_id)s, %(timestamp)s,
+                    %(measurement_value)s, %(measurement_unit)s, %(status)s, %(quality)s,
+                    %(is_below_warning)s, %(is_above_warning)s, %(is_below_critical)s, %(is_above_critical)s,
+                    %(min_value_1min)s, %(max_value_1min)s, %(avg_value_1min)s, %(std_dev_1min)s,
+                    %(anomaly_score)s, %(is_anomaly)s, %(data_source)s, %(protocol)s, %(created_at)s
+                )
+                ON CONFLICT (sensor_data_id) DO NOTHING
+            """
+            
+            logger.info(f"Inserting {len(all_records):,} records in batches of {BATCH_SIZE:,}...")
+            
+            # Batch insert with error handling
+            inserted_count = 0
+            for i in range(0, len(all_records), BATCH_SIZE):
+                batch = all_records[i:i+BATCH_SIZE]
+                try:
+                    execute_batch(cursor, insert_sql, batch, page_size=1000)
+                    conn.commit()
+                    inserted_count += len(batch)
+                    logger.info(f"  Flushed {inserted_count:,} / {len(all_records):,} records")
+                except psycopg2.IntegrityError as e:
+                    logger.warning(f"Integrity error (duplicate/FK): {str(e)[:80]}... - Skipping batch")
+                    conn.rollback()
+                    continue
+                except Exception as e:
+                    logger.error(f"Batch error: {e}")
+                    conn.rollback()
+                    continue
+            
+            cursor.close()
+            conn.close()
+            
+            logger.info(f"✓ Inserted {inserted_count:,} records successfully")
+            
         except Exception as e:
-            logger.error(f"Error in main loop: {e}", exc_info=True)
-            stats['errors'] += 1
-            time.sleep(1)
+            logger.error(f"PostgreSQL error: {e}")
+            return 1
     
-    # Cleanup
-    logger.info("Shutting down...")
+    elapsed = time.time() - start_time
+    rate = len(all_records) / elapsed if elapsed > 0 else 0
     
-    # Flush remaining records
-    if postgres_enabled and sensor_batch:
-        flush_to_postgres()
+    # Get final count after insertion
+    count_after = get_sensor_data_count()
     
-    # Close connections
-    if kafka_producer:
-        kafka_producer.close()
-        logger.info("Kafka producer closed")
+    logger.info("="*80)
+    logger.info("GENERATION COMPLETE")
+    logger.info(f"  Total time: {elapsed:.1f} seconds")
+    logger.info(f"  Records generated: {len(all_records):,}")
+    logger.info(f"  Generation rate: {rate:,.0f} records/sec")
     
-    if pg_connection:
-        pg_connection.close()
-        logger.info("PostgreSQL connection closed")
+    if count_before is not None and count_after is not None:
+        inserted = count_after - count_before
+        logger.info(f"📊 Database before: {count_before:,} records")
+        logger.info(f"📊 Database after:  {count_after:,} records")
+        logger.info(f"📊 Records inserted: {inserted:,}")
     
-    print_stats()
-    logger.info("IoT Daemon stopped")
+    logger.info("="*80)
     
     return 0
 

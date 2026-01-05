@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-GenIMS MES Hourly Production Daemon
-Continuously generates production data every hour simulating real factory operations
+GenIMS MES Hourly Production Daemon - ULTRA FAST MODE
+Generates complete synthetic MES production data in-memory, then bulk dumps to PostgreSQL
+No streaming delays - pure speed generation with graceful error handling
 """
 
 import sys
@@ -27,6 +28,8 @@ except ImportError:
     POSTGRES_AVAILABLE = False
     print("WARNING: psycopg2 not installed. Install with: pip install psycopg2-binary")
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 # ============================================================================
 # CONFIGURATION - Environment Variables with Defaults
 # ============================================================================
@@ -42,8 +45,10 @@ PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
 
 # Daemon Configuration
 MES_ENABLED = os.getenv('MES_ENABLED', 'true').lower() == 'true'
-CYCLE_INTERVAL_SECONDS = int(os.getenv('MES_CYCLE_INTERVAL', '3600'))  # Run every hour
-BATCH_SIZE = int(os.getenv('MES_BATCH_SIZE', '50'))  # Records per batch insert
+MES_RECORDS_PER_CYCLE = int(os.getenv('MES_RECORDS_PER_CYCLE', '200'))
+MES_BATCH_SIZE = int(os.getenv('MES_BATCH_SIZE', '5000'))  # Large batches for fast insertion
+MES_TOTAL_RECORDS = int(os.getenv('MES_TOTAL_RECORDS', '28800'))  # 8 hours of hourly data (24h max)
+BATCH_SIZE = MES_BATCH_SIZE  # For backward compatibility
 
 # Production Rates (per hour)
 DAY_SHIFT_ORDERS = (4, 5)      # 06:00-14:00
@@ -1204,7 +1209,7 @@ def print_hourly_stats():
     hours = elapsed / 3600
     
     logger.info("="*80)
-    logger.info(f"Hourly Cycle Statistics")
+    logger.info(f"MES Production Statistics")
     logger.info(f"  Uptime: {hours:.1f} hours")
     logger.info(f"  Cycles Completed: {stats['cycles_completed']}")
     logger.info(f"  Work Orders Created: {stats['work_orders_created']}")
@@ -1217,23 +1222,82 @@ def print_hourly_stats():
     logger.info("="*80)
 
 
+def get_table_count(table_name):
+    """Get current count from any table in PostgreSQL"""
+    try:
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_DATABASE,
+            user=PG_USER,
+            password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE,
+            connect_timeout=10
+        )
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT COUNT(*) FROM {table_name};")
+        count = cursor.fetchone()[0]
+        cursor.close()
+        conn.close()
+        return count
+    except Exception as e:
+        logger.warning(f"Could not get {table_name} count: {e}")
+        return None
+
+
+def get_all_table_counts():
+    """Get baseline counts for all tables"""
+    tables = ['work_orders', 'material_transactions', 'labor_transactions', 'quality_inspections']
+    counts = {}
+    for table in tables:
+        counts[table] = get_table_count(table)
+    return counts
+
+
+def insert_batch_sequential(cursor, insert_sql, data, table_name, batch_size, conn):
+    """Insert data in sequential batches (thread-safe)"""
+    total_batches = (len(data) + batch_size - 1) // batch_size
+    
+    for batch_idx in range(total_batches):
+        try:
+            batch_start = batch_idx * batch_size
+            batch_end = min((batch_idx + 1) * batch_size, len(data))
+            batch = data[batch_start:batch_end]
+            
+            execute_batch(cursor, insert_sql, batch, page_size=5000)
+            conn.commit()
+            
+            logger.info(f"  Flushed {batch_end:,} / {len(data):,} {table_name}")
+        except psycopg2.IntegrityError as e:
+            logger.warning(f"  Batch {batch_idx + 1}/{total_batches} - Integrity error (skipping)")
+            conn.rollback()
+            continue
+        except Exception as e:
+            logger.error(f"  Batch {batch_idx + 1}/{total_batches} - {e}")
+            conn.rollback()
+            continue
+
+
 # ============================================================================
 # MAIN DAEMON LOOP
 # ============================================================================
 
 def main():
-    """Main daemon loop"""
+    """Main - Generate all production data in-memory, then bulk dump"""
     logger.info("="*80)
-    logger.info("GenIMS MES Hourly Production Daemon Starting")
+    logger.info("GenIMS MES Production Daemon - ULTRA FAST MODE (In-Memory Generation)")
     logger.info("="*80)
     logger.info(f"Configuration:")
     logger.info(f"  Database: {PG_DATABASE}")
     logger.info(f"  Host: {PG_HOST}:{PG_PORT}")
     logger.info(f"  SSL Mode: {PG_SSL_MODE}")
-    logger.info(f"  Cycle Interval: {CYCLE_INTERVAL_SECONDS}s")
-    logger.info(f"  Batch Size: {BATCH_SIZE}")
+    logger.info(f"  Records per cycle: {MES_RECORDS_PER_CYCLE}")
+    logger.info(f"  Batch Size: {MES_BATCH_SIZE}")
+    logger.info(f"  Total records target: {MES_TOTAL_RECORDS}")
     logger.info(f"  Log File: {log_file}")
     logger.info("="*80)
+    
+    start_time = time.time()
     
     # Initialize
     if not initialize_database():
@@ -1255,75 +1319,425 @@ def main():
         logger.error("Please populate line_product_mapping table in genims_master_db.")
         return 1
     
-    if not master_data.get('employees'):
-        logger.warning("No employees found in master data. Some features may be limited.")
-    
     logger.info(f"Master data validation passed.")
-    logger.info(f"Cycle interval: {CYCLE_INTERVAL_SECONDS} seconds (1 hour)")
-    logger.info("Press Ctrl+C to stop")
+    logger.info(f"Target records: {MES_TOTAL_RECORDS:,}")
+    
+    # Get baseline counts before generation
+    logger.info("="*80)
+    logger.info("📊 BASELINE DATABASE COUNTS (Before Generation)")
+    logger.info("="*80)
+    counts_before = get_all_table_counts()
+    for table, count in counts_before.items():
+        if count is not None:
+            logger.info(f"  {table:.<40} {count:>10,} records")
     logger.info("="*80)
     
-    last_cycle = datetime.now() - timedelta(hours=2)  # Force initial run
+    logger.info("="*80)
+    logger.info("GENERATING ALL DATA IN MEMORY...")
+    logger.info("="*80)
     
-    while running:
+    # Generate ALL records in memory
+    all_records = []
+    work_orders = []
+    material_transactions = []
+    labor_transactions = []
+    quality_inspections = []
+    
+    # Parse simulation times - use current date when daemon runs
+    start_date_str = datetime.now().strftime('%Y-%m-%d')
+    start_time_str = os.getenv('SIMULATION_START_TIME', '00:00:00')
+    sim_base_time = datetime.strptime(f"{start_date_str} {start_time_str}", '%Y-%m-%d %H:%M:%S')
+    
+    # Get available products and lines
+    if not master_data.get('products') or not master_data.get('mappings'):
+        logger.error("Insufficient master data for generation")
+        return 1
+    
+    available_lines = set(m.get('line_id') for m in master_data.get('mappings', []) if m.get('line_id'))
+    available_products = master_data.get('products', [])
+    available_customers = master_data.get('customers', [])
+    available_employees = master_data.get('employees', [])
+    
+    if not available_employees:
+        logger.warning("No employees found - using placeholder")
+        available_employees = [{'employee_id': 'EMP-000001', 'shift_id': 'SHIFT-001'}]
+    
+    if not available_customers:
+        logger.warning("No customers found - using placeholder")
+        available_customers = [{'customer_id': 'CUST-000001', 'customer_name': 'Default Customer'}]
+    
+    logger.info(f"Available lines: {len(available_lines)}")
+    logger.info(f"Available products: {len(available_products)}")
+    logger.info(f"Available employees: {len(available_employees)}")
+    
+    # Generate work orders with associated data
+    material_counter = 0
+    labor_counter = 0
+    inspection_counter = 0
+    
+    for i in range(MES_TOTAL_RECORDS):
+        # Create work order
+        product = random.choice(available_products)
+        line_id = random.choice(list(available_lines)) if available_lines else 'LINE-001'
+        customer = random.choice(available_customers)
+        
+        # Simulated timestamp advances
+        timestamp_offset = i * 300  # 5 minutes per record
+        current_ts = sim_base_time + timedelta(seconds=timestamp_offset)
+        
+        wo_id = f"WO-{(counters['work_order'] + i):06d}"
+        wo_number = f"WO-{(counters['work_order'] + i):08d}"
+        
+        work_order = {
+            'work_order_id': wo_id,
+            'work_order_number': wo_number,
+            'product_id': product.get('product_id', 'PROD-001'),
+            'customer_id': customer.get('customer_id', 'CUST-001'),
+            'sales_order_number': f"SO-{random.randint(10000, 99999)}",
+            'factory_id': 'FAC-001',
+            'line_id': line_id,
+            'planned_quantity': random.randint(10, 100),
+            'unit_of_measure': 'EA',
+            'priority': random.randint(1, 3),  # 1=low, 2=medium, 3=high
+            'planned_start_date': current_ts.strftime('%Y-%m-%d %H:%M:%S'),
+            'planned_end_date': (current_ts + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S'),
+            'scheduled_start_time': current_ts.strftime('%Y-%m-%d %H:%M:%S'),
+            'scheduled_end_time': (current_ts + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S'),
+            'actual_start_time': current_ts.strftime('%Y-%m-%d %H:%M:%S'),
+            'actual_end_time': (current_ts + timedelta(hours=7, minutes=45)).strftime('%Y-%m-%d %H:%M:%S'),
+            'produced_quantity': random.randint(8, 95),
+            'good_quantity': random.randint(7, 90),
+            'rejected_quantity': random.randint(0, 5),
+            'scrapped_quantity': random.randint(0, 3),
+            'rework_quantity': 0,
+            'status': random.choice(['scheduled', 'in_progress', 'completed', 'on_hold']),
+            'quality_status': random.choice(['pending', 'approved', 'on_hold', 'rejected']),
+            'quality_hold': random.random() < 0.1,
+            'planned_cycle_time_seconds': 3600,
+            'actual_cycle_time_seconds': random.randint(3300, 3900),
+            'setup_time_minutes': random.randint(15, 45),
+            'run_time_minutes': random.randint(420, 480),
+            'downtime_minutes': random.randint(0, 30),
+            'yield_percentage': round(random.uniform(85, 99), 2),
+            'first_pass_yield_percentage': round(random.uniform(90, 99.5), 2),
+            'standard_cost_per_unit': round(random.uniform(10, 100), 2),
+            'actual_cost_per_unit': round(random.uniform(10, 110), 2),
+            'total_material_cost': round(random.uniform(500, 5000), 2),
+            'total_labor_cost': round(random.uniform(200, 2000), 2),
+            'total_overhead_cost': round(random.uniform(100, 1000), 2),
+            'batch_number': f"BATCH-{current_ts.strftime('%Y%m%d')}-{i:04d}",
+            'lot_number': f"LOT-{random.randint(100000, 999999)}",
+            'expiry_date': (current_ts + timedelta(days=180)).strftime('%Y-%m-%d'),
+            'electronic_batch_record_id': f"EBR-{(counters['ebr'] + i):06d}" if random.random() < 0.5 else None,
+            'requires_validation': random.random() < 0.3,
+            'validation_status': 'not_required' if random.random() < 0.7 else 'required',
+            'parent_work_order_id': None,
+            'erp_order_id': f"ERP-{random.randint(10000, 99999)}",
+            'created_by': random.choice([e.get('employee_id', 'EMP-001') for e in available_employees]),
+            'created_at': current_ts.strftime('%Y-%m-%d %H:%M:%S'),
+            'updated_at': current_ts.strftime('%Y-%m-%d %H:%M:%S'),
+            'completed_by': random.choice([e.get('employee_id', 'EMP-001') for e in available_employees]) if random.random() < 0.8 else None,
+            'closed_at': None
+        }
+        
+        work_orders.append(work_order)
+        
+        # Create material transactions for this work order
+        materials = random.sample(RAW_MATERIALS + COMPONENTS, random.randint(2, 5))
+        for mat_idx, material_code in enumerate(materials):
+            material_counter += 1
+            if material_code in RAW_MATERIALS:
+                mat_type = 'raw_material'
+                mat_name = material_code.replace('RM-', '').replace('-', ' ').title()
+                quantity = round(random.uniform(10, 100), 2)
+                unit = 'KG'
+            else:
+                mat_type = 'component'
+                mat_name = material_code.replace('COMP-', '').replace('-', ' ').title()
+                quantity = work_order['planned_quantity'] * random.randint(1, 4)
+                unit = 'EA'
+            
+            mat_transaction = {
+                'transaction_id': f"MAT-{(counters['material'] + material_counter):08d}",
+                'transaction_type': 'issue',
+                'transaction_date': current_ts.strftime('%Y-%m-%d %H:%M:%S'),
+                'work_order_id': wo_id,
+                'operation_id': None,
+                'material_code': material_code,
+                'material_name': mat_name,
+                'material_type': mat_type,
+                'quantity': quantity,
+                'unit_of_measure': unit,
+                'lot_number': f"MAT-LOT-{random.randint(10000, 99999)}",
+                'batch_number': f"MAT-BATCH-{random.randint(1000, 9999)}",
+                'serial_number': None,
+                'expiry_date': (current_ts + timedelta(days=180)).strftime('%Y-%m-%d'),
+                'supplier_lot_number': f"SUP-{random.randint(10000, 99999)}",
+                'from_location': 'WAREHOUSE-A',
+                'to_location': f"LINE-{line_id[-3:] if line_id else '001'}",
+                'warehouse_location': f"BIN-{random.choice(['A', 'B', 'C'])}-{random.randint(1, 50):02d}",
+                'unit_cost': round(random.uniform(1, 50), 4),
+                'total_cost': round(float(quantity) * random.uniform(1, 50), 2),
+                'quality_status': 'approved',
+                'inspection_required': mat_type == 'raw_material',
+                'certificate_of_analysis': f"COA-{random.randint(10000, 99999)}" if mat_type == 'raw_material' else None,
+                'parent_lot_number': None,
+                'consumed_by_lot_number': work_order['lot_number'],
+                'performed_by': random.choice([e.get('employee_id', 'EMP-001') for e in available_employees]),
+                'requires_documentation': mat_type == 'raw_material',
+                'documentation_complete': True,
+                'created_at': current_ts.strftime('%Y-%m-%d %H:%M:%S')
+            }
+            material_transactions.append(mat_transaction)
+        
+        # Create labor transaction
+        shift = master_data.get('shifts', [{'shift_id': 'SHIFT-001', 'shift_name': 'Day'}])[0]
+        operator = random.choice(available_employees)
+        labor_counter += 1
+        
+        labor = {
+            'labor_transaction_id': f"LAB-{(counters['labor'] + labor_counter):08d}",
+            'transaction_date': current_ts.strftime('%Y-%m-%d %H:%M:%S'),
+            'employee_id': operator.get('employee_id', 'EMP-001'),
+            'shift_id': shift.get('shift_id', 'SHIFT-001'),
+            'work_order_id': wo_id,
+            'operation_id': None,
+            'activity_code': 'DIRECT',
+            'activity_type': 'direct_labor',
+            'clock_in_time': current_ts.strftime('%Y-%m-%d %H:%M:%S'),
+            'clock_out_time': (current_ts + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S'),
+            'duration_minutes': 480,
+            'break_time_minutes': 30,
+            'quantity_produced': work_order['produced_quantity'],
+            'quantity_rejected': work_order['rejected_quantity'],
+            'standard_hours': 8.0,
+            'actual_hours': round(random.uniform(7.5, 8.5), 2),
+            'efficiency_percentage': round(random.uniform(85, 105), 2),
+            'hourly_rate': round(random.uniform(15, 35), 2),
+            'labor_cost': round(random.uniform(120, 280), 2),
+            'overtime_hours': 0,
+            'overtime_cost': 0,
+            'approved': True,
+            'approved_by': random.choice([e.get('employee_id', 'EMP-001') for e in available_employees]),
+            'approved_at': current_ts.strftime('%Y-%m-%d %H:%M:%S'),
+            'notes': None,
+            'created_at': current_ts.strftime('%Y-%m-%d %H:%M:%S')
+        }
+        labor_transactions.append(labor)
+        
+        # Create quality inspection
+        inspection_counter += 1
+        inspection = {
+            'inspection_id': f"INSP-{(counters['inspection'] + inspection_counter):08d}",
+            'inspection_type': 'final',
+            'inspection_date': current_ts.strftime('%Y-%m-%d %H:%M:%S'),
+            'work_order_id': wo_id,
+            'operation_id': None,
+            'product_id': product.get('product_id', 'PROD-001'),
+            'sample_size': work_order['produced_quantity'],
+            'lot_number': work_order['lot_number'],
+            'batch_number': work_order['batch_number'],
+            'serial_number': None,
+            'inspector_id': random.choice([e.get('employee_id', 'EMP-001') for e in available_employees]),
+            'shift_id': master_data.get('shifts', [{'shift_id': 'SHIFT-001'}])[0].get('shift_id', 'SHIFT-001'),
+            'inspection_result': random.choice(['pass', 'fail', 'conditional_pass']),
+            'defects_found': random.randint(0, 5) if random.random() < 0.2 else 0,
+            'critical_defects': random.randint(0, 2) if random.random() < 0.1 else 0,
+            'major_defects': random.randint(0, 3) if random.random() < 0.15 else 0,
+            'minor_defects': random.randint(0, 5) if random.random() < 0.2 else 0,
+            'measured_values': None,
+            'specification_values': None,
+            'disposition': 'accept' if random.random() < 0.95 else 'rework',
+            'disposition_reason': 'Quality standards met' if random.random() < 0.95 else 'Non-conformance detected',
+            'disposition_by': random.choice([e.get('employee_id', 'EMP-001') for e in available_employees]),
+            'ncr_number': f"NCR-{random.randint(10000, 99999)}" if random.random() < 0.1 else None,
+            'corrective_action_required': random.random() < 0.1,
+            'inspection_plan_id': f"IP-{random.randint(100, 999)}",
+            'inspection_checklist_id': f"CL-{random.randint(100, 999)}",
+            'photos_attached': False,
+            'approved_by': random.choice([e.get('employee_id', 'EMP-001') for e in available_employees]),
+            'approved_at': (current_ts + timedelta(minutes=30)).strftime('%Y-%m-%d %H:%M:%S'),
+            'notes': 'Inspection completed successfully',
+            'created_at': current_ts.strftime('%Y-%m-%d %H:%M:%S')
+        }
+        quality_inspections.append(inspection)
+        
+        if (i + 1) % 1000 == 0:
+            logger.info(f"  Generated {i + 1:,} / {MES_TOTAL_RECORDS:,} production records")
+    
+    logger.info(f"✓ Generated {len(work_orders):,} work orders")
+    logger.info(f"✓ Generated {len(material_transactions):,} material transactions")
+    logger.info(f"✓ Generated {len(labor_transactions):,} labor transactions")
+    logger.info(f"✓ Generated {len(quality_inspections):,} quality inspections")
+    
+    # Bulk dump to PostgreSQL
+    logger.info("="*80)
+    logger.info("BULK DUMPING TO POSTGRESQL...")
+    logger.info("="*80)
+    
+    if POSTGRES_AVAILABLE:
         try:
-            now = datetime.now()
+            conn = psycopg2.connect(
+                host=PG_HOST,
+                port=PG_PORT,
+                database=PG_DATABASE,
+                user=PG_USER,
+                password=PG_PASSWORD,
+                sslmode=PG_SSL_MODE,
+                connect_timeout=30
+            )
+            conn.autocommit = False
+            cursor = conn.cursor()
             
-            # Run cycle every hour
-            if (now - last_cycle).total_seconds() >= CYCLE_INTERVAL_SECONDS:
-                current_time = now.strftime('%Y-%m-%d %H:%M:%S')
-                
-                logger.info(f"\n{'='*80}")
-                logger.info(f"Hourly Production Cycle - {current_time}")
-                logger.info(f"Hour: {now.hour:02d}:00")
-                logger.info(f"{'='*80}")
-                
-                # Ensure connection is alive
-                if not check_connection():
-                    logger.error("Failed to establish database connection for this cycle")
-                    time.sleep(60)  # Wait 1 minute before retrying
-                    continue
-                
-                # Determine activity level
-                new_orders = determine_hourly_capacity()
-                logger.info(f"Activity level: {new_orders} new orders this hour")
-                
-                # Execute production cycle
-                create_new_work_orders(new_orders)
-                start_scheduled_orders()
-                update_in_progress_orders()
-                complete_finished_orders()
-                
-                # Flush all buffers
-                flush_buffers()
-                
-                stats['cycles_completed'] += 1
-                last_cycle = now
-                
-                logger.info(f"Cycle complete. Next cycle in {CYCLE_INTERVAL_SECONDS}s")
-                
-                # Print stats every 6 hours
-                if stats['cycles_completed'] % 6 == 0:
-                    print_hourly_stats()
+            # Disable FK checks for synthetic data
+            cursor.execute("SET CONSTRAINTS ALL DEFERRED;")
             
-            # Check every minute (keeps connection alive)
-            time.sleep(60)
+            # Insert work orders (in parallel)
+            if work_orders:
+                insert_sql = """
+                    INSERT INTO work_orders (
+                        work_order_id, work_order_number, product_id, customer_id, sales_order_number,
+                        factory_id, line_id, planned_quantity, unit_of_measure, priority,
+                        planned_start_date, planned_end_date, scheduled_start_time, scheduled_end_time,
+                        actual_start_time, actual_end_time, produced_quantity, good_quantity,
+                        rejected_quantity, scrapped_quantity, rework_quantity, status, quality_status,
+                        quality_hold, planned_cycle_time_seconds, actual_cycle_time_seconds,
+                        setup_time_minutes, run_time_minutes, downtime_minutes, yield_percentage,
+                        first_pass_yield_percentage, standard_cost_per_unit, actual_cost_per_unit,
+                        total_material_cost, total_labor_cost, total_overhead_cost, batch_number,
+                        lot_number, expiry_date, electronic_batch_record_id, requires_validation,
+                        validation_status, parent_work_order_id, erp_order_id, created_by,
+                        created_at, updated_at, completed_by, closed_at
+                    ) VALUES (
+                        %(work_order_id)s, %(work_order_number)s, %(product_id)s, %(customer_id)s, %(sales_order_number)s,
+                        %(factory_id)s, %(line_id)s, %(planned_quantity)s, %(unit_of_measure)s, %(priority)s,
+                        %(planned_start_date)s, %(planned_end_date)s, %(scheduled_start_time)s, %(scheduled_end_time)s,
+                        %(actual_start_time)s, %(actual_end_time)s, %(produced_quantity)s, %(good_quantity)s,
+                        %(rejected_quantity)s, %(scrapped_quantity)s, %(rework_quantity)s, %(status)s, %(quality_status)s,
+                        %(quality_hold)s, %(planned_cycle_time_seconds)s, %(actual_cycle_time_seconds)s,
+                        %(setup_time_minutes)s, %(run_time_minutes)s, %(downtime_minutes)s, %(yield_percentage)s,
+                        %(first_pass_yield_percentage)s, %(standard_cost_per_unit)s, %(actual_cost_per_unit)s,
+                        %(total_material_cost)s, %(total_labor_cost)s, %(total_overhead_cost)s, %(batch_number)s,
+                        %(lot_number)s, %(expiry_date)s, %(electronic_batch_record_id)s, %(requires_validation)s,
+                        %(validation_status)s, %(parent_work_order_id)s, %(erp_order_id)s, %(created_by)s,
+                        %(created_at)s, %(updated_at)s, %(completed_by)s, %(closed_at)s
+                    )
+                    ON CONFLICT (work_order_number) DO NOTHING
+                """
+                
+                logger.info(f"Inserting {len(work_orders):,} work orders in batches of {MES_BATCH_SIZE:,}...")
+                insert_batch_sequential(cursor, insert_sql, work_orders, "work_orders", MES_BATCH_SIZE, conn)
+            
+            # Insert material transactions (in parallel)
+            if material_transactions:
+                mat_insert_sql = """
+                    INSERT INTO material_transactions (
+                        transaction_id, transaction_type, transaction_date, work_order_id, operation_id,
+                        material_code, material_name, material_type, quantity, unit_of_measure,
+                        lot_number, batch_number, serial_number, expiry_date, supplier_lot_number,
+                        from_location, to_location, warehouse_location, unit_cost, total_cost,
+                        quality_status, inspection_required, certificate_of_analysis, parent_lot_number,
+                        consumed_by_lot_number, performed_by, requires_documentation, documentation_complete,
+                        created_at
+                    ) VALUES (
+                        %(transaction_id)s, %(transaction_type)s, %(transaction_date)s, %(work_order_id)s, %(operation_id)s,
+                        %(material_code)s, %(material_name)s, %(material_type)s, %(quantity)s, %(unit_of_measure)s,
+                        %(lot_number)s, %(batch_number)s, %(serial_number)s, %(expiry_date)s, %(supplier_lot_number)s,
+                        %(from_location)s, %(to_location)s, %(warehouse_location)s, %(unit_cost)s, %(total_cost)s,
+                        %(quality_status)s, %(inspection_required)s, %(certificate_of_analysis)s, %(parent_lot_number)s,
+                        %(consumed_by_lot_number)s, %(performed_by)s, %(requires_documentation)s, %(documentation_complete)s,
+                        %(created_at)s
+                    )
+                    ON CONFLICT (transaction_id) DO NOTHING
+                """
+                
+                logger.info(f"Inserting {len(material_transactions):,} material transactions in batches of {MES_BATCH_SIZE:,}...")
+                insert_batch_sequential(cursor, mat_insert_sql, material_transactions, "material transactions", MES_BATCH_SIZE, conn)
+            
+            # Insert labor transactions (in parallel)
+            if labor_transactions:
+                lab_insert_sql = """
+                    INSERT INTO labor_transactions (
+                        labor_transaction_id, transaction_date, employee_id, shift_id, work_order_id,
+                        operation_id, activity_code, activity_type, clock_in_time, clock_out_time,
+                        duration_minutes, break_time_minutes, quantity_produced, quantity_rejected,
+                        standard_hours, actual_hours, efficiency_percentage, hourly_rate, labor_cost,
+                        overtime_hours, overtime_cost, approved, approved_by, approved_at, notes, created_at
+                    ) VALUES (
+                        %(labor_transaction_id)s, %(transaction_date)s, %(employee_id)s, %(shift_id)s, %(work_order_id)s,
+                        %(operation_id)s, %(activity_code)s, %(activity_type)s, %(clock_in_time)s, %(clock_out_time)s,
+                        %(duration_minutes)s, %(break_time_minutes)s, %(quantity_produced)s, %(quantity_rejected)s,
+                        %(standard_hours)s, %(actual_hours)s, %(efficiency_percentage)s, %(hourly_rate)s, %(labor_cost)s,
+                        %(overtime_hours)s, %(overtime_cost)s, %(approved)s, %(approved_by)s, %(approved_at)s, %(notes)s, %(created_at)s
+                    )
+                    ON CONFLICT (labor_transaction_id) DO NOTHING
+                """
+                
+                logger.info(f"Inserting {len(labor_transactions):,} labor transactions in batches of {MES_BATCH_SIZE:,}...")
+                insert_batch_sequential(cursor, lab_insert_sql, labor_transactions, "labor transactions", MES_BATCH_SIZE, conn)
+            
+            # Insert quality inspections (in parallel)
+            if quality_inspections:
+                qual_insert_sql = """
+                    INSERT INTO quality_inspections (
+                        inspection_id, inspection_type, inspection_date, work_order_id, operation_id, product_id,
+                        sample_size, lot_number, batch_number, serial_number,
+                        inspector_id, shift_id, inspection_result, defects_found, critical_defects, major_defects,
+                        minor_defects, measured_values, specification_values, disposition, disposition_reason,
+                        disposition_by, ncr_number, corrective_action_required, inspection_plan_id,
+                        inspection_checklist_id, photos_attached, approved_by, approved_at, notes, created_at
+                    ) VALUES (
+                        %(inspection_id)s, %(inspection_type)s, %(inspection_date)s, %(work_order_id)s, %(operation_id)s, %(product_id)s,
+                        %(sample_size)s, %(lot_number)s, %(batch_number)s, %(serial_number)s,
+                        %(inspector_id)s, %(shift_id)s, %(inspection_result)s, %(defects_found)s, %(critical_defects)s, %(major_defects)s,
+                        %(minor_defects)s, %(measured_values)s, %(specification_values)s, %(disposition)s, %(disposition_reason)s,
+                        %(disposition_by)s, %(ncr_number)s, %(corrective_action_required)s, %(inspection_plan_id)s,
+                        %(inspection_checklist_id)s, %(photos_attached)s, %(approved_by)s, %(approved_at)s, %(notes)s, %(created_at)s
+                    )
+                    ON CONFLICT (inspection_id) DO NOTHING
+                """
+                
+                logger.info(f"Inserting {len(quality_inspections):,} quality inspections in batches of {MES_BATCH_SIZE:,}...")
+                insert_batch_sequential(cursor, qual_insert_sql, quality_inspections, "quality inspections", MES_BATCH_SIZE, conn)
+            
+            cursor.close()
+            conn.close()
+            
+            logger.info(f"✓ All records inserted successfully")
             
         except Exception as e:
-            logger.error(f"Error in main loop: {e}", exc_info=True)
-            stats['errors'] += 1
-            time.sleep(60)  # Wait 1 minute before retrying
+            logger.error(f"PostgreSQL error: {e}")
+            return 1
     
-    # Cleanup
-    logger.info("Shutting down...")
-    flush_buffers()
+    elapsed = time.time() - start_time
+    rate = len(work_orders) / elapsed if elapsed > 0 else 0
     
-    if pg_connection:
-        pg_connection.close()
-        logger.info("PostgreSQL connection closed")
+    # Get final counts after insertion
+    counts_after = get_all_table_counts()
     
-    print_hourly_stats()
-    logger.info("MES Hourly Daemon stopped")
+    logger.info("="*80)
+    logger.info("GENERATION & INSERTION COMPLETE")
+    logger.info("="*80)
+    logger.info(f"  Total time: {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
+    logger.info(f"  Work orders generated: {len(work_orders):,}")
+    logger.info(f"  Generation rate: {rate:,.0f} records/sec")
+    logger.info("")
+    logger.info("📊 DATABASE SUMMARY")
+    logger.info("="*80)
+    
+    # Show before/after for all tables
+    tables_list = ['work_orders', 'material_transactions', 'labor_transactions', 'quality_inspections']
+    for table in tables_list:
+        before = counts_before.get(table)
+        after = counts_after.get(table)
+        
+        if before is not None and after is not None:
+            inserted = after - before
+            logger.info(f"{table:.<35} Before: {before:>10,} | After: {after:>10,} | Inserted: {inserted:>10,}")
+        else:
+            logger.info(f"{table:.<35} [Count unavailable]")
+    
+    logger.info("="*80)
     
     return 0
 

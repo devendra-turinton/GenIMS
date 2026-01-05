@@ -47,13 +47,13 @@ DB_ADMIN_DB = 'postgres'  # Admin database name (not user)
 
 # Database configurations with generators for all 13 databases
 DATABASES = {
-    'genims_master_db': {
-        'schema_file': 'Data Scripts/01 - Base Data/genims_schema.sql',
-        'generators': [
-            ('Data Scripts/01 - Base Data/generate_genims_master_data.py', 'Data Scripts/01 - Base Data/genims_master_data.json'),
-        ],
-        'data_file': 'Data Scripts/01 - Base Data/genims_master_data.json'
-    },
+    # 'genims_master_db': {
+    #     'schema_file': 'Data Scripts/01 - Base Data/genims_schema.sql',
+    #     'generators': [
+    #         ('Data Scripts/01 - Base Data/generate_genims_master_data.py', 'Data Scripts/01 - Base Data/genims_master_data.json'),
+    #     ],
+    #     'data_file': 'Data Scripts/01 - Base Data/genims_master_data.json'
+    # },
     'genims_operations_db': {
         'schema_file': 'Data Scripts/02 - Machine data/genims_operational_schema.sql',
         'generators': [
@@ -61,90 +61,90 @@ DATABASES = {
         ],
         'data_file': 'Data Scripts/02 - Machine data/genims_operational_data.json'
     },
-    'genims_manufacturing_db': {
-        'schema_file': 'Data Scripts/03 - MES Data/genims_mes_schema.sql',
-        'generators': [
-            ('Data Scripts/03 - MES Data/generate_mes_historical_data.py', 'Data Scripts/03 - MES Data/genims_mes_data.json'),
-        ],
-        'data_file': 'Data Scripts/03 - MES Data/genims_mes_data.json'
-    },
-    'genims_maintenance_db': {
-        'schema_file': 'Data Scripts/06 - CMMS/genims_cmms_schema.sql',
-        'generators': [
-            ('Data Scripts/06 - CMMS/generate_cmms_historical_data.py', 'Data Scripts/06 - CMMS/genims_cmms_data.json'),
-        ],
-        'data_file': 'Data Scripts/06 - CMMS/genims_cmms_data.json'
-    },
-    'genims_erp_db': {
-        'schema_file': 'Data Scripts/04 - ERP & MES Integration/genims_erp_schema.sql',
-        'generators': [
-            ('Data Scripts/04 - ERP & MES Integration/generate_erp_historical_data.py', 'Data Scripts/04 - ERP & MES Integration/genims_erp_data.json'),
-        ],
-        'data_file': 'Data Scripts/04 - ERP & MES Integration/genims_erp_data.json'
-    },
-    'genims_financial_db': {
-        'schema_file': 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_financial_enhanced.sql',
-        'generators': [
-            ('Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/generate_financial_sync_data.py', 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_financial_data.json'),
-        ],
-        'data_file': 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_financial_data.json'
-    },
-    'genims_erp_wms_sync_db': {
-        'schema_file': 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_erp_wms_sync.sql',
-        'generators': [
-            ('Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/generate_financial_sync_data.py', 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_inventory_sync_data.json'),
-        ],
-        'data_file': 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_inventory_sync_data.json'
-    },
-    'genims_wms_db': {
-        'schema_file': 'Data Scripts/05 - WMS + TMS/genims_wms_schema.sql',
-        'generators': [
-            ('Data Scripts/05 - WMS + TMS/generate_wms_tms_historical_data.py', 'Data Scripts/05 - WMS + TMS/genims_wms_data.json'),
-        ],
-        'data_file': 'Data Scripts/05 - WMS + TMS/genims_wms_data.json'
-    },
-    'genims_tms_db': {
-        'schema_file': 'Data Scripts/05 - WMS + TMS/genims_tms_schema.sql',
-        'generators': [
-            ('Data Scripts/05 - WMS + TMS/generate_wms_tms_historical_data.py', 'Data Scripts/05 - WMS + TMS/genims_tms_data.json'),
-        ],
-        'data_file': 'Data Scripts/05 - WMS + TMS/genims_tms_data.json'
-    },
-    'genims_crm_db': {
-        'schema_file': 'Data Scripts/07 - CRM/genims_crm_schema.sql',
-        'generators': [
-            ('Data Scripts/07 - CRM/generate_crm_historical_data.py', 'Data Scripts/07 - CRM/genims_crm_data.json'),
-        ],
-        'data_file': 'Data Scripts/07 - CRM/genims_crm_data.json'
-    },
-    'genims_service_db': {
-        'schema_file': 'Data Scripts/08 - Support & Service/genims_service_schema.sql',
-        'generators': [
-            ('Data Scripts/08 - Support & Service/generate_service_historical_data_updated.py', 'Data Scripts/08 - Support & Service/genims_service_data.json'),
-        ],
-        'data_file': 'Data Scripts/08 - Support & Service/genims_service_data.json'
-    },
-    'genims_hr_db': {
-        'schema_file': 'Data Scripts/09 - HR-HCM/genims_hcm_schema.sql',
-        'generators': [
-            ('Data Scripts/09 - HR-HCM/generate_hcm_historical_data.py', 'Data Scripts/09 - HR-HCM/genims_hcm_data.json'),
-        ],
-        'data_file': 'Data Scripts/09 - HR-HCM/genims_hcm_data.json'
-    },
-    'genims_quality_db': {
-        'schema_file': 'Data Scripts/12 - QMS/genims_qms.sql',
-        'generators': [
-            ('Data Scripts/12 - QMS/generate_qms_data_fixed.py', 'Data Scripts/12 - QMS/genims_qms_data.json'),
-        ],
-        'data_file': 'Data Scripts/12 - QMS/genims_qms_data.json'
-    },
-    'genims_supplier_db': {
-        'schema_file': 'Data Scripts/11 - Supplier Portal/genims_supplier_portal.sql',
-        'generators': [
-            ('Data Scripts/11 - Supplier Portal/generate_supplier_portal_data.py', 'Data Scripts/11 - Supplier Portal/genims_supplier_portal_data.json'),
-        ],
-        'data_file': 'Data Scripts/11 - Supplier Portal/genims_supplier_portal_data.json'
-    }
+    # 'genims_manufacturing_db': {
+    #     'schema_file': 'Data Scripts/03 - MES Data/genims_mes_schema.sql',
+    #     'generators': [
+    #         ('Data Scripts/03 - MES Data/generate_mes_historical_data.py', 'Data Scripts/03 - MES Data/genims_mes_data.json'),
+    #     ],
+    #     'data_file': 'Data Scripts/03 - MES Data/genims_mes_data.json'
+    # },
+    # 'genims_maintenance_db': {
+    #     'schema_file': 'Data Scripts/06 - CMMS/genims_cmms_schema.sql',
+    #     'generators': [
+    #         ('Data Scripts/06 - CMMS/generate_cmms_historical_data.py', 'Data Scripts/06 - CMMS/genims_cmms_data.json'),
+    #     ],
+    #     'data_file': 'Data Scripts/06 - CMMS/genims_cmms_data.json'
+    # },
+    # 'genims_erp_db': {
+    #     'schema_file': 'Data Scripts/04 - ERP & MES Integration/genims_erp_schema.sql',
+    #     'generators': [
+    #         ('Data Scripts/04 - ERP & MES Integration/generate_erp_historical_data.py', 'Data Scripts/04 - ERP & MES Integration/genims_erp_data.json'),
+    #     ],
+    #     'data_file': 'Data Scripts/04 - ERP & MES Integration/genims_erp_data.json'
+    # },
+    # 'genims_financial_db': {
+    #     'schema_file': 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_financial_enhanced.sql',
+    #     'generators': [
+    #         ('Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/generate_financial_sync_data.py', 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_financial_data.json'),
+    #     ],
+    #     'data_file': 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_financial_data.json'
+    # },
+    # 'genims_erp_wms_sync_db': {
+    #     'schema_file': 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_erp_wms_sync.sql',
+    #     'generators': [
+    #         ('Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/generate_financial_sync_data.py', 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_inventory_sync_data.json'),
+    #     ],
+    #     'data_file': 'Data Scripts/10 - Financial Accounting & ERP <> WMS Sync/genims_inventory_sync_data.json'
+    # },
+    # 'genims_wms_db': {
+    #     'schema_file': 'Data Scripts/05 - WMS + TMS/genims_wms_schema.sql',
+    #     'generators': [
+    #         ('Data Scripts/05 - WMS + TMS/generate_wms_tms_historical_data.py', 'Data Scripts/05 - WMS + TMS/genims_wms_data.json'),
+    #     ],
+    #     'data_file': 'Data Scripts/05 - WMS + TMS/genims_wms_data.json'
+    # },
+    # 'genims_tms_db': {
+    #     'schema_file': 'Data Scripts/05 - WMS + TMS/genims_tms_schema.sql',
+    #     'generators': [
+    #         ('Data Scripts/05 - WMS + TMS/generate_wms_tms_historical_data.py', 'Data Scripts/05 - WMS + TMS/genims_tms_data.json'),
+    #     ],
+    #     'data_file': 'Data Scripts/05 - WMS + TMS/genims_tms_data.json'
+    # },
+    # 'genims_crm_db': {
+    #     'schema_file': 'Data Scripts/07 - CRM/genims_crm_schema.sql',
+    #     'generators': [
+    #         ('Data Scripts/07 - CRM/generate_crm_historical_data.py', 'Data Scripts/07 - CRM/genims_crm_data.json'),
+    #     ],
+    #     'data_file': 'Data Scripts/07 - CRM/genims_crm_data.json'
+    # },
+    # 'genims_service_db': {
+    #     'schema_file': 'Data Scripts/08 - Support & Service/genims_service_schema.sql',
+    #     'generators': [
+    #         ('Data Scripts/08 - Support & Service/generate_service_historical_data_updated.py', 'Data Scripts/08 - Support & Service/genims_service_data.json'),
+    #     ],
+    #     'data_file': 'Data Scripts/08 - Support & Service/genims_service_data.json'
+    # },
+    # 'genims_hr_db': {
+    #     'schema_file': 'Data Scripts/09 - HR-HCM/genims_hcm_schema.sql',
+    #     'generators': [
+    #         ('Data Scripts/09 - HR-HCM/generate_hcm_historical_data.py', 'Data Scripts/09 - HR-HCM/genims_hcm_data.json'),
+    #     ],
+    #     'data_file': 'Data Scripts/09 - HR-HCM/genims_hcm_data.json'
+    # },
+    # 'genims_quality_db': {
+    #     'schema_file': 'Data Scripts/12 - QMS/genims_qms.sql',
+    #     'generators': [
+    #         ('Data Scripts/12 - QMS/generate_qms_data_fixed.py', 'Data Scripts/12 - QMS/genims_qms_data.json'),
+    #     ],
+    #     'data_file': 'Data Scripts/12 - QMS/genims_qms_data.json'
+    # },
+    # 'genims_supplier_db': {
+    #     'schema_file': 'Data Scripts/11 - Supplier Portal/genims_supplier_portal.sql',
+    #     'generators': [
+    #         ('Data Scripts/11 - Supplier Portal/generate_supplier_portal_data.py', 'Data Scripts/11 - Supplier Portal/genims_supplier_portal_data.json'),
+    #     ],
+    #     'data_file': 'Data Scripts/11 - Supplier Portal/genims_supplier_portal_data.json'
+    # }
 }
 
 class GenIMSSetup:

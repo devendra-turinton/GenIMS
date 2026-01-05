@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-GenIMS HR/HCM Daemon
-Continuous HR operations (training compliance, certifications, leave, etc.)
+GenIMS HR/HCM Daemon - ULTRA FAST MODE
+Generates complete HR operations in-memory, then bulk dumps to PostgreSQL
 """
 
 import sys
@@ -9,12 +9,10 @@ import os
 import time
 import logging
 import signal
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dt_time
 import random
-import json
 from dotenv import load_dotenv
 
-# Load environment variables
 env_file = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'config.env')
 if os.path.exists(env_file):
     load_dotenv(env_file)
@@ -25,23 +23,24 @@ try:
     POSTGRES_AVAILABLE = True
 except ImportError:
     POSTGRES_AVAILABLE = False
-    print("WARNING: psycopg2 not installed")
 
 # Configuration
 PG_HOST = os.getenv('POSTGRES_HOST', 'localhost')
 PG_PORT = int(os.getenv('POSTGRES_PORT', '5432'))
-PG_DATABASE = os.getenv('DB_HR', 'genims_hr_db')
 PG_USER = os.getenv('POSTGRES_USER', 'postgres')
 PG_PASSWORD = os.getenv('POSTGRES_PASSWORD', '')
 PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
 
-# HCM Configuration
-CYCLE_INTERVAL_SECONDS = 60  # Check every 1 minute for HR operations
+PG_HR_DB = os.getenv('DB_HR', 'genims_hr_db')
 
-# Logging configuration
+BATCH_SIZE = 5000
+TOTAL_RECORDS = 14400  # 30 days of hourly HR records
+
+# Logging
 log_dir = os.getenv('DAEMON_LOG_DIR', os.path.join(os.path.dirname(__file__), '..', '..', 'logs'))
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, 'hcm_daemon.log')
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -50,28 +49,18 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('Hcm')
+logger = logging.getLogger('HCMDaemon')
 
-
-
-running = True
+# Global State
 pg_connection = None
 master_data = {}
-stats = {
-    'cycles': 0,
-    'certifications_alerted': 0,
-    'training_scheduled': 0,
-    'leave_requests_processed': 0,
-    'onboarding_tracked': 0,
-    'performance_reviews_due': 0,
-    'safety_incidents_reviewed': 0,
-    'start_time': datetime.now()
+counters = {
+    'attendance': 1, 'leave_request': 1, 'review': 1, 'enrollment': 1, 'incident': 1
 }
 
 def signal_handler(sig, frame):
-    global running
     logger.info("Shutdown signal received")
-    running = False
+    sys.exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
@@ -82,620 +71,446 @@ def initialize_database():
         return False
     try:
         pg_connection = psycopg2.connect(
-            host=PG_HOST, port=PG_PORT, database=PG_DATABASE,
-            user=PG_USER, password=PG_PASSWORD,
-            sslmode=PG_SSL_MODE
+            host=PG_HOST, port=PG_PORT, database=PG_HR_DB,
+            user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE, connect_timeout=30
         )
         pg_connection.autocommit = False
-        logger.info("PostgreSQL connected")
+        logger.info(f"PostgreSQL connection established: {PG_HOST}:{PG_PORT}/{PG_HR_DB}")
         return True
     except Exception as e:
-        logger.error(f"DB connection failed: {e}")
+        logger.error(f"PostgreSQL connection failed: {e}")
+        return False
+
+def get_table_count(table_name):
+    try:
+        conn = psycopg2.connect(host=PG_HOST, port=PG_PORT, database=PG_HR_DB,
+            user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE, connect_timeout=10)
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT COUNT(*) FROM {table_name};")
+        count = cursor.fetchone()[0]
+        cursor.close()
+        conn.close()
+        return count
+    except Exception as e:
+        logger.warning(f"Could not get {table_name} count: {e}")
+        return None
+
+def get_all_table_counts():
+    tables = ['attendance_records', 'leave_requests', 'performance_reviews', 'training_enrollments', 'safety_incidents']
+    counts = {}
+    for table in tables:
+        counts[table] = get_table_count(table)
+    return counts
+
+def get_max_id_counter(table_name, id_column):
+    """Get the next ID counter for a given table"""
+    try:
+        cursor = pg_connection.cursor()
+        cursor.execute(f"SELECT MAX(CAST(SUBSTRING({id_column}, '\\d+$') AS INTEGER)) FROM {table_name}")
+        max_id = cursor.fetchone()[0]
+        cursor.close()
+        return (max_id or 0) + 1
+    except Exception as e:
+        logger.debug(f"Could not get max ID from {table_name}.{id_column}: {e}")
+        return 1
+
+def initialize_id_counters():
+    """Initialize counters from existing data in database"""
+    global counters
+    try:
+        counters['attendance'] = get_max_id_counter('attendance_records', 'attendance_id')
+        counters['leave_request'] = get_max_id_counter('leave_requests', 'request_id')
+        counters['review'] = get_max_id_counter('performance_reviews', 'review_id')
+        counters['enrollment'] = get_max_id_counter('training_enrollments', 'enrollment_id')
+        counters['incident'] = get_max_id_counter('safety_incidents', 'incident_id')
+        
+        logger.info(f"ID Counters initialized: {counters}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize ID counters: {e}")
         return False
 
 def load_master_data():
     global master_data
     try:
-        cursor = pg_connection.cursor()
+        conn = psycopg2.connect(
+            host=PG_HOST, port=PG_PORT, database=PG_HR_DB,
+            user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE, connect_timeout=30
+        )
+        cursor = conn.cursor()
         
         # Load employees
-        cursor.execute("SELECT * FROM employees WHERE employment_status = 'active' LIMIT 100")
-        master_data['employees'] = [dict(zip([d[0] for d in cursor.description], row)) 
-                                    for row in cursor.fetchall()]
+        cursor.execute("SELECT employee_id FROM employees LIMIT 200")
+        employees = [row[0] for row in cursor.fetchall()]
         
-        # Load training courses
-        cursor.execute("SELECT * FROM training_courses WHERE is_active = true")
-        master_data['training_courses'] = [dict(zip([d[0] for d in cursor.description], row)) 
-                                          for row in cursor.fetchall()]
+        # Load departments
+        cursor.execute("SELECT department_id FROM departments LIMIT 50")
+        departments = [row[0] for row in cursor.fetchall()]
+        
+        # Load shifts
+        cursor.execute("SELECT shift_id FROM shift_schedules LIMIT 20")
+        shifts = [row[0] for row in cursor.fetchall()]
+        
+        # Load leave types
+        cursor.execute("SELECT leave_type_id FROM leave_types LIMIT 10")
+        leave_types = [row[0] for row in cursor.fetchall()]
+        
+        # Load training schedules
+        cursor.execute("SELECT schedule_id FROM training_schedules LIMIT 30")
+        training_schedules = [row[0] for row in cursor.fetchall()]
+        
+        # Load existing enrollment combinations to avoid duplicates
+        cursor.execute("SELECT schedule_id, employee_id FROM training_enrollments")
+        existing_enrollments = set(cursor.fetchall())
+        
+        # Load existing attendance combinations (last 60 days only for memory efficiency)
+        cursor.execute("SELECT employee_id, attendance_date FROM attendance_records WHERE attendance_date >= CURRENT_DATE - INTERVAL '60 days'")
+        existing_attendance = set(cursor.fetchall())
         
         cursor.close()
-        logger.info(f"Loaded: {len(master_data.get('employees', []))} employees, "
-                   f"{len(master_data.get('training_courses', []))} courses")
+        conn.close()
+        
+        master_data['employees'] = employees or ['EMP-000001', 'EMP-000002']
+        master_data['departments'] = departments or ['DEPT-000001']
+        master_data['shifts'] = shifts or ['SHIFT-DAY']
+        master_data['leave_types'] = leave_types or ['LVT-000001']
+        master_data['training_schedules'] = training_schedules or ['TS-000001']
+        master_data['existing_enrollments'] = existing_enrollments
+        master_data['existing_attendance'] = existing_attendance
+        
+        logger.info(f"Master data loaded: {len(employees)} employees, {len(departments)} departments, {len(shifts)} shifts, {len(leave_types)} leave types, {len(training_schedules)} training schedules")
+        logger.info(f"Existing data: {len(existing_enrollments)} enrollments, {len(existing_attendance)} attendance records")
         return True
     except Exception as e:
         logger.error(f"Failed to load master data: {e}")
         return False
 
-def generate_id(prefix: str) -> str:
-    return f"{prefix}-{datetime.now().strftime('%Y%m%d%H%M%S')}-{random.randint(1000, 9999)}"
-
-# ============================================================================
-# CERTIFICATION MANAGEMENT
-# ============================================================================
-
-def monitor_certification_expiry():
-    """Monitor and alert on expiring certifications"""
-    logger.info("Monitoring certification expiry...")
+def insert_batch_parallel(cursor, insert_sql, data, table_name, batch_size, connection=None):
+    """Insert data in batches"""
+    total_batches = (len(data) + batch_size - 1) // batch_size
     
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Get certifications expiring in 90, 60, 30 days
-        for days in [90, 60, 30]:
-            cursor.execute("""
-                SELECT certification_id, employee_id, certification_name, expiry_date
-                FROM employee_certifications
-                WHERE certification_status = 'active'
-                AND requires_renewal = true
-                AND expiry_date <= %s
-                AND expiry_date > CURRENT_DATE
-                AND (
-                    (expiry_date - CURRENT_DATE) = %s
-                    OR (expiry_alert_sent = false AND (expiry_date - CURRENT_DATE) <= %s)
-                )
-            """, ((datetime.now() + timedelta(days=days)).date(), days, days))
+    for batch_idx in range(total_batches):
+        try:
+            batch_start = batch_idx * batch_size
+            batch_end = min((batch_idx + 1) * batch_size, len(data))
+            batch = data[batch_start:batch_end]
             
-            certs = cursor.fetchall()
+            execute_batch(cursor, insert_sql, batch, page_size=5000)
+            if connection:
+                connection.commit()
             
-            for cert_id, emp_id, cert_name, expiry_date in certs:
-                # Log alert (in production, would send email/notification)
-                logger.info(f"ALERT: Certification {cert_name} for employee {emp_id} expires in {days} days")
-                
-                # Mark alert as sent
-                cursor.execute("""
-                    UPDATE employee_certifications
-                    SET expiry_alert_sent = true
-                    WHERE certification_id = %s
-                """, (cert_id,))
-                
-                stats['certifications_alerted'] += 1
-        
-        # Mark expired certifications
-        cursor.execute("""
-            UPDATE employee_certifications
-            SET certification_status = 'expired'
-            WHERE certification_status = 'active'
-            AND expiry_date < CURRENT_DATE
-        """)
-        
-        pg_connection.commit()
-        cursor.close()
-    except Exception as e:
-        logger.error(f"Error monitoring certifications: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# TRAINING COMPLIANCE
-# ============================================================================
-
-def check_training_compliance():
-    """Check training compliance and identify overdue trainings"""
-    logger.info("Checking training compliance...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Find employees with overdue mandatory trainings
-        cursor.execute("""
-            SELECT DISTINCT
-                e.employee_id,
-                e.first_name || ' ' || e.last_name as employee_name,
-                tc.course_name,
-                tr.requirement_type,
-                tr.frequency
-            FROM employees e
-            CROSS JOIN training_requirements tr
-            JOIN training_courses tc ON tr.course_id = tc.course_id
-            WHERE e.employment_status = 'active'
-            AND tr.is_mandatory = true
-            AND tr.is_active = true
-            AND (
-                (tr.requirement_type = 'role_based' AND tr.role_id = (
-                    SELECT role_id FROM positions WHERE position_id = e.primary_position_id
-                ))
-                OR (tr.requirement_type = 'location_based' AND tr.factory_id = e.primary_factory_id)
-            )
-            AND NOT EXISTS (
-                SELECT 1 FROM training_enrollments ten
-                JOIN training_schedules ts ON ten.schedule_id = ts.schedule_id
-                WHERE ten.employee_id = e.employee_id
-                AND ts.course_id = tc.course_id
-                AND ten.completion_status = 'completed'
-                AND (
-                    tr.frequency = 'one_time'
-                    OR (tr.frequency = 'annual' AND ten.completion_date >= CURRENT_DATE - INTERVAL '1 year')
-                    OR (tr.frequency = 'biennial' AND ten.completion_date >= CURRENT_DATE - INTERVAL '2 years')
-                )
-            )
-            LIMIT 20
-        """)
-        
-        overdue = cursor.fetchall()
-        
-        for emp_id, emp_name, course_name, req_type, frequency in overdue:
-            logger.info(f"COMPLIANCE: Employee {emp_name} needs {course_name} ({frequency})")
-        
-        cursor.close()
-        
-        if overdue:
-            logger.info(f"Found {len(overdue)} overdue training requirements")
-    except Exception as e:
-        logger.error(f"Error checking training compliance: {e}")
-
-def auto_schedule_mandatory_training():
-    """Auto-schedule mandatory training sessions"""
-    logger.info("Auto-scheduling mandatory training...")
-    
-    if not master_data.get('training_courses'):
-        return
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Create training schedules for next month
-        for course in random.sample(master_data['training_courses'], 
-                                   min(3, len(master_data['training_courses']))):
-            
-            # Check if already scheduled for next 30 days
-            cursor.execute("""
-                SELECT COUNT(*) FROM training_schedules
-                WHERE course_id = %s
-                AND start_datetime >= CURRENT_DATE
-                AND start_datetime <= CURRENT_DATE + INTERVAL '30 days'
-            """, (course['course_id'],))
-            
-            if cursor.fetchone()[0] == 0:
-                # Schedule new session
-                schedule_id = generate_id('SCHED')
-                start_datetime = datetime.now() + timedelta(days=random.randint(7, 30))
-                
-                cursor.execute("""
-                    INSERT INTO training_schedules (
-                        schedule_id, course_id, session_name,
-                        start_datetime, end_datetime,
-                        max_participants, schedule_status, created_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """, (schedule_id, course['course_id'],
-                      f"{course['course_name']} - Auto Scheduled",
-                      start_datetime, 
-                      start_datetime + timedelta(hours=int(course.get('duration_hours', 8))),
-                      20, 'scheduled', datetime.now()))
-                
-                stats['training_scheduled'] += 1
-                logger.info(f"Scheduled: {course['course_name']}")
-        
-        pg_connection.commit()
-        cursor.close()
-    except Exception as e:
-        logger.error(f"Error scheduling training: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# LEAVE MANAGEMENT
-# ============================================================================
-
-def process_pending_leave_requests():
-    """Process pending leave requests (auto-approve if criteria met)"""
-    logger.info("Processing pending leave requests...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Auto-approve leave requests meeting criteria
-        # (Small requests, sufficient balance, advance notice)
-        cursor.execute("""
-            SELECT lr.request_id, lr.employee_id, lr.total_days,
-                   lr.start_date, elb.available_balance
-            FROM leave_requests lr
-            JOIN employee_leave_balances elb ON 
-                lr.employee_id = elb.employee_id 
-                AND lr.leave_type_id = elb.leave_type_id
-                AND elb.leave_year = EXTRACT(YEAR FROM lr.start_date)
-            WHERE lr.request_status = 'pending'
-            AND lr.total_days <= 3
-            AND lr.start_date > CURRENT_DATE + INTERVAL '7 days'
-            AND elb.available_balance >= lr.total_days
-            LIMIT 10
-        """)
-        
-        requests = cursor.fetchall()
-        
-        for req_id, emp_id, days, start_date, balance in requests:
-            # Auto-approve
-            cursor.execute("""
-                UPDATE leave_requests
-                SET request_status = 'approved',
-                    approval_date = %s
-                WHERE request_id = %s
-            """, (datetime.now().date(), req_id))
-            
-            # Update balance
-            cursor.execute("""
-                UPDATE employee_leave_balances
-                SET used_days = used_days + %s,
-                    available_balance = available_balance - %s
-                WHERE employee_id = %s
-                AND leave_year = EXTRACT(YEAR FROM %s)
-            """, (days, days, emp_id, start_date))
-            
-            stats['leave_requests_processed'] += 1
-            logger.info(f"Approved leave request: {req_id}")
-        
-        pg_connection.commit()
-        cursor.close()
-        
-        if requests:
-            logger.info(f"Processed {len(requests)} leave requests")
-    except Exception as e:
-        logger.error(f"Error processing leave requests: {e}")
-        pg_connection.rollback()
-
-def update_leave_balances():
-    """Update monthly leave accruals"""
-    logger.info("Updating leave balances...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Check if accrual already done this month
-        current_year = datetime.now().year
-        current_month = datetime.now().month
-        
-        # For simplicity, update balances for active employees
-        cursor.execute("""
-            UPDATE employee_leave_balances elb
-            SET accrued_days = accrued_days + lt.accrual_rate,
-                available_balance = opening_balance + accrued_days - used_days
-            FROM leave_types lt, employees e
-            WHERE elb.leave_type_id = lt.leave_type_id
-            AND elb.employee_id = e.employee_id
-            AND e.employment_status = 'active'
-            AND lt.accrual_enabled = true
-            AND elb.leave_year = %s
-        """, (current_year,))
-        
-        pg_connection.commit()
-        cursor.close()
-    except Exception as e:
-        logger.error(f"Error updating leave balances: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# ONBOARDING TRACKING
-# ============================================================================
-
-def track_onboarding_progress():
-    """Track and alert on onboarding progress"""
-    logger.info("Tracking onboarding progress...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Get onboarding in progress
-        cursor.execute("""
-            SELECT eo.onboarding_id, e.employee_id,
-                   e.first_name || ' ' || e.last_name as employee_name,
-                   e.hire_date, eo.completion_pct
-            FROM employee_onboarding eo
-            JOIN employees e ON eo.employee_id = e.employee_id
-            WHERE eo.onboarding_status = 'in_progress'
-            AND eo.onboarding_start_date < CURRENT_DATE - INTERVAL '7 days'
-            LIMIT 10
-        """)
-        
-        onboardings = cursor.fetchall()
-        
-        for onb_id, emp_id, emp_name, hire_date, completion_pct in onboardings:
-            days_since_hire = (datetime.now().date() - hire_date).days
-            
-            if completion_pct < 50 and days_since_hire > 14:
-                logger.info(f"ALERT: Onboarding delayed for {emp_name} - {completion_pct}% complete")
-                stats['onboarding_tracked'] += 1
-        
-        cursor.close()
-    except Exception as e:
-        logger.error(f"Error tracking onboarding: {e}")
-
-# ============================================================================
-# PERFORMANCE MANAGEMENT
-# ============================================================================
-
-def check_performance_reviews_due():
-    """Check for performance reviews due"""
-    logger.info("Checking performance reviews due...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Find employees due for annual review
-        cursor.execute("""
-            SELECT e.employee_id, 
-                   e.first_name || ' ' || e.last_name as employee_name,
-                   e.hire_date
-            FROM employees e
-            WHERE e.employment_status = 'active'
-            AND e.hire_date <= CURRENT_DATE - INTERVAL '1 year'
-            AND NOT EXISTS (
-                SELECT 1 FROM performance_reviews pr
-                WHERE pr.employee_id = e.employee_id
-                AND pr.review_period_end >= CURRENT_DATE - INTERVAL '13 months'
-            )
-            LIMIT 10
-        """)
-        
-        due_reviews = cursor.fetchall()
-        
-        for emp_id, emp_name, hire_date in due_reviews:
-            logger.info(f"REVIEW DUE: {emp_name} - hired {hire_date}")
-            stats['performance_reviews_due'] += 1
-        
-        cursor.close()
-        
-        if due_reviews:
-            logger.info(f"Found {len(due_reviews)} employees due for review")
-    except Exception as e:
-        logger.error(f"Error checking reviews: {e}")
-
-# ============================================================================
-# SAFETY COMPLIANCE
-# ============================================================================
-
-def review_safety_incidents():
-    """Review open safety incidents"""
-    logger.info("Reviewing safety incidents...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Get open incidents older than 7 days
-        cursor.execute("""
-            SELECT incident_id, incident_number, severity,
-                   incident_date, investigation_status
-            FROM safety_incidents
-            WHERE incident_status = 'open'
-            AND incident_date < CURRENT_DATE - INTERVAL '7 days'
-            LIMIT 10
-        """)
-        
-        incidents = cursor.fetchall()
-        
-        for inc_id, inc_num, severity, inc_date, inv_status in incidents:
-            logger.info(f"SAFETY: Incident {inc_num} ({severity}) - investigation {inv_status}")
-            stats['safety_incidents_reviewed'] += 1
-            
-            # Auto-close minor incidents after investigation
-            if severity == 'minor' and inv_status == 'completed':
-                cursor.execute("""
-                    UPDATE safety_incidents
-                    SET incident_status = 'closed',
-                        closed_date = %s
-                    WHERE incident_id = %s
-                """, (datetime.now().date(), inc_id))
-        
-        pg_connection.commit()
-        cursor.close()
-        
-        if incidents:
-            logger.info(f"Reviewed {len(incidents)} safety incidents")
-    except Exception as e:
-        logger.error(f"Error reviewing incidents: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# SKILL GAP ANALYSIS
-# ============================================================================
-
-def identify_skill_gaps():
-    """Identify skill gaps for employees"""
-    logger.info("Identifying skill gaps...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Find employees missing required skills for their role
-        cursor.execute("""
-            SELECT e.employee_id,
-                   e.first_name || ' ' || e.last_name as employee_name,
-                   sc.skill_name,
-                   rsr.min_proficiency_level
-            FROM employees e
-            JOIN positions p ON e.primary_position_id = p.position_id
-            JOIN role_skill_requirements rsr ON p.role_id = rsr.role_id
-            JOIN skills_catalog sc ON rsr.skill_id = sc.skill_id
-            WHERE e.employment_status = 'active'
-            AND rsr.requirement_type = 'required'
-            AND NOT EXISTS (
-                SELECT 1 FROM employee_skills es
-                WHERE es.employee_id = e.employee_id
-                AND es.skill_id = sc.skill_id
-                AND es.proficiency_level >= rsr.min_proficiency_level
-            )
-            LIMIT 20
-        """)
-        
-        gaps = cursor.fetchall()
-        
-        for emp_id, emp_name, skill, min_level in gaps:
-            logger.info(f"SKILL GAP: {emp_name} needs {skill} (level {min_level})")
-        
-        cursor.close()
-        
-        if gaps:
-            logger.info(f"Found {len(gaps)} skill gaps")
-    except Exception as e:
-        logger.error(f"Error identifying skill gaps: {e}")
-
-# ============================================================================
-# INTEGRATION WITH OTHER SYSTEMS
-# ============================================================================
-
-def sync_with_other_systems():
-    """Sync employee data with CRM, CMMS, Service"""
-    logger.info("Syncing with other systems...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Check if sales_reps table exists (CRM)
-        cursor.execute("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_name = 'sales_reps'
-            )
-        """)
-        
-        if cursor.fetchone()[0]:
-            # Sync sales reps from employees
-            cursor.execute("""
-                SELECT e.employee_id, e.first_name, e.last_name, e.work_email
-                FROM employees e
-                JOIN positions p ON e.primary_position_id = p.position_id
-                JOIN job_roles jr ON p.role_id = jr.role_id
-                WHERE jr.role_family = 'sales'
-                AND e.employment_status = 'active'
-                AND NOT EXISTS (
-                    SELECT 1 FROM sales_reps sr 
-                    WHERE sr.employee_id = e.employee_id
-                )
-                LIMIT 5
-            """)
-            
-            new_sales_reps = cursor.fetchall()
-            
-            for emp_id, first_name, last_name, email in new_sales_reps:
-                # Would create sales rep record
-                logger.info(f"SYNC: Would create sales rep for {first_name} {last_name}")
-                
-                # Log integration
-                cursor.execute("""
-                    INSERT INTO hcm_integration_log (
-                        log_id, integration_direction, document_type,
-                        document_id, target_system, integration_status, log_timestamp
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """, (generate_id('INTLOG'), 'HCM_TO_CRM', 'employee',
-                      emp_id, 'CRM', 'completed', datetime.now()))
-        
-        pg_connection.commit()
-        cursor.close()
-    except Exception as e:
-        logger.error(f"Error syncing systems: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# MAIN CYCLE
-# ============================================================================
-
-def run_hcm_cycle():
-    """Execute complete HCM cycle"""
-    logger.info("=== HCM Cycle Starting ===")
-    
-    try:
-        # 1. Certification Management
-        monitor_certification_expiry()
-        
-        # 2. Training Compliance
-        check_training_compliance()
-        auto_schedule_mandatory_training()
-        
-        # 3. Leave Management
-        process_pending_leave_requests()
-        if datetime.now().day == 1:  # First of month
-            update_leave_balances()
-        
-        # 4. Onboarding
-        track_onboarding_progress()
-        
-        # 5. Performance
-        check_performance_reviews_due()
-        
-        # 6. Safety
-        review_safety_incidents()
-        
-        # 7. Skills
-        identify_skill_gaps()
-        
-        # 8. Integration
-        sync_with_other_systems()
-        
-        stats['cycles'] += 1
-        logger.info("=== HCM Cycle Complete ===")
-        return True
-    except Exception as e:
-        logger.error(f"HCM cycle error: {e}")
-        return False
-
-def print_stats():
-    """Print daemon statistics"""
-    elapsed = (datetime.now() - stats['start_time']).total_seconds()
-    hours = elapsed / 3600
-    
-    logger.info("="*80)
-    logger.info(f"HCM Daemon Statistics")
-    logger.info(f"  Uptime: {hours:.1f} hours")
-    logger.info(f"  Cycles: {stats['cycles']}")
-    logger.info(f"  Certifications Alerted: {stats['certifications_alerted']}")
-    logger.info(f"  Training Scheduled: {stats['training_scheduled']}")
-    logger.info(f"  Leave Requests Processed: {stats['leave_requests_processed']}")
-    logger.info(f"  Onboarding Tracked: {stats['onboarding_tracked']}")
-    logger.info(f"  Performance Reviews Due: {stats['performance_reviews_due']}")
-    logger.info(f"  Safety Incidents Reviewed: {stats['safety_incidents_reviewed']}")
-    logger.info("="*80)
+            logger.info(f"  Flushed {batch_end:,} / {len(data):,} {table_name}")
+        except psycopg2.IntegrityError as e:
+            logger.warning(f"  Batch {batch_idx + 1}/{total_batches} - Integrity error, skipping")
+            if connection:
+                connection.rollback()
+        except Exception as e:
+            logger.error(f"  Batch {batch_idx + 1}/{total_batches} error: {e}")
+            if connection:
+                connection.rollback()
 
 def main():
-    """Main daemon loop"""
+    """Main - Generate all HR data in-memory, then bulk dump"""
     logger.info("="*80)
-    logger.info("GenIMS HR/HCM Daemon Starting")
-    logger.info("Cycle Interval: Every hour")
+    logger.info("GenIMS HR/HCM Daemon - ULTRA FAST MODE (In-Memory Generation)")
+    logger.info("="*80)
+    logger.info(f"Configuration:")
+    logger.info(f"  Database: {PG_HR_DB}")
+    logger.info(f"  Batch Size: {BATCH_SIZE}")
     logger.info("="*80)
     
+    start_time = time.time()
+    
+    # Initialize
     if not initialize_database():
+        return 1
+    
+    if not initialize_id_counters():
         return 1
     
     if not load_master_data():
         return 1
     
-    logger.info("Press Ctrl+C to stop")
+    logger.info("="*80)
+    logger.info("📊 BASELINE DATABASE COUNTS (Before Generation)")
+    logger.info("="*80)
+    counts_before = get_all_table_counts()
+    for table, count in counts_before.items():
+        if count is not None:
+            logger.info(f"  {table:.<40} {count:>10,} records")
+    logger.info("="*80)
     
-    last_cycle = datetime.now() - timedelta(hours=2)
+    logger.info("="*80)
+    logger.info("GENERATING ALL DATA IN MEMORY...")
+    logger.info("="*80)
     
-    while running:
-        try:
-            now = datetime.now()
-            
-            # Run every hour
-            if (now - last_cycle).total_seconds() >= CYCLE_INTERVAL_SECONDS:
-                run_hcm_cycle()
-                last_cycle = now
-            
-            # Print stats every 4 hours
-            if now.hour % 4 == 0 and now.minute == 0:
-                print_stats()
-            
-            time.sleep(60)  # Check every minute
-            
-        except Exception as e:
-            logger.error(f"Error in main loop: {e}", exc_info=True)
-            time.sleep(60)
+    # Generate data
+    attendance_records = []
+    leave_requests = []
+    performance_reviews = []
+    training_enrollments = []
+    safety_incidents = []
     
-    logger.info("Shutting down...")
+    sim_base_time = datetime.strptime(datetime.now().strftime('%Y-%m-%d 00:00:00'), '%Y-%m-%d %H:%M:%S')
+    run_timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    
+    # Track unique combinations to avoid UNIQUE constraint violations
+    # Initialize with existing database data
+    attendance_seen = set(master_data.get('existing_attendance', set()))
+    enrollment_seen = set(master_data.get('existing_enrollments', set()))
+    
+    # Generate HR records
+    for i in range(TOTAL_RECORDS):
+        timestamp_offset = i * 3600  # 1 hour intervals
+        current_ts = sim_base_time + timedelta(seconds=timestamp_offset)
+        current_date = current_ts.date()
+        
+        employee = random.choice(master_data['employees'])
+        department = random.choice(master_data['departments'])
+        shift = random.choice(master_data['shifts'])
+        
+        # Attendance Records (1 per record for daily tracking)
+        # UNIQUE constraint: (employee_id, attendance_date)
+        attendance_key = (employee, current_date)
+        if attendance_key not in attendance_seen:
+            attendance_seen.add(attendance_key)
+            attendance_id = f"ATT-{(counters['attendance'] + len(attendance_records)):06d}"
+            clock_in = current_ts.replace(hour=8, minute=random.randint(0, 30))
+            clock_out = current_ts.replace(hour=17, minute=random.randint(0, 30))
+            actual_hrs = round((clock_out - clock_in).seconds / 3600, 2)
+            
+            attendance_records.append({
+                'attendance_id': attendance_id,
+                'employee_id': employee,
+                'attendance_date': current_date,
+                'shift_id': shift,
+                'clock_in_time': clock_in,
+                'clock_out_time': clock_out,
+                'scheduled_hours': 8.0,
+                'actual_hours': actual_hrs,
+                'regular_hours': min(actual_hrs, 8.0),
+                'overtime_hours': max(0, actual_hrs - 8.0),
+                'attendance_status': random.choice(['Present', 'Absent', 'Late', 'Half Day']),
+                'late_minutes': random.randint(0, 30) if random.random() > 0.7 else 0,
+                'created_at': current_ts
+            })
+        
+        # Leave Requests (1 per 100 records)
+        if i % 100 == 0:
+            request_id = f"LR-{(counters['leave_request'] + i // 100):06d}"
+            leave_type = random.choice(master_data['leave_types'])
+            start_date = current_date + timedelta(days=random.randint(1, 30))
+            end_date = start_date + timedelta(days=random.randint(1, 5))
+            total_days = (end_date - start_date).days + 1
+            
+            leave_requests.append({
+                'request_id': request_id,
+                'employee_id': employee,
+                'leave_type_id': leave_type,
+                'request_date': current_date,
+                'start_date': start_date,
+                'end_date': end_date,
+                'total_days': total_days,
+                'is_half_day': random.choice([True, False]) if total_days == 1 else False,
+                'request_status': random.choice(['Pending', 'Approved', 'Rejected', 'Cancelled']),
+                'approved_by': random.choice(master_data['employees']) if random.random() > 0.3 else None,
+                'approval_date': current_date + timedelta(days=1) if random.random() > 0.3 else None,
+                'created_at': current_ts
+            })
+        
+        # Performance Reviews (1 per 200 records)
+        if i % 200 == 0:
+            review_id = f"REV-{(counters['review'] + i // 200):06d}"
+            review_start = current_date - timedelta(days=90)
+            review_end = current_date
+            
+            performance_reviews.append({
+                'review_id': review_id,
+                'employee_id': employee,
+                'review_type': random.choice(['Annual', 'Mid-Year', 'Quarterly', 'Probation']),
+                'review_period_start': review_start,
+                'review_period_end': review_end,
+                'reviewer_id': random.choice(master_data['employees']),
+                'review_date': current_date,
+                'overall_rating': round(random.uniform(2.5, 5.0), 1),
+                'performance_level': random.choice(['Exceeds', 'Meets', 'Below', 'Outstanding']),
+                'technical_competency_rating': round(random.uniform(2.5, 5.0), 1),
+                'behavioral_competency_rating': round(random.uniform(2.5, 5.0), 1),
+                'goals_achieved': random.randint(1, 5),
+                'created_at': current_ts
+            })
+        
+        # Training Enrollments (1 per 75 records)
+        # UNIQUE constraint: (schedule_id, employee_id)
+        if i % 75 == 0:
+            schedule = random.choice(master_data['training_schedules'])
+            enrollment_key = (schedule, employee)
+            
+            # Only add if not already enrolled
+            if enrollment_key not in enrollment_seen:
+                enrollment_seen.add(enrollment_key)
+                enrollment_id = f"ENR-{(counters['enrollment'] + len(training_enrollments)):06d}"
+                
+                training_enrollments.append({
+                    'enrollment_id': enrollment_id,
+                    'schedule_id': schedule,
+                    'employee_id': employee,
+                    'enrollment_date': current_date,
+                    'enrollment_status': random.choice(['Enrolled', 'Completed', 'Cancelled', 'No-Show']),
+                    'attended': random.choice([True, False]),
+                    'attendance_date': current_date + timedelta(days=random.randint(1, 7)) if random.random() > 0.3 else None,
+                    'attendance_hours': round(random.uniform(2, 8), 1) if random.random() > 0.3 else None,
+                    'assessment_score': round(random.uniform(50, 100), 1) if random.random() > 0.4 else None,
+                    'passed': random.choice([True, False]) if random.random() > 0.4 else None,
+                    'completion_status': random.choice(['Completed', 'In Progress', 'Not Started']),
+                    'completion_date': current_date + timedelta(days=random.randint(1, 14)) if random.random() > 0.5 else None,
+                    'created_at': current_ts
+                })
+        
+        # Safety Incidents (1 per 500 records)
+        if i % 500 == 0:
+            incident_id = f"INC-{(counters['incident'] + i // 500):06d}"
+            incident_num = f"SI-{run_timestamp}-{i // 500:04d}"
+            
+            safety_incidents.append({
+                'incident_id': incident_id,
+                'incident_number': incident_num,
+                'employee_id': employee,
+                'incident_date': current_date,
+                'incident_time': dt_time(random.randint(8, 17), random.randint(0, 59)),
+                'department_id': department,
+                'incident_type': random.choice(['Injury', 'Near Miss', 'Property Damage', 'Equipment Failure']),
+                'severity': random.choice(['Minor', 'Moderate', 'Serious', 'Critical']),
+                'description': f"Safety incident {i // 500}",
+                'injury_type': random.choice(['Cut', 'Burn', 'Strain', 'Fracture', 'None']) if random.random() > 0.3 else None,
+                'body_part_affected': random.choice(['Hand', 'Foot', 'Back', 'Head', 'Leg']) if random.random() > 0.3 else None,
+                'created_at': current_ts
+            })
+        
+        if (i + 1) % 1000 == 0:
+            logger.info(f"  Generated {i + 1:,} / {TOTAL_RECORDS:,} records")
+    
+    logger.info(f"✓ Generated {len(attendance_records):,} attendance records")
+    logger.info(f"✓ Generated {len(leave_requests):,} leave requests")
+    logger.info(f"✓ Generated {len(performance_reviews):,} performance reviews")
+    logger.info(f"✓ Generated {len(training_enrollments):,} training enrollments")
+    logger.info(f"✓ Generated {len(safety_incidents):,} safety incidents")
+    
+    # Bulk dump to PostgreSQL
+    logger.info("="*80)
+    logger.info("BULK DUMPING TO POSTGRESQL...")
+    logger.info("="*80)
+    
+    try:
+        cursor = pg_connection.cursor()
+        cursor.execute("SET CONSTRAINTS ALL DEFERRED;")
+        
+        # Insert attendance records
+        if attendance_records:
+            insert_sql = """INSERT INTO attendance_records (
+                attendance_id, employee_id, attendance_date, shift_id, clock_in_time,
+                clock_out_time, scheduled_hours, actual_hours, regular_hours, overtime_hours,
+                attendance_status, late_minutes, created_at
+            ) VALUES (%(attendance_id)s, %(employee_id)s, %(attendance_date)s, %(shift_id)s,
+                %(clock_in_time)s, %(clock_out_time)s, %(scheduled_hours)s, %(actual_hours)s,
+                %(regular_hours)s, %(overtime_hours)s, %(attendance_status)s, %(late_minutes)s,
+                %(created_at)s)
+            ON CONFLICT (attendance_id) DO NOTHING"""
+            logger.info(f"Inserting {len(attendance_records):,} attendance records...")
+            insert_batch_parallel(cursor, insert_sql, attendance_records, "attendance_records", BATCH_SIZE, pg_connection)
+        
+        # Insert leave requests
+        if leave_requests:
+            insert_sql = """INSERT INTO leave_requests (
+                request_id, employee_id, leave_type_id, request_date, start_date, end_date,
+                total_days, is_half_day, request_status, approved_by, approval_date, created_at
+            ) VALUES (%(request_id)s, %(employee_id)s, %(leave_type_id)s, %(request_date)s,
+                %(start_date)s, %(end_date)s, %(total_days)s, %(is_half_day)s, %(request_status)s,
+                %(approved_by)s, %(approval_date)s, %(created_at)s)
+            ON CONFLICT (request_id) DO NOTHING"""
+            logger.info(f"Inserting {len(leave_requests):,} leave requests...")
+            insert_batch_parallel(cursor, insert_sql, leave_requests, "leave_requests", BATCH_SIZE, pg_connection)
+        
+        # Insert performance reviews
+        if performance_reviews:
+            insert_sql = """INSERT INTO performance_reviews (
+                review_id, employee_id, review_type, review_period_start, review_period_end,
+                reviewer_id, review_date, overall_rating, performance_level,
+                technical_competency_rating, behavioral_competency_rating, goals_achieved, created_at
+            ) VALUES (%(review_id)s, %(employee_id)s, %(review_type)s, %(review_period_start)s,
+                %(review_period_end)s, %(reviewer_id)s, %(review_date)s, %(overall_rating)s,
+                %(performance_level)s, %(technical_competency_rating)s,
+                %(behavioral_competency_rating)s, %(goals_achieved)s, %(created_at)s)
+            ON CONFLICT (review_id) DO NOTHING"""
+            logger.info(f"Inserting {len(performance_reviews):,} performance reviews...")
+            insert_batch_parallel(cursor, insert_sql, performance_reviews, "performance_reviews", BATCH_SIZE, pg_connection)
+        
+        # Insert training enrollments
+        if training_enrollments:
+            insert_sql = """INSERT INTO training_enrollments (
+                enrollment_id, schedule_id, employee_id, enrollment_date, enrollment_status,
+                attended, attendance_date, attendance_hours, assessment_score, passed,
+                completion_status, completion_date, created_at
+            ) VALUES (%(enrollment_id)s, %(schedule_id)s, %(employee_id)s, %(enrollment_date)s,
+                %(enrollment_status)s, %(attended)s, %(attendance_date)s, %(attendance_hours)s,
+                %(assessment_score)s, %(passed)s, %(completion_status)s, %(completion_date)s,
+                %(created_at)s)
+            ON CONFLICT (enrollment_id) DO NOTHING"""
+            logger.info(f"Inserting {len(training_enrollments):,} training enrollments...")
+            insert_batch_parallel(cursor, insert_sql, training_enrollments, "training_enrollments", BATCH_SIZE, pg_connection)
+        
+        # Insert safety incidents
+        if safety_incidents:
+            insert_sql = """INSERT INTO safety_incidents (
+                incident_id, incident_number, employee_id, incident_date, incident_time,
+                department_id, incident_type, severity, description, injury_type,
+                body_part_affected, created_at
+            ) VALUES (%(incident_id)s, %(incident_number)s, %(employee_id)s, %(incident_date)s,
+                %(incident_time)s, %(department_id)s, %(incident_type)s, %(severity)s,
+                %(description)s, %(injury_type)s, %(body_part_affected)s, %(created_at)s)
+            ON CONFLICT (incident_number) DO NOTHING"""
+            logger.info(f"Inserting {len(safety_incidents):,} safety incidents...")
+            insert_batch_parallel(cursor, insert_sql, safety_incidents, "safety_incidents", BATCH_SIZE, pg_connection)
+        
+        cursor.close()
+        
+        # Commit all data
+        pg_connection.commit()
+        
+        logger.info(f"✓ All records inserted successfully")
+    except Exception as e:
+        logger.error(f"PostgreSQL error: {e}")
+        return 1
+    
+    elapsed = time.time() - start_time
+    
+    # Get final counts
+    counts_after = get_all_table_counts()
+    
+    logger.info("="*80)
+    logger.info("GENERATION & INSERTION COMPLETE")
+    logger.info("="*80)
+    logger.info(f"  Total time: {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
+    logger.info("")
+    logger.info("📊 DATABASE SUMMARY")
+    logger.info("="*80)
+    
+    tables_list = ['attendance_records', 'leave_requests', 'performance_reviews', 'training_enrollments', 'safety_incidents']
+    for table in tables_list:
+        before = counts_before.get(table)
+        after = counts_after.get(table)
+        
+        if before is not None and after is not None:
+            inserted = after - before
+            logger.info(f"{table:.<40} Before: {before:>10,} | After: {after:>10,} | Inserted: {inserted:>10,}")
+    
+    logger.info("="*80)
+    
     if pg_connection:
         pg_connection.close()
     
-    print_stats()
-    logger.info("HCM Daemon stopped")
     return 0
 
 if __name__ == "__main__":
-    import os
     os.makedirs('logs', exist_ok=True)
     sys.exit(main())

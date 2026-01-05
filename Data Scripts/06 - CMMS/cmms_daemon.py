@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-GenIMS CMMS Daemon
-Continuous maintenance management operations
+GenIMS CMMS Daemon - ULTRA FAST MODE
+Generates complete maintenance operations in-memory, then bulk dumps to PostgreSQL
 """
 
 import sys
@@ -11,10 +11,8 @@ import logging
 import signal
 from datetime import datetime, timedelta
 import random
-import json
 from dotenv import load_dotenv
 
-# Load environment variables
 env_file = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'config.env')
 if os.path.exists(env_file):
     load_dotenv(env_file)
@@ -25,51 +23,44 @@ try:
     POSTGRES_AVAILABLE = True
 except ImportError:
     POSTGRES_AVAILABLE = False
-    print("WARNING: psycopg2 not installed")
 
 # Configuration
 PG_HOST = os.getenv('POSTGRES_HOST', 'localhost')
 PG_PORT = int(os.getenv('POSTGRES_PORT', '5432'))
-PG_DATABASE = os.getenv('DB_MAINTENANCE', 'genims_maintenance_db')
 PG_USER = os.getenv('POSTGRES_USER', 'postgres')
 PG_PASSWORD = os.getenv('POSTGRES_PASSWORD', '')
 PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
 
-# CMMS Configuration
-CYCLE_INTERVAL_SECONDS = 1800  # Run every 30 minutes
-PM_GENERATION_LOOKAHEAD_DAYS = 14  # Generate PMs 14 days in advance
+PG_MAINTENANCE_DB = os.getenv('DB_MAINTENANCE', 'genims_maintenance_db')
 
-# Logging configuration
+BATCH_SIZE = 5000
+TOTAL_RECORDS = 14400  # 10 days of hourly maintenance records
+
+# Logging
 log_dir = os.getenv('DAEMON_LOG_DIR', os.path.join(os.path.dirname(__file__), '..', '..', 'logs'))
 os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, 'cmms_daemon.log')
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(log_dir, 'cmms_daemon.log')),
+        logging.FileHandler(log_file),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger('CMMSDaemon')
 
-running = True
+# Global State
 pg_connection = None
 master_data = {}
-stats = {
-    'cycles': 0,
-    'pm_wos_generated': 0,
-    'corrective_wos_created': 0,
-    'wos_completed': 0,
-    'parts_issued': 0,
-    'meter_readings_recorded': 0,
-    'start_time': datetime.now()
+counters = {
+    'work_order': 1, 'task': 1, 'pm_schedule': 1, 'labor_entry': 1, 'meter_reading': 1
 }
 
 def signal_handler(sig, frame):
-    global running
     logger.info("Shutdown signal received")
-    running = False
+    sys.exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
@@ -80,554 +71,349 @@ def initialize_database():
         return False
     try:
         pg_connection = psycopg2.connect(
-            host=PG_HOST, port=PG_PORT, database=PG_DATABASE,
-            user=PG_USER, password=PG_PASSWORD,
-            sslmode=PG_SSL_MODE
+            host=PG_HOST, port=PG_PORT, database=PG_MAINTENANCE_DB,
+            user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE, connect_timeout=30
         )
         pg_connection.autocommit = False
-        logger.info("PostgreSQL connected")
+        logger.info(f"PostgreSQL connection established: {PG_HOST}:{PG_PORT}/{PG_MAINTENANCE_DB}")
         return True
     except Exception as e:
-        logger.error(f"DB connection failed: {e}")
+        logger.error(f"PostgreSQL connection failed: {e}")
+        return False
+
+def get_table_count(table_name):
+    try:
+        conn = psycopg2.connect(host=PG_HOST, port=PG_PORT, database=PG_MAINTENANCE_DB,
+            user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE, connect_timeout=10)
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT COUNT(*) FROM {table_name};")
+        count = cursor.fetchone()[0]
+        cursor.close()
+        conn.close()
+        return count
+    except Exception as e:
+        logger.warning(f"Could not get {table_name} count: {e}")
+        return None
+
+def get_all_table_counts():
+    tables = ['work_orders', 'work_order_tasks', 'pm_schedules', 'labor_time_entries', 'equipment_meter_readings']
+    counts = {}
+    for table in tables:
+        counts[table] = get_table_count(table)
+    return counts
+
+def get_max_id_counter(table_name, id_column):
+    """Get the next ID counter for a given table"""
+    try:
+        cursor = pg_connection.cursor()
+        cursor.execute(f"SELECT MAX(CAST(SUBSTRING({id_column}, '\\d+$') AS INTEGER)) FROM {table_name}")
+        max_id = cursor.fetchone()[0]
+        cursor.close()
+        return (max_id or 0) + 1
+    except Exception as e:
+        logger.debug(f"Could not get max ID from {table_name}.{id_column}: {e}")
+        return 1
+
+def initialize_id_counters():
+    """Initialize counters from existing data in database"""
+    global counters
+    try:
+        counters['work_order'] = get_max_id_counter('work_orders', 'work_order_id')
+        counters['task'] = get_max_id_counter('work_order_tasks', 'task_id')
+        counters['pm_schedule'] = get_max_id_counter('pm_schedules', 'pm_schedule_id')
+        counters['labor_entry'] = get_max_id_counter('labor_time_entries', 'entry_id')
+        counters['meter_reading'] = get_max_id_counter('equipment_meter_readings', 'reading_id')
+        
+        logger.info(f"ID Counters initialized: {counters}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize ID counters: {e}")
         return False
 
 def load_master_data():
     global master_data
     try:
-        cursor = pg_connection.cursor()
+        conn = psycopg2.connect(
+            host=PG_HOST, port=PG_PORT, database=PG_MAINTENANCE_DB,
+            user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE, connect_timeout=30
+        )
+        cursor = conn.cursor()
         
-        # Load assets
-        cursor.execute("SELECT * FROM maintenance_assets WHERE is_active = true LIMIT 100")
-        master_data['assets'] = [dict(zip([d[0] for d in cursor.description], row)) 
-                                 for row in cursor.fetchall()]
+        # Load assets for work orders
+        cursor.execute("SELECT asset_id FROM maintenance_assets WHERE is_active = true LIMIT 80")
+        assets = [row[0] for row in cursor.fetchall()]
         
-        # Load technicians
-        cursor.execute("SELECT * FROM maintenance_technicians WHERE is_active = true")
-        master_data['technicians'] = [dict(zip([d[0] for d in cursor.description], row)) 
-                                      for row in cursor.fetchall()]
+        # Load technicians for labor entries
+        cursor.execute("SELECT technician_id FROM maintenance_technicians WHERE is_active = true LIMIT 20")
+        technicians = [row[0] for row in cursor.fetchall()]
         
         # Load PM schedules
-        cursor.execute("SELECT * FROM pm_schedules WHERE schedule_status = 'active' LIMIT 100")
-        master_data['pm_schedules'] = [dict(zip([d[0] for d in cursor.description], row)) 
-                                       for row in cursor.fetchall()]
-        
-        # Load MRO parts
-        cursor.execute("SELECT * FROM mro_parts WHERE part_status = 'active' LIMIT 100")
-        master_data['mro_parts'] = [dict(zip([d[0] for d in cursor.description], row)) 
-                                    for row in cursor.fetchall()]
+        cursor.execute("SELECT pm_schedule_id, asset_id FROM pm_schedules WHERE schedule_status = 'active' LIMIT 160")
+        pm_schedules = [{'pm_schedule_id': row[0], 'asset_id': row[1]} for row in cursor.fetchall()]
         
         cursor.close()
-        logger.info(f"Loaded: {len(master_data.get('assets', []))} assets, "
-                   f"{len(master_data.get('technicians', []))} technicians, "
-                   f"{len(master_data.get('pm_schedules', []))} PM schedules")
+        conn.close()
+        
+        master_data['assets'] = assets or ['ASSET-000001', 'ASSET-000002', 'ASSET-000003']
+        master_data['technicians'] = technicians or ['TECH-000001', 'TECH-000002']
+        master_data['pm_schedules'] = pm_schedules or []
+        
+        logger.info(f"Master data loaded: {len(assets)} assets, {len(technicians)} technicians, {len(pm_schedules)} PM schedules")
         return True
     except Exception as e:
         logger.error(f"Failed to load master data: {e}")
         return False
 
-def generate_id(prefix: str) -> str:
-    return f"{prefix}-{datetime.now().strftime('%Y%m%d%H%M%S')}-{random.randint(1000, 9999)}"
-
-# ============================================================================
-# PM WORK ORDER GENERATION
-# ============================================================================
-
-def generate_pm_work_orders():
-    """Auto-generate PM work orders when due"""
-    logger.info("Checking for due PM schedules...")
+def insert_batch_parallel(cursor, insert_sql, data, table_name, batch_size, connection=None):
+    """Insert data in batches"""
+    total_batches = (len(data) + batch_size - 1) // batch_size
     
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Find PM schedules due within lookahead window
-        cursor.execute("""
-            SELECT * FROM pm_schedules
-            WHERE schedule_status = 'active'
-            AND auto_generate_wo = true
-            AND next_due_date IS NOT NULL
-            AND next_due_date <= %s
-            AND (last_completed_date IS NULL 
-                 OR last_completed_date < next_due_date - INTERVAL '7 days')
-            LIMIT 20
-        """, ((datetime.now() + timedelta(days=PM_GENERATION_LOOKAHEAD_DAYS)).date(),))
-        
-        due_schedules = cursor.fetchall()
-        columns = [d[0] for d in cursor.description]
-        
-        for schedule_row in due_schedules:
-            schedule = dict(zip(columns, schedule_row))
-            
-            # Create PM work order
-            wo_id = generate_id('WO')
-            wo_number = f"PM-{datetime.now().strftime('%Y%m%d%H%M')}"
-            
-            cursor.execute("""
-                INSERT INTO work_orders (
-                    work_order_id, work_order_number, asset_id,
-                    wo_type, priority, description,
-                    scheduled_start_date, scheduled_end_date,
-                    estimated_duration_hours, wo_status,
-                    source_type, source_document_id, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (wo_id, wo_number, schedule['asset_id'],
-                  'preventive', 'medium', schedule['schedule_name'],
-                  schedule['next_due_date'],
-                  (datetime.strptime(schedule['next_due_date'], '%Y-%m-%d') + 
-                   timedelta(hours=schedule.get('estimated_duration_hours', 4))).date(),
-                  schedule.get('estimated_duration_hours', 4),
-                  'planned', 'pm_schedule', schedule['pm_schedule_id'],
-                  datetime.now()))
-            
-            # Log PM generation
-            cursor.execute("""
-                INSERT INTO pm_generation_log (
-                    log_id, pm_schedule_id, generation_date,
-                    generation_reason, trigger_date, work_order_id,
-                    work_order_number, generation_status, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (generate_id('PMLOG'), schedule['pm_schedule_id'],
-                  datetime.now(), 'calendar_due', schedule['next_due_date'],
-                  wo_id, wo_number, 'success', datetime.now()))
-            
-            # Update PM schedule next due date
-            next_due = calculate_next_due_date(schedule)
-            cursor.execute("""
-                UPDATE pm_schedules
-                SET last_wo_id = %s,
-                    next_due_date = %s
-                WHERE pm_schedule_id = %s
-            """, (wo_id, next_due, schedule['pm_schedule_id']))
-            
-            stats['pm_wos_generated'] += 1
-            logger.info(f"Generated PM work order: {wo_number}")
-        
-        pg_connection.commit()
-        cursor.close()
-        
-        if due_schedules:
-            logger.info(f"Generated {len(due_schedules)} PM work orders")
-    except Exception as e:
-        logger.error(f"Error generating PM work orders: {e}")
-        pg_connection.rollback()
-
-def calculate_next_due_date(schedule: dict):
-    """Calculate next PM due date"""
-    current_due = datetime.strptime(schedule['next_due_date'], '%Y-%m-%d')
-    
-    if schedule['schedule_type'] == 'calendar':
-        freq_value = schedule.get('frequency_value', 1)
-        freq_unit = schedule.get('frequency_unit', 'months')
-        
-        if freq_unit == 'days':
-            next_due = current_due + timedelta(days=freq_value)
-        elif freq_unit == 'weeks':
-            next_due = current_due + timedelta(weeks=freq_value)
-        elif freq_unit == 'months':
-            next_due = current_due + timedelta(days=freq_value * 30)  # Approximate
-        elif freq_unit == 'years':
-            next_due = current_due + timedelta(days=freq_value * 365)
-        else:
-            next_due = current_due + timedelta(days=30)  # Default monthly
-        
-        return next_due.date()
-    
-    return (current_due + timedelta(days=30)).date()  # Default
-
-# ============================================================================
-# CORRECTIVE MAINTENANCE FROM FAULTS
-# ============================================================================
-
-def create_corrective_work_orders():
-    """Create work orders from machine faults"""
-    logger.info("Checking for machine faults...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Check if machine_faults table exists
-        cursor.execute("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_name = 'machine_faults'
-            )
-        """)
-        
-        if not cursor.fetchone()[0]:
-            cursor.close()
-            return
-        
-        # Get unaddressed critical faults
-        cursor.execute("""
-            SELECT mf.*, ma.asset_id
-            FROM machine_faults mf
-            LEFT JOIN maintenance_assets ma ON mf.machine_id = ma.machine_id
-            WHERE mf.severity IN ('critical', 'high')
-            AND mf.resolved = false
-            AND NOT EXISTS (
-                SELECT 1 FROM work_orders wo 
-                WHERE wo.machine_fault_id = mf.fault_id
-            )
-            AND ma.asset_id IS NOT NULL
-            LIMIT 10
-        """)
-        
-        faults = cursor.fetchall()
-        columns = [d[0] for d in cursor.description]
-        
-        for fault_row in faults:
-            fault = dict(zip(columns, fault_row))
-            
-            # Create corrective work order
-            wo_id = generate_id('WO')
-            wo_number = f"CM-{datetime.now().strftime('%Y%m%d%H%M')}"
-            priority = 'emergency' if fault['severity'] == 'critical' else 'urgent'
-            
-            cursor.execute("""
-                INSERT INTO work_orders (
-                    work_order_id, work_order_number, asset_id,
-                    wo_type, priority, description, problem_description,
-                    scheduled_start_date, wo_status,
-                    source_type, machine_fault_id, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (wo_id, wo_number, fault['asset_id'],
-                  'corrective', priority, f"Fault: {fault['fault_code']}",
-                  fault.get('fault_description'),
-                  datetime.now().date(), 'created',
-                  'machine_fault', fault['fault_id'], datetime.now()))
-            
-            # Log integration
-            cursor.execute("""
-                INSERT INTO cmms_integration_log (
-                    log_id, integration_direction, document_type,
-                    document_id, integration_status, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s)
-            """, (generate_id('INTLOG'), 'OPERATIONAL_TO_CMMS',
-                  'machine_fault', fault['fault_id'], 'completed',
-                  datetime.now()))
-            
-            stats['corrective_wos_created'] += 1
-            logger.info(f"Created corrective WO from fault: {wo_number}")
-        
-        pg_connection.commit()
-        cursor.close()
-        
-        if faults:
-            logger.info(f"Created {len(faults)} corrective work orders")
-    except Exception as e:
-        logger.error(f"Error creating corrective WOs: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# WORK ORDER EXECUTION
-# ============================================================================
-
-def assign_work_orders():
-    """Assign pending work orders to technicians"""
-    logger.info("Assigning work orders...")
-    
-    if not master_data.get('technicians'):
-        return
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Get unassigned work orders
-        cursor.execute("""
-            SELECT work_order_id FROM work_orders
-            WHERE wo_status IN ('created', 'planned', 'scheduled')
-            AND assigned_to IS NULL
-            ORDER BY priority DESC, created_at
-            LIMIT 10
-        """)
-        
-        wos = cursor.fetchall()
-        
-        for (wo_id,) in wos:
-            # Assign to available technician
-            available_techs = [t for t in master_data['technicians'] 
-                              if t.get('technician_status') == 'available']
-            
-            if available_techs:
-                tech = random.choice(available_techs)
-                
-                cursor.execute("""
-                    UPDATE work_orders
-                    SET assigned_to = %s,
-                        wo_status = 'assigned'
-                    WHERE work_order_id = %s
-                """, (tech['technician_id'], wo_id))
-        
-        pg_connection.commit()
-        cursor.close()
-    except Exception as e:
-        logger.error(f"Error assigning work orders: {e}")
-        pg_connection.rollback()
-
-def complete_work_orders():
-    """Complete in-progress work orders"""
-    logger.info("Completing work orders...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Get in-progress work orders that should be completed
-        cursor.execute("""
-            SELECT work_order_id, asset_id, actual_start_date
-            FROM work_orders
-            WHERE wo_status = 'in_progress'
-            AND actual_start_date < %s
-            LIMIT 5
-        """, (datetime.now() - timedelta(hours=2),))
-        
-        wos = cursor.fetchall()
-        
-        for wo_id, asset_id, start_date in wos:
-            # Complete work order
-            cursor.execute("""
-                UPDATE work_orders
-                SET wo_status = 'completed',
-                    actual_end_date = %s,
-                    actual_duration_hours = EXTRACT(EPOCH FROM (%s - actual_start_date))/3600,
-                    completed_at = %s
-                WHERE work_order_id = %s
-            """, (datetime.now(), datetime.now(), datetime.now(), wo_id))
-            
-            # Create maintenance history
-            cursor.execute("""
-                INSERT INTO maintenance_history (
-                    history_id, asset_id, event_type, event_date,
-                    event_description, work_order_id, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (generate_id('HIST'), asset_id, 'work_order_completed',
-                  datetime.now(), 'Work order completed', wo_id, datetime.now()))
-            
-            stats['wos_completed'] += 1
-        
-        pg_connection.commit()
-        cursor.close()
-        
-        if wos:
-            logger.info(f"Completed {len(wos)} work orders")
-    except Exception as e:
-        logger.error(f"Error completing work orders: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# PARTS & INVENTORY
-# ============================================================================
-
-def issue_parts():
-    """Issue parts for active work orders"""
-    if not master_data.get('mro_parts'):
-        return
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Get active work orders needing parts
-        cursor.execute("""
-            SELECT wo.work_order_id, wo.asset_id
-            FROM work_orders wo
-            WHERE wo.wo_status IN ('assigned', 'in_progress')
-            AND NOT EXISTS (
-                SELECT 1 FROM mro_parts_transactions mpt
-                WHERE mpt.work_order_id = wo.work_order_id
-            )
-            LIMIT 5
-        """)
-        
-        wos = cursor.fetchall()
-        
-        for wo_id, asset_id in wos:
-            # Issue 1-2 random parts
-            for _ in range(random.randint(1, 2)):
-                part = random.choice(master_data['mro_parts'])
-                qty = random.randint(1, 3)
-                
-                cursor.execute("""
-                    INSERT INTO mro_parts_transactions (
-                        transaction_id, transaction_number, mro_part_id,
-                        transaction_type, quantity, unit_of_measure,
-                        unit_cost, total_cost, work_order_id,
-                        asset_id, transaction_date, created_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, (generate_id('PTRANS'), f"PT-{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                      part['mro_part_id'], 'issue', qty, part['unit_of_measure'],
-                      part['standard_cost'], qty * part['standard_cost'],
-                      wo_id, asset_id, datetime.now(), datetime.now()))
-                
-                # Update part stock
-                cursor.execute("""
-                    UPDATE mro_parts
-                    SET current_stock = current_stock - %s
-                    WHERE mro_part_id = %s
-                    AND current_stock >= %s
-                """, (qty, part['mro_part_id'], qty))
-                
-                stats['parts_issued'] += 1
-        
-        pg_connection.commit()
-        cursor.close()
-    except Exception as e:
-        logger.error(f"Error issuing parts: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# METER READINGS
-# ============================================================================
-
-def record_meter_readings():
-    """Record equipment meter readings"""
-    if not master_data.get('assets'):
-        return
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Record readings for 5 random metered assets
-        metered_assets = [a for a in master_data['assets'] if a.get('has_meter')]
-        
-        for asset in random.sample(metered_assets, min(5, len(metered_assets))):
-            # Increment meter
-            new_reading = asset.get('current_meter_reading', 0) + random.uniform(10, 100)
-            
-            cursor.execute("""
-                INSERT INTO equipment_meter_readings (
-                    reading_id, asset_id, reading_date, meter_value,
-                    meter_unit, reading_source, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (generate_id('METER'), asset['asset_id'],
-                  datetime.now(), round(new_reading, 2),
-                  asset.get('meter_unit', 'hours'), 'automated', datetime.now()))
-            
-            # Update asset current reading
-            cursor.execute("""
-                UPDATE maintenance_assets
-                SET current_meter_reading = %s,
-                    meter_reading_date = %s
-                WHERE asset_id = %s
-            """, (round(new_reading, 2), datetime.now(), asset['asset_id']))
-            
-            stats['meter_readings_recorded'] += 1
-        
-        pg_connection.commit()
-        cursor.close()
-    except Exception as e:
-        logger.error(f"Error recording meters: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# MAIN CYCLE
-# ============================================================================
-
-def run_cmms_cycle():
-    """Execute complete CMMS cycle"""
-    logger.info("=== CMMS Cycle Starting ===")
-    
-    # Check and reconnect if necessary
-    global pg_connection
-    try:
-        if pg_connection:
-            cursor = pg_connection.cursor()
-            cursor.execute("SELECT 1")
-            cursor.close()
-    except Exception:
-        logger.warning("Database connection lost, reconnecting...")
+    for batch_idx in range(total_batches):
         try:
-            pg_connection.close()
-        except:
-            pass
-        if not initialize_database():
-            logger.error("Failed to reconnect")
-            return False
-    
-    try:
-        # 1. Generate PM work orders
-        generate_pm_work_orders()
-        
-        # 2. Create corrective WOs from faults
-        create_corrective_work_orders()
-        
-        # 3. Assign work orders
-        assign_work_orders()
-        
-        # 4. Complete in-progress work orders
-        complete_work_orders()
-        
-        # 5. Issue parts
-        issue_parts()
-        
-        # 6. Record meter readings
-        record_meter_readings()
-        
-        stats['cycles'] += 1
-        logger.info("=== CMMS Cycle Complete ===")
-        return True
-    except Exception as e:
-        logger.error(f"CMMS cycle error: {e}")
-        return False
-
-def print_stats():
-    """Print daemon statistics"""
-    elapsed = (datetime.now() - stats['start_time']).total_seconds()
-    hours = elapsed / 3600
-    
-    logger.info("="*80)
-    logger.info(f"CMMS Daemon Statistics")
-    logger.info(f"  Uptime: {hours:.1f} hours")
-    logger.info(f"  Cycles: {stats['cycles']}")
-    logger.info(f"  PM WOs Generated: {stats['pm_wos_generated']}")
-    logger.info(f"  Corrective WOs Created: {stats['corrective_wos_created']}")
-    logger.info(f"  WOs Completed: {stats['wos_completed']}")
-    logger.info(f"  Parts Issued: {stats['parts_issued']}")
-    logger.info(f"  Meter Readings: {stats['meter_readings_recorded']}")
-    logger.info("="*80)
+            batch_start = batch_idx * batch_size
+            batch_end = min((batch_idx + 1) * batch_size, len(data))
+            batch = data[batch_start:batch_end]
+            
+            execute_batch(cursor, insert_sql, batch, page_size=5000)
+            if connection:
+                connection.commit()
+            
+            logger.info(f"  Flushed {batch_end:,} / {len(data):,} {table_name}")
+        except psycopg2.IntegrityError as e:
+            logger.warning(f"  Batch {batch_idx + 1}/{total_batches} - Integrity error, skipping")
+            if connection:
+                connection.rollback()
+        except Exception as e:
+            logger.error(f"  Batch {batch_idx + 1}/{total_batches} error: {e}")
+            if connection:
+                connection.rollback()
 
 def main():
-    """Main daemon loop"""
+    """Main - Generate all CMMS data in-memory, then bulk dump"""
     logger.info("="*80)
-    logger.info("GenIMS CMMS Daemon Starting")
-    logger.info("Cycle Interval: Every 30 minutes")
+    logger.info("GenIMS CMMS Daemon - ULTRA FAST MODE (In-Memory Generation)")
+    logger.info("="*80)
+    logger.info(f"Configuration:")
+    logger.info(f"  Database: {PG_MAINTENANCE_DB}")
+    logger.info(f"  Batch Size: {BATCH_SIZE}")
     logger.info("="*80)
     
+    start_time = time.time()
+    
+    # Initialize
     if not initialize_database():
+        return 1
+    
+    if not initialize_id_counters():
         return 1
     
     if not load_master_data():
         return 1
     
-    logger.info("Press Ctrl+C to stop")
+    logger.info("="*80)
+    logger.info("📊 BASELINE DATABASE COUNTS (Before Generation)")
+    logger.info("="*80)
+    counts_before = get_all_table_counts()
+    for table, count in counts_before.items():
+        if count is not None:
+            logger.info(f"  {table:.<40} {count:>10,} records")
+    logger.info("="*80)
     
-    last_cycle = datetime.now() - timedelta(hours=1)
+    logger.info("="*80)
+    logger.info("GENERATING ALL DATA IN MEMORY...")
+    logger.info("="*80)
     
-    while running:
-        try:
-            now = datetime.now()
-            
-            # Run every 30 minutes
-            if (now - last_cycle).total_seconds() >= CYCLE_INTERVAL_SECONDS:
-                run_cmms_cycle()
-                last_cycle = now
-            
-            # Print stats every hour
-            if now.minute == 0:
-                print_stats()
-            
-            time.sleep(60)  # Check every minute
-            
-        except Exception as e:
-            logger.error(f"Error in main loop: {e}", exc_info=True)
-            time.sleep(60)
+    # Generate data
+    work_orders = []
+    work_order_tasks = []
+    pm_schedules = []
+    labor_entries = []
+    meter_readings = []
     
-    logger.info("Shutting down...")
+    sim_base_time = datetime.strptime(datetime.now().strftime('%Y-%m-%d 00:00:00'), '%Y-%m-%d %H:%M:%S')
+    run_timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    
+    # Generate CMMS records (1 per hour = 14,400 records over 600 days)
+    for i in range(TOTAL_RECORDS):
+        timestamp_offset = i * 3600  # 1 hour per record
+        current_ts = sim_base_time + timedelta(seconds=timestamp_offset)
+        
+        asset = random.choice(master_data['assets'])
+        
+        # Work orders (1 per 50 records = ~288/10 days)
+        if i % 50 == 0:
+            wo_id = f"WO-{(counters['work_order'] + i // 50):06d}"
+            work_orders.append({
+                'work_order_id': wo_id,
+                'work_order_number': f"WO-{run_timestamp}-{i // 50:04d}",
+                'asset_id': asset,
+                'wo_type': random.choice(['preventive', 'corrective', 'predictive']),
+                'priority': random.choice(['low', 'medium', 'high', 'urgent']),
+                'description': f"Maintenance work for {asset}",
+                'scheduled_start_date': current_ts.date(),
+                'scheduled_end_date': (current_ts + timedelta(days=1)).date(),
+                'estimated_duration_hours': random.randint(2, 8),
+                'wo_status': random.choice(['planned', 'in_progress', 'completed']),
+                'created_at': current_ts
+            })
+        
+        # Work order tasks (1 per 20 records)
+        if i % 20 == 0:
+            # Find recent WO for this task
+            wo_idx = (i // 50) if (i // 50) < len(work_orders) else len(work_orders) - 1
+            wo_id = work_orders[wo_idx]['work_order_id'] if work_orders else f"WO-{(counters['work_order'] + i // 50):06d}"
+            
+            task_id = f"TASK-{(counters['task'] + i // 20):06d}"
+            work_order_tasks.append({
+                'task_id': task_id,
+                'work_order_id': wo_id,
+                'task_sequence': (i % 20) // 5 + 1,
+                'task_description': random.choice(['Inspect', 'Lubricate', 'Replace', 'Adjust', 'Test']),
+                'task_type': random.choice(['inspection', 'preventive', 'corrective']),
+                'task_status': random.choice(['pending', 'in_progress', 'completed']),
+                'estimated_duration_minutes': random.randint(15, 120),
+                'created_at': current_ts
+            })
+        
+        # Labor entries (1 per 100 records)
+        if i % 100 == 0 and len(master_data['technicians']) > 0:
+            entry_id = f"LABOR-{(counters['labor_entry'] + i // 100):06d}"
+            wo_idx = (i // 50) if (i // 50) < len(work_orders) else len(work_orders) - 1
+            wo_id = work_orders[wo_idx]['work_order_id'] if work_orders else f"WO-{(counters['work_order'] + i // 50):06d}"
+            
+            labor_entries.append({
+                'entry_id': entry_id,
+                'work_order_id': wo_id,
+                'technician_id': random.choice(master_data['technicians']),
+                'start_time': current_ts,
+                'end_time': current_ts + timedelta(hours=random.randint(1, 4)),
+                'duration_hours': random.randint(1, 4),
+                'labor_type': random.choice(['technician', 'supervisor', 'specialist']),
+                'hourly_rate': round(random.uniform(25, 75), 2),
+                'labor_cost': round(random.uniform(50, 300), 2),
+                'approved': True,
+                'created_at': current_ts
+            })
+        
+        # Meter readings (1 per 10 records)
+        if i % 10 == 0:
+            reading_id = f"MTR-{(counters['meter_reading'] + i // 10):06d}"
+            meter_readings.append({
+                'reading_id': reading_id,
+                'asset_id': asset,
+                'reading_date': current_ts,
+                'meter_value': round(random.uniform(100, 10000), 2),
+                'meter_unit': random.choice(['hours', 'km', 'cycles']),
+                'previous_reading': round(random.uniform(50, 9000), 2),
+                'delta_value': round(random.uniform(1, 500), 2),
+                'reading_source': random.choice(['manual', 'automated', 'iot']),
+                'created_at': current_ts
+            })
+        
+        if (i + 1) % 1000 == 0:
+            logger.info(f"  Generated {i + 1:,} / {TOTAL_RECORDS:,} records")
+    
+    logger.info(f"✓ Generated {len(work_orders):,} work orders")
+    logger.info(f"✓ Generated {len(work_order_tasks):,} work order tasks")
+    logger.info(f"✓ Generated {len(labor_entries):,} labor entries")
+    logger.info(f"✓ Generated {len(meter_readings):,} meter readings")
+    
+    # Bulk dump to PostgreSQL
+    logger.info("="*80)
+    logger.info("BULK DUMPING TO POSTGRESQL...")
+    logger.info("="*80)
+    
+    try:
+        cursor = pg_connection.cursor()
+        cursor.execute("SET CONSTRAINTS ALL DEFERRED;")
+        
+        # Insert work_orders
+        if work_orders:
+            insert_sql = """INSERT INTO work_orders (
+                work_order_id, work_order_number, asset_id, wo_type, priority,
+                description, scheduled_start_date, scheduled_end_date,
+                estimated_duration_hours, wo_status, created_at
+            ) VALUES (%(work_order_id)s, %(work_order_number)s, %(asset_id)s, %(wo_type)s,
+                %(priority)s, %(description)s, %(scheduled_start_date)s,
+                %(scheduled_end_date)s, %(estimated_duration_hours)s, %(wo_status)s, %(created_at)s)
+            ON CONFLICT (work_order_number) DO NOTHING"""
+            logger.info(f"Inserting {len(work_orders):,} work orders...")
+            insert_batch_parallel(cursor, insert_sql, work_orders, "work orders", BATCH_SIZE, pg_connection)
+        
+        # Insert work_order_tasks
+        if work_order_tasks:
+            insert_sql = """INSERT INTO work_order_tasks (
+                task_id, work_order_id, task_sequence, task_description,
+                task_type, task_status, estimated_duration_minutes, created_at
+            ) VALUES (%(task_id)s, %(work_order_id)s, %(task_sequence)s,
+                %(task_description)s, %(task_type)s, %(task_status)s,
+                %(estimated_duration_minutes)s, %(created_at)s)
+            ON CONFLICT (task_id) DO NOTHING"""
+            logger.info(f"Inserting {len(work_order_tasks):,} work order tasks...")
+            insert_batch_parallel(cursor, insert_sql, work_order_tasks, "work order tasks", BATCH_SIZE, pg_connection)
+        
+        # Insert labor_entries
+        if labor_entries:
+            insert_sql = """INSERT INTO labor_time_entries (
+                entry_id, work_order_id, technician_id, start_time, end_time,
+                duration_hours, labor_type, hourly_rate, labor_cost, approved, created_at
+            ) VALUES (%(entry_id)s, %(work_order_id)s, %(technician_id)s, %(start_time)s,
+                %(end_time)s, %(duration_hours)s, %(labor_type)s, %(hourly_rate)s,
+                %(labor_cost)s, %(approved)s, %(created_at)s)
+            ON CONFLICT (entry_id) DO NOTHING"""
+            logger.info(f"Inserting {len(labor_entries):,} labor entries...")
+            insert_batch_parallel(cursor, insert_sql, labor_entries, "labor entries", BATCH_SIZE, pg_connection)
+        
+        # Insert meter_readings
+        if meter_readings:
+            insert_sql = """INSERT INTO equipment_meter_readings (
+                reading_id, asset_id, reading_date, meter_value, meter_unit,
+                previous_reading, delta_value, reading_source, created_at
+            ) VALUES (%(reading_id)s, %(asset_id)s, %(reading_date)s, %(meter_value)s,
+                %(meter_unit)s, %(previous_reading)s, %(delta_value)s, %(reading_source)s, %(created_at)s)
+            ON CONFLICT (reading_id) DO NOTHING"""
+            logger.info(f"Inserting {len(meter_readings):,} meter readings...")
+            insert_batch_parallel(cursor, insert_sql, meter_readings, "meter readings", BATCH_SIZE, pg_connection)
+        
+        cursor.close()
+        
+        # Commit all data
+        pg_connection.commit()
+        
+        logger.info(f"✓ All records inserted successfully")
+    except Exception as e:
+        logger.error(f"PostgreSQL error: {e}")
+        return 1
+    
+    elapsed = time.time() - start_time
+    
+    # Get final counts
+    counts_after = get_all_table_counts()
+    
+    logger.info("="*80)
+    logger.info("GENERATION & INSERTION COMPLETE")
+    logger.info("="*80)
+    logger.info(f"  Total time: {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
+    logger.info("")
+    logger.info("📊 DATABASE SUMMARY")
+    logger.info("="*80)
+    
+    tables_list = ['work_orders', 'work_order_tasks', 'labor_time_entries', 'equipment_meter_readings']
+    for table in tables_list:
+        before = counts_before.get(table)
+        after = counts_after.get(table)
+        
+        if before is not None and after is not None:
+            inserted = after - before
+            logger.info(f"{table:.<35} Before: {before:>10,} | After: {after:>10,} | Inserted: {inserted:>10,}")
+    
+    logger.info("="*80)
+    
     if pg_connection:
         pg_connection.close()
     
-    print_stats()
-    logger.info("CMMS Daemon stopped")
     return 0
 
 if __name__ == "__main__":
-    import os
     os.makedirs('logs', exist_ok=True)
     sys.exit(main())

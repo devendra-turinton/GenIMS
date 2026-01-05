@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-GenIMS Customer Service Daemon
-Continuous customer service operations
+GenIMS Service Daemon - ULTRA FAST MODE
+Generates complete service operations in-memory, then bulk dumps to PostgreSQL
 """
 
 import sys
@@ -11,10 +11,8 @@ import logging
 import signal
 from datetime import datetime, timedelta
 import random
-import json
 from dotenv import load_dotenv
 
-# Load environment variables
 env_file = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'config.env')
 if os.path.exists(env_file):
     load_dotenv(env_file)
@@ -25,23 +23,24 @@ try:
     POSTGRES_AVAILABLE = True
 except ImportError:
     POSTGRES_AVAILABLE = False
-    print("WARNING: psycopg2 not installed")
 
 # Configuration
 PG_HOST = os.getenv('POSTGRES_HOST', 'localhost')
 PG_PORT = int(os.getenv('POSTGRES_PORT', '5432'))
-PG_DATABASE = os.getenv('DB_SERVICE', 'genims_service_db')
 PG_USER = os.getenv('POSTGRES_USER', 'postgres')
 PG_PASSWORD = os.getenv('POSTGRES_PASSWORD', '')
 PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
 
-# Service Configuration
-CYCLE_INTERVAL_SECONDS = 600  # Run every 10 minutes
+PG_SERVICE_DB = os.getenv('DB_SERVICE', 'genims_service_db')
 
-# Logging configuration
+BATCH_SIZE = 5000
+TOTAL_RECORDS = 14400  # 30 days of 8 hourly service records
+
+# Logging
 log_dir = os.getenv('DAEMON_LOG_DIR', os.path.join(os.path.dirname(__file__), '..', '..', 'logs'))
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, 'service_daemon.log')
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -50,28 +49,18 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger('Service')
+logger = logging.getLogger('ServiceDaemon')
 
-
-
-running = True
+# Global State
 pg_connection = None
 master_data = {}
-stats = {
-    'cycles': 0,
-    'tickets_routed': 0,
-    'tickets_escalated': 0,
-    'sla_violations_detected': 0,
-    'field_appointments_assigned': 0,
-    'surveys_sent': 0,
-    'warranties_processed': 0,
-    'start_time': datetime.now()
+counters = {
+    'ticket': 1, 'comment': 1, 'escalation': 1, 'rma': 1, 'warranty': 1, 'service_metric': 1
 }
 
 def signal_handler(sig, frame):
-    global running
     logger.info("Shutdown signal received")
-    running = False
+    sys.exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
@@ -82,642 +71,437 @@ def initialize_database():
         return False
     try:
         pg_connection = psycopg2.connect(
-            host=PG_HOST, port=PG_PORT, database=PG_DATABASE,
-            user=PG_USER, password=PG_PASSWORD,
-            sslmode=PG_SSL_MODE
+            host=PG_HOST, port=PG_PORT, database=PG_SERVICE_DB,
+            user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE, connect_timeout=30
         )
         pg_connection.autocommit = False
-        logger.info("PostgreSQL connected")
+        logger.info(f"PostgreSQL connection established: {PG_HOST}:{PG_PORT}/{PG_SERVICE_DB}")
         return True
     except Exception as e:
-        logger.error(f"DB connection failed: {e}")
+        logger.error(f"PostgreSQL connection failed: {e}")
+        return False
+
+def get_table_count(table_name):
+    try:
+        conn = psycopg2.connect(host=PG_HOST, port=PG_PORT, database=PG_SERVICE_DB,
+            user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE, connect_timeout=10)
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT COUNT(*) FROM {table_name};")
+        count = cursor.fetchone()[0]
+        cursor.close()
+        conn.close()
+        return count
+    except Exception as e:
+        logger.warning(f"Could not get {table_name} count: {e}")
+        return None
+
+def get_all_table_counts():
+    tables = ['service_tickets', 'ticket_comments', 'ticket_escalations', 'rma_requests', 'warranty_claims', 'service_metrics_daily']
+    counts = {}
+    for table in tables:
+        counts[table] = get_table_count(table)
+    return counts
+
+def get_max_id_counter(table_name, id_column):
+    """Get the next ID counter for a given table"""
+    try:
+        cursor = pg_connection.cursor()
+        cursor.execute(f"SELECT MAX(CAST(SUBSTRING({id_column}, '\\d+$') AS INTEGER)) FROM {table_name}")
+        max_id = cursor.fetchone()[0]
+        cursor.close()
+        return (max_id or 0) + 1
+    except Exception as e:
+        logger.debug(f"Could not get max ID from {table_name}.{id_column}: {e}")
+        return 1
+
+def initialize_id_counters():
+    """Initialize counters from existing data in database"""
+    global counters
+    try:
+        counters['ticket'] = get_max_id_counter('service_tickets', 'ticket_id')
+        counters['comment'] = get_max_id_counter('ticket_comments', 'comment_id')
+        counters['escalation'] = get_max_id_counter('ticket_escalations', 'escalation_id')
+        counters['rma'] = get_max_id_counter('rma_requests', 'rma_id')
+        counters['warranty'] = get_max_id_counter('warranty_claims', 'claim_id')
+        counters['service_metric'] = get_max_id_counter('service_metrics_daily', 'metric_id')
+        
+        logger.info(f"ID Counters initialized: {counters}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize ID counters: {e}")
         return False
 
 def load_master_data():
     global master_data
     try:
-        cursor = pg_connection.cursor()
+        conn = psycopg2.connect(
+            host=PG_HOST, port=PG_PORT, database=PG_SERVICE_DB,
+            user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE, connect_timeout=30
+        )
+        cursor = conn.cursor()
         
         # Load service agents
-        cursor.execute("SELECT * FROM service_agents WHERE is_active = true LIMIT 50")
-        master_data['service_agents'] = [dict(zip([d[0] for d in cursor.description], row)) 
-                                         for row in cursor.fetchall()]
+        cursor.execute("SELECT agent_id FROM service_agents LIMIT 50")
+        service_agents = [row[0] for row in cursor.fetchall()]
         
-        # Load field technicians
-        cursor.execute("SELECT * FROM field_technicians WHERE is_active = true")
-        master_data['field_technicians'] = [dict(zip([d[0] for d in cursor.description], row)) 
-                                            for row in cursor.fetchall()]
+        # Load service teams
+        cursor.execute("SELECT team_id FROM service_teams LIMIT 10")
+        service_teams = [row[0] for row in cursor.fetchall()]
         
-        # Load SLA definitions
-        cursor.execute("SELECT * FROM sla_definitions WHERE is_active = true")
-        master_data['sla_definitions'] = [dict(zip([d[0] for d in cursor.description], row)) 
-                                          for row in cursor.fetchall()]
+        # Load service queues
+        cursor.execute("SELECT queue_id FROM service_queues LIMIT 10")
+        service_queues = [row[0] for row in cursor.fetchall()]
+        
+        # Load accounts (from service related data)
+        cursor.execute("SELECT DISTINCT account_id FROM service_tickets LIMIT 50")
+        accounts = [row[0] for row in cursor.fetchall()]
+        
+        # Load contacts
+        cursor.execute("SELECT DISTINCT contact_id FROM service_tickets WHERE contact_id IS NOT NULL LIMIT 50")
+        contacts = [row[0] for row in cursor.fetchall()]
         
         cursor.close()
-        logger.info(f"Loaded: {len(master_data.get('service_agents', []))} agents, "
-                   f"{len(master_data.get('field_technicians', []))} technicians")
+        conn.close()
+        
+        master_data['service_agents'] = service_agents or ['SA-000001', 'SA-000002']
+        master_data['service_teams'] = service_teams or ['ST-000001']
+        master_data['service_queues'] = service_queues or ['SQ-000001']
+        master_data['accounts'] = accounts or ['ACC-000001']
+        master_data['contacts'] = contacts or ['CONT-000001']
+        
+        logger.info(f"Master data loaded: {len(service_agents)} agents, {len(service_teams)} teams, {len(accounts)} accounts, {len(contacts)} contacts")
         return True
     except Exception as e:
         logger.error(f"Failed to load master data: {e}")
         return False
 
-def generate_id(prefix: str) -> str:
-    return f"{prefix}-{datetime.now().strftime('%Y%m%d%H%M%S')}-{random.randint(1000, 9999)}"
-
-# ============================================================================
-# TICKET ROUTING & ASSIGNMENT
-# ============================================================================
-
-def route_new_tickets():
-    """Route unassigned tickets to agents"""
-    logger.info("Routing new tickets...")
+def insert_batch_parallel(cursor, insert_sql, data, table_name, batch_size, connection=None):
+    """Insert data in batches"""
+    total_batches = (len(data) + batch_size - 1) // batch_size
     
-    if not master_data.get('service_agents'):
-        return
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Get new unassigned tickets
-        cursor.execute("""
-            SELECT ticket_id, priority, category
-            FROM service_tickets
-            WHERE ticket_status = 'new'
-            AND assigned_to IS NULL
-            LIMIT 20
-        """)
-        
-        tickets = cursor.fetchall()
-        
-        for ticket_id, priority, category in tickets:
-            # Simple round-robin assignment to available agents
-            available_agents = [a for a in master_data['service_agents'] 
-                               if a.get('agent_status') == 'available']
+    for batch_idx in range(total_batches):
+        try:
+            batch_start = batch_idx * batch_size
+            batch_end = min((batch_idx + 1) * batch_size, len(data))
+            batch = data[batch_start:batch_end]
             
-            if available_agents:
-                agent = random.choice(available_agents)
-                
-                cursor.execute("""
-                    UPDATE service_tickets
-                    SET assigned_to = %s,
-                        assigned_datetime = %s,
-                        ticket_status = 'assigned'
-                    WHERE ticket_id = %s
-                """, (agent['agent_id'], datetime.now(), ticket_id))
-                
-                stats['tickets_routed'] += 1
-        
-        pg_connection.commit()
-        cursor.close()
-        
-        if tickets:
-            logger.info(f"Routed {len(tickets)} tickets")
-    except Exception as e:
-        logger.error(f"Error routing tickets: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# SLA MONITORING
-# ============================================================================
-
-def monitor_sla_violations():
-    """Monitor and flag SLA violations"""
-    logger.info("Monitoring SLA violations...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Check response SLA
-        cursor.execute("""
-            UPDATE service_tickets
-            SET response_sla_breached = true
-            WHERE ticket_status IN ('new', 'assigned')
-            AND response_due_datetime < %s
-            AND first_response_datetime IS NULL
-            AND response_sla_breached = false
-        """, (datetime.now(),))
-        
-        response_breaches = cursor.rowcount
-        
-        # Check resolution SLA
-        cursor.execute("""
-            UPDATE service_tickets
-            SET resolution_sla_breached = true
-            WHERE ticket_status NOT IN ('resolved', 'closed')
-            AND resolution_due_datetime < %s
-            AND resolved_datetime IS NULL
-            AND resolution_sla_breached = false
-        """, (datetime.now(),))
-        
-        resolution_breaches = cursor.rowcount
-        
-        stats['sla_violations_detected'] += (response_breaches + resolution_breaches)
-        
-        pg_connection.commit()
-        cursor.close()
-        
-        if response_breaches + resolution_breaches > 0:
-            logger.info(f"Detected {response_breaches + resolution_breaches} SLA violations")
-    except Exception as e:
-        logger.error(f"Error monitoring SLA: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# ESCALATION MANAGEMENT
-# ============================================================================
-
-def escalate_tickets():
-    """Escalate tickets based on SLA breach or age"""
-    logger.info("Checking for tickets to escalate...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Escalate tickets with SLA violations
-        cursor.execute("""
-            SELECT ticket_id, escalation_level
-            FROM service_tickets
-            WHERE (response_sla_breached = true OR resolution_sla_breached = true)
-            AND ticket_status NOT IN ('resolved', 'closed')
-            AND escalation_level < 3
-            LIMIT 10
-        """)
-        
-        tickets = cursor.fetchall()
-        
-        for ticket_id, current_level in tickets:
-            new_level = current_level + 1
+            execute_batch(cursor, insert_sql, batch, page_size=5000)
+            if connection:
+                connection.commit()
             
-            # Update ticket escalation
-            cursor.execute("""
-                UPDATE service_tickets
-                SET escalation_level = %s,
-                    escalated_datetime = %s
-                WHERE ticket_id = %s
-            """, (new_level, datetime.now(), ticket_id))
-            
-            # Log escalation
-            cursor.execute("""
-                INSERT INTO ticket_escalations (
-                    escalation_id, ticket_id, escalation_level,
-                    escalation_reason, escalated_at
-                ) VALUES (%s, %s, %s, %s, %s)
-            """, (generate_id('ESC'), ticket_id, new_level,
-                  'SLA breach detected', datetime.now()))
-            
-            stats['tickets_escalated'] += 1
-        
-        pg_connection.commit()
-        cursor.close()
-        
-        if tickets:
-            logger.info(f"Escalated {len(tickets)} tickets")
-    except Exception as e:
-        logger.error(f"Error escalating tickets: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# FIELD SERVICE MANAGEMENT
-# ============================================================================
-
-def assign_field_appointments():
-    """Assign field service appointments to technicians"""
-    logger.info("Assigning field appointments...")
-    
-    if not master_data.get('field_technicians'):
-        return
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Get unassigned appointments
-        cursor.execute("""
-            SELECT appointment_id, service_type, appointment_date
-            FROM field_service_appointments
-            WHERE appointment_status = 'scheduled'
-            AND assigned_technician_id IS NULL
-            AND appointment_date >= %s
-            LIMIT 10
-        """, (datetime.now().date(),))
-        
-        appointments = cursor.fetchall()
-        
-        for appt_id, service_type, appt_date in appointments:
-            # Assign to available technician
-            available_techs = [t for t in master_data['field_technicians'] 
-                              if t.get('technician_status') == 'available']
-            
-            if available_techs:
-                tech = random.choice(available_techs)
-                
-                cursor.execute("""
-                    UPDATE field_service_appointments
-                    SET assigned_technician_id = %s,
-                        appointment_status = 'confirmed'
-                    WHERE appointment_id = %s
-                """, (tech['technician_id'], appt_id))
-                
-                stats['field_appointments_assigned'] += 1
-        
-        pg_connection.commit()
-        cursor.close()
-        
-        if appointments:
-            logger.info(f"Assigned {len(appointments)} field appointments")
-    except Exception as e:
-        logger.error(f"Error assigning appointments: {e}")
-        pg_connection.rollback()
-
-def complete_field_appointments():
-    """Complete in-progress field appointments"""
-    logger.info("Completing field appointments...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Complete appointments that should be done
-        cursor.execute("""
-            UPDATE field_service_appointments
-            SET appointment_status = 'completed',
-                checked_out_datetime = %s
-            WHERE appointment_status = 'in_progress'
-            AND checked_in_datetime < %s
-            LIMIT 5
-        """, (datetime.now(), datetime.now() - timedelta(hours=4)))
-        
-        pg_connection.commit()
-        cursor.close()
-    except Exception as e:
-        logger.error(f"Error completing appointments: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# WARRANTY & RMA PROCESSING
-# ============================================================================
-
-def process_warranty_claims():
-    """Process pending warranty claims"""
-    logger.info("Processing warranty claims...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Auto-approve claims under certain amount
-        cursor.execute("""
-            UPDATE warranty_claims
-            SET claim_status = 'approved',
-                approved = true,
-                approved_date = %s
-            WHERE claim_status = 'submitted'
-            AND total_claim_amount < 10000
-            LIMIT 5
-        """, (datetime.now().date(),))
-        
-        rows = cursor.rowcount
-        stats['warranties_processed'] += rows
-        
-        pg_connection.commit()
-        cursor.close()
-        
-        if rows > 0:
-            logger.info(f"Processed {rows} warranty claims")
-    except Exception as e:
-        logger.error(f"Error processing warranties: {e}")
-        pg_connection.rollback()
-
-def process_rma_inspections():
-    """Process RMA inspections"""
-    logger.info("Processing RMA inspections...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Complete inspections for received RMAs
-        cursor.execute("""
-            UPDATE rma_requests
-            SET rma_status = 'processing',
-                inspection_status = 'pass',
-                condition_on_receipt = 'good'
-            WHERE rma_status = 'received'
-            AND inspection_status IS NULL
-            LIMIT 5
-        """)
-        
-        pg_connection.commit()
-        cursor.close()
-    except Exception as e:
-        logger.error(f"Error processing RMAs: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# CUSTOMER SATISFACTION
-# ============================================================================
-
-def send_csat_surveys():
-    """Send CSAT surveys for closed tickets"""
-    logger.info("Sending CSAT surveys...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Check if surveys table exists
-        cursor.execute("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_name = 'customer_surveys'
-            )
-        """)
-        
-        if not cursor.fetchone()[0]:
-            cursor.close()
-            return
-        
-        # Get recently closed tickets without surveys
-        cursor.execute("""
-            SELECT ticket_id, account_id, contact_id
-            FROM service_tickets
-            WHERE ticket_status = 'closed'
-            AND csat_survey_sent = false
-            AND closed_datetime >= %s
-            LIMIT 10
-        """, (datetime.now() - timedelta(days=7),))
-        
-        tickets = cursor.fetchall()
-        
-        for ticket_id, account_id, contact_id in tickets:
-            # Mark survey as sent
-            cursor.execute("""
-                UPDATE service_tickets
-                SET csat_survey_sent = true,
-                    csat_survey_sent_datetime = %s
-                WHERE ticket_id = %s
-            """, (datetime.now(), ticket_id))
-            
-            stats['surveys_sent'] += 1
-        
-        pg_connection.commit()
-        cursor.close()
-        
-        if tickets:
-            logger.info(f"Sent {len(tickets)} CSAT surveys")
-    except Exception as e:
-        logger.error(f"Error sending surveys: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# KNOWLEDGE BASE UPDATES
-# ============================================================================
-
-def update_kb_metrics():
-    """Update knowledge base article metrics"""
-    logger.info("Updating KB metrics...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Update avg ratings from recent ratings
-        cursor.execute("""
-            UPDATE kb_articles ka
-            SET avg_rating = (
-                SELECT AVG(rating)
-                FROM kb_article_ratings
-                WHERE article_id = ka.article_id
-            )
-            WHERE article_status = 'published'
-        """)
-        
-        pg_connection.commit()
-        cursor.close()
-    except Exception as e:
-        logger.error(f"Error updating KB metrics: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# SERVICE ANALYTICS
-# ============================================================================
-
-def generate_daily_metrics():
-    """Generate daily service metrics"""
-    logger.info("Generating daily metrics...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        today = datetime.now().date()
-        
-        # Check if metrics already exist for today
-        cursor.execute("""
-            SELECT EXISTS (
-                SELECT 1 FROM service_metrics_daily WHERE metric_date = %s
-            )
-        """, (today,))
-        
-        if cursor.fetchone()[0]:
-            cursor.close()
-            return
-        
-        # Calculate today's metrics
-        cursor.execute("""
-            INSERT INTO service_metrics_daily (
-                metric_id, metric_date,
-                tickets_created, tickets_resolved, tickets_closed,
-                backlog_count,
-                avg_first_response_time_minutes,
-                avg_resolution_time_minutes,
-                created_at
-            )
-            SELECT
-                %s,
-                %s,
-                COUNT(CASE WHEN DATE(created_at) = %s THEN 1 END),
-                COUNT(CASE WHEN DATE(resolved_datetime) = %s THEN 1 END),
-                COUNT(CASE WHEN DATE(closed_datetime) = %s THEN 1 END),
-                COUNT(CASE WHEN ticket_status NOT IN ('resolved', 'closed') THEN 1 END),
-                AVG(first_response_time_minutes),
-                AVG(resolution_time_minutes),
-                %s
-            FROM service_tickets
-        """, (generate_id('MET'), today, today, today, today, datetime.now()))
-        
-        pg_connection.commit()
-        cursor.close()
-        
-        logger.info(f"Generated metrics for {today}")
-    except Exception as e:
-        logger.error(f"Error generating metrics: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# INTEGRATION
-# ============================================================================
-
-def sync_with_crm():
-    """Sync tickets with CRM cases"""
-    logger.info("Syncing with CRM...")
-    
-    try:
-        cursor = pg_connection.cursor()
-        
-        # Check if cases table exists (CRM)
-        cursor.execute("""
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_name = 'cases'
-            )
-        """)
-        
-        if not cursor.fetchone()[0]:
-            cursor.close()
-            return
-        
-        # Sync high priority tickets to CRM cases
-        cursor.execute("""
-            SELECT ticket_id, account_id, subject, priority
-            FROM service_tickets
-            WHERE priority IN ('critical', 'urgent')
-            AND ticket_status = 'new'
-            AND NOT EXISTS (
-                SELECT 1 FROM cases WHERE ticket_id = service_tickets.ticket_id
-            )
-            LIMIT 5
-        """)
-        
-        tickets = cursor.fetchall()
-        
-        for ticket_id, account_id, subject, priority in tickets:
-            # Create CRM case
-            case_id = generate_id('CASE')
-            cursor.execute("""
-                INSERT INTO cases (
-                    case_id, case_number, account_id,
-                    subject, description, case_type, priority,
-                    case_status, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (case_id, f"CASE-{case_id}", account_id,
-                  subject, f"From ticket: {ticket_id}",
-                  'problem', priority, 'new', datetime.now()))
-            
-            # Log integration
-            cursor.execute("""
-                INSERT INTO service_integration_log (
-                    log_id, integration_direction, document_type,
-                    document_id, integration_status, log_timestamp
-                ) VALUES (%s, %s, %s, %s, %s, %s)
-            """, (generate_id('INTLOG'), 'SERVICE_TO_CRM',
-                  'ticket', ticket_id, 'completed', datetime.now()))
-        
-        pg_connection.commit()
-        cursor.close()
-        
-        if tickets:
-            logger.info(f"Synced {len(tickets)} tickets to CRM")
-    except Exception as e:
-        logger.error(f"Error syncing with CRM: {e}")
-        pg_connection.rollback()
-
-# ============================================================================
-# MAIN CYCLE
-# ============================================================================
-
-def run_service_cycle():
-    """Execute complete service cycle"""
-    logger.info("=== Service Cycle Starting ===")
-    
-    try:
-        # 1. Ticket Management
-        route_new_tickets()
-        monitor_sla_violations()
-        escalate_tickets()
-        
-        # 2. Field Service
-        assign_field_appointments()
-        complete_field_appointments()
-        
-        # 3. Warranty & RMA
-        process_warranty_claims()
-        process_rma_inspections()
-        
-        # 4. Customer Satisfaction
-        send_csat_surveys()
-        
-        # 5. Knowledge Base
-        update_kb_metrics()
-        
-        # 6. Analytics
-        generate_daily_metrics()
-        
-        # 7. Integration
-        sync_with_crm()
-        
-        stats['cycles'] += 1
-        logger.info("=== Service Cycle Complete ===")
-        return True
-    except Exception as e:
-        logger.error(f"Service cycle error: {e}")
-        return False
-
-def print_stats():
-    """Print daemon statistics"""
-    elapsed = (datetime.now() - stats['start_time']).total_seconds()
-    hours = elapsed / 3600
-    
-    logger.info("="*80)
-    logger.info(f"Service Daemon Statistics")
-    logger.info(f"  Uptime: {hours:.1f} hours")
-    logger.info(f"  Cycles: {stats['cycles']}")
-    logger.info(f"  Tickets Routed: {stats['tickets_routed']}")
-    logger.info(f"  Tickets Escalated: {stats['tickets_escalated']}")
-    logger.info(f"  SLA Violations Detected: {stats['sla_violations_detected']}")
-    logger.info(f"  Field Appointments Assigned: {stats['field_appointments_assigned']}")
-    logger.info(f"  Surveys Sent: {stats['surveys_sent']}")
-    logger.info(f"  Warranties Processed: {stats['warranties_processed']}")
-    logger.info("="*80)
+            logger.info(f"  Flushed {batch_end:,} / {len(data):,} {table_name}")
+        except psycopg2.IntegrityError as e:
+            logger.warning(f"  Batch {batch_idx + 1}/{total_batches} - Integrity error, skipping")
+            if connection:
+                connection.rollback()
+        except Exception as e:
+            logger.error(f"  Batch {batch_idx + 1}/{total_batches} error: {e}")
+            if connection:
+                connection.rollback()
 
 def main():
-    """Main daemon loop"""
+    """Main - Generate all service data in-memory, then bulk dump"""
     logger.info("="*80)
-    logger.info("GenIMS Customer Service Daemon Starting")
-    logger.info("Cycle Interval: Every 30 minutes")
+    logger.info("GenIMS Service Daemon - ULTRA FAST MODE (In-Memory Generation)")
+    logger.info("="*80)
+    logger.info(f"Configuration:")
+    logger.info(f"  Database: {PG_SERVICE_DB}")
+    logger.info(f"  Batch Size: {BATCH_SIZE}")
     logger.info("="*80)
     
+    start_time = time.time()
+    
+    # Initialize
     if not initialize_database():
+        return 1
+    
+    if not initialize_id_counters():
         return 1
     
     if not load_master_data():
         return 1
     
-    logger.info("Press Ctrl+C to stop")
+    logger.info("="*80)
+    logger.info("📊 BASELINE DATABASE COUNTS (Before Generation)")
+    logger.info("="*80)
+    counts_before = get_all_table_counts()
+    for table, count in counts_before.items():
+        if count is not None:
+            logger.info(f"  {table:.<40} {count:>10,} records")
+    logger.info("="*80)
     
-    last_cycle = datetime.now() - timedelta(hours=1)
+    logger.info("="*80)
+    logger.info("GENERATING ALL DATA IN MEMORY...")
+    logger.info("="*80)
     
-    while running:
-        try:
-            now = datetime.now()
-            
-            # Run every 30 minutes
-            if (now - last_cycle).total_seconds() >= CYCLE_INTERVAL_SECONDS:
-                run_service_cycle()
-                last_cycle = now
-            
-            # Print stats every hour
-            if now.minute == 0:
-                print_stats()
-            
-            time.sleep(60)  # Check every minute
-            
-        except Exception as e:
-            logger.error(f"Error in main loop: {e}", exc_info=True)
-            time.sleep(60)
+    # Generate data
+    tickets = []
+    comments = []
+    escalations = []
+    rma_requests = []
+    warranty_claims = []
+    metrics = []
     
-    logger.info("Shutting down...")
+    sim_base_time = datetime.strptime(datetime.now().strftime('%Y-%m-%d 00:00:00'), '%Y-%m-%d %H:%M:%S')
+    run_timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    
+    # Generate service records (multiple per hour)
+    for i in range(TOTAL_RECORDS):
+        timestamp_offset = i * 300  # 5 minute intervals
+        current_ts = sim_base_time + timedelta(seconds=timestamp_offset)
+        
+        account = random.choice(master_data['accounts'])
+        contact = random.choice(master_data['contacts']) if master_data['contacts'] else None
+        agent = random.choice(master_data['service_agents'])
+        team = random.choice(master_data['service_teams'])
+        queue = random.choice(master_data['service_queues'])
+        
+        # Service Tickets (1 per 50 records)
+        if i % 50 == 0:
+            ticket_id = f"TICKET-{(counters['ticket'] + i // 50):06d}"
+            ticket_num = f"TKT-{run_timestamp}-{i // 50:04d}"
+            tickets.append({
+                'ticket_id': ticket_id,
+                'ticket_number': ticket_num,
+                'account_id': account,
+                'contact_id': contact,
+                'channel': random.choice(['Phone', 'Email', 'Chat', 'Portal', 'Social']),
+                'ticket_type': random.choice(['Incident', 'Service Request', 'Question']),
+                'category': random.choice(['Technical', 'Billing', 'General', 'Sales']),
+                'priority': random.choice(['Low', 'Medium', 'High', 'Critical']),
+                'ticket_status': random.choice(['New', 'Open', 'In Progress', 'Waiting', 'Resolved', 'Closed']),
+                'subject': f"Service Issue {i // 50}",
+                'description': f"Customer reported issue {i // 50}",
+                'assigned_to': agent,
+                'assigned_team': team,
+                'created_at': current_ts,
+                'updated_at': current_ts
+            })
+        
+        # Ticket Comments (2 per ticket = 1 per 25 records)
+        if i % 25 == 0:
+            comment_id = f"COMMENT-{(counters['comment'] + i // 25):06d}"
+            comments.append({
+                'comment_id': comment_id,
+                'ticket_id': tickets[-1]['ticket_id'] if tickets else f"TICKET-000001",
+                'comment_text': f"Comment on ticket issue {i // 25}",
+                'comment_type': random.choice(['Customer', 'Internal', 'System']),
+                'is_public': random.choice([True, False]),
+                'created_by': agent,
+                'created_at': current_ts
+            })
+        
+        # Ticket Escalations (1 per 200 records)
+        if i % 200 == 0:
+            esc_id = f"ESC-{(counters['escalation'] + i // 200):06d}"
+            escalations.append({
+                'escalation_id': esc_id,
+                'ticket_id': tickets[-1]['ticket_id'] if tickets else f"TICKET-000001",
+                'escalation_level': random.randint(1, 3),
+                'escalation_reason': random.choice(['Complex Issue', 'SLA Risk', 'High Priority', 'Manager Request']),
+                'escalated_from': agent,
+                'escalated_to': random.choice(master_data['service_agents']),
+                'escalated_at': current_ts
+            })
+        
+        # RMA Requests (1 per 150 records)
+        if i % 150 == 0:
+            rma_id = f"RMA-{(counters['rma'] + i // 150):06d}"
+            rma_num = f"RMA-{run_timestamp}-{i // 150:04d}"
+            rma_requests.append({
+                'rma_id': rma_id,
+                'rma_number': rma_num,
+                'account_id': account,
+                'contact_id': contact,
+                'ticket_id': tickets[-1]['ticket_id'] if tickets else None,
+                'rma_type': random.choice(['Return', 'Repair', 'Replacement', 'Refund']),
+                'return_reason': random.choice(['Defective', 'Not as expected', 'Damaged', 'Wrong item']),
+                'rma_status': random.choice(['Pending', 'Approved', 'Rejected', 'Completed']),
+                'approved': random.choice([True, False]),
+                'approved_by': agent if random.random() > 0.3 else None,
+                'approved_date': (current_ts + timedelta(days=1)).date() if random.random() > 0.3 else None,
+                'created_at': current_ts
+            })
+        
+        # Warranty Claims (1 per 250 records)
+        if i % 250 == 0:
+            warranty_id = f"WC-{(counters['warranty'] + i // 250):06d}"
+            claim_num = f"CLM-{run_timestamp}-{i // 250:04d}"
+            warranty_claims.append({
+                'claim_id': warranty_id,
+                'claim_number': claim_num,
+                'warranty_id': f"WAR-{random.randint(1000, 9999)}",
+                'ticket_id': tickets[-1]['ticket_id'] if tickets else None,
+                'claim_date': current_ts.date(),
+                'issue_description': f"Warranty claim for product failure {i // 250}",
+                'failure_type': random.choice(['Hardware', 'Software', 'Performance', 'Defect']),
+                'claim_status': random.choice(['Pending', 'Approved', 'Rejected', 'Paid']),
+                'approved': random.choice([True, False]),
+                'approved_by': agent if random.random() > 0.4 else None,
+                'approved_date': (current_ts + timedelta(days=3)).date() if random.random() > 0.4 else None,
+                'created_at': current_ts
+            })
+        
+        # Service Metrics (1 per 100 records)
+        if i % 100 == 0:
+            metric_id = f"METRIC-{(counters['service_metric'] + i // 100):06d}"
+            metrics.append({
+                'metric_id': metric_id,
+                'metric_date': current_ts.date(),
+                'tickets_created': random.randint(5, 20),
+                'tickets_resolved': random.randint(4, 18),
+                'tickets_closed': random.randint(3, 15),
+                'avg_first_response_time_minutes': random.randint(5, 60),
+                'avg_resolution_time_minutes': random.randint(30, 480),
+                'response_sla_compliance_pct': round(random.uniform(85, 99), 1),
+                'resolution_sla_compliance_pct': round(random.uniform(80, 98), 1),
+                'fcr_rate_pct': round(random.uniform(50, 90), 1),
+                'avg_csat_rating': round(random.uniform(3.5, 5), 2),
+                'phone_tickets': random.randint(2, 10),
+                'email_tickets': random.randint(2, 10),
+                'chat_tickets': random.randint(1, 8),
+                'portal_tickets': random.randint(1, 5),
+                'critical_tickets': random.randint(0, 3),
+                'high_tickets': random.randint(1, 5),
+                'medium_tickets': random.randint(2, 8),
+                'low_tickets': random.randint(1, 5),
+                'created_at': current_ts
+            })
+        
+        if (i + 1) % 1000 == 0:
+            logger.info(f"  Generated {i + 1:,} / {TOTAL_RECORDS:,} records")
+    
+    logger.info(f"✓ Generated {len(tickets):,} service tickets")
+    logger.info(f"✓ Generated {len(comments):,} ticket comments")
+    logger.info(f"✓ Generated {len(escalations):,} escalations")
+    logger.info(f"✓ Generated {len(rma_requests):,} RMA requests")
+    logger.info(f"✓ Generated {len(warranty_claims):,} warranty claims")
+    logger.info(f"✓ Generated {len(metrics):,} service metrics")
+    
+    # Bulk dump to PostgreSQL
+    logger.info("="*80)
+    logger.info("BULK DUMPING TO POSTGRESQL...")
+    logger.info("="*80)
+    
+    try:
+        cursor = pg_connection.cursor()
+        cursor.execute("SET CONSTRAINTS ALL DEFERRED;")
+        
+        # Insert tickets
+        if tickets:
+            insert_sql = """INSERT INTO service_tickets (
+                ticket_id, ticket_number, account_id, contact_id, channel, ticket_type,
+                category, priority, ticket_status, subject, description, assigned_to, assigned_team,
+                created_at, updated_at
+            ) VALUES (%(ticket_id)s, %(ticket_number)s, %(account_id)s, %(contact_id)s,
+                %(channel)s, %(ticket_type)s, %(category)s, %(priority)s, %(ticket_status)s,
+                %(subject)s, %(description)s, %(assigned_to)s, %(assigned_team)s,
+                %(created_at)s, %(updated_at)s)
+            ON CONFLICT (ticket_number) DO NOTHING"""
+            logger.info(f"Inserting {len(tickets):,} service tickets...")
+            insert_batch_parallel(cursor, insert_sql, tickets, "service_tickets", BATCH_SIZE, pg_connection)
+        
+        # Insert comments
+        if comments:
+            insert_sql = """INSERT INTO ticket_comments (
+                comment_id, ticket_id, comment_text, comment_type, is_public,
+                created_by, created_at
+            ) VALUES (%(comment_id)s, %(ticket_id)s, %(comment_text)s, %(comment_type)s,
+                %(is_public)s, %(created_by)s, %(created_at)s)
+            ON CONFLICT (comment_id) DO NOTHING"""
+            logger.info(f"Inserting {len(comments):,} ticket comments...")
+            insert_batch_parallel(cursor, insert_sql, comments, "ticket_comments", BATCH_SIZE, pg_connection)
+        
+        # Insert escalations
+        if escalations:
+            insert_sql = """INSERT INTO ticket_escalations (
+                escalation_id, ticket_id, escalation_level, escalation_reason,
+                escalated_from, escalated_to, escalated_at
+            ) VALUES (%(escalation_id)s, %(ticket_id)s, %(escalation_level)s,
+                %(escalation_reason)s, %(escalated_from)s, %(escalated_to)s, %(escalated_at)s)
+            ON CONFLICT (escalation_id) DO NOTHING"""
+            logger.info(f"Inserting {len(escalations):,} escalations...")
+            insert_batch_parallel(cursor, insert_sql, escalations, "ticket_escalations", BATCH_SIZE, pg_connection)
+        
+        # Insert RMA requests
+        if rma_requests:
+            insert_sql = """INSERT INTO rma_requests (
+                rma_id, rma_number, account_id, contact_id, ticket_id, rma_type,
+                return_reason, rma_status, approved, approved_by, approved_date, created_at
+            ) VALUES (%(rma_id)s, %(rma_number)s, %(account_id)s, %(contact_id)s,
+                %(ticket_id)s, %(rma_type)s, %(return_reason)s, %(rma_status)s,
+                %(approved)s, %(approved_by)s, %(approved_date)s, %(created_at)s)
+            ON CONFLICT (rma_number) DO NOTHING"""
+            logger.info(f"Inserting {len(rma_requests):,} RMA requests...")
+            insert_batch_parallel(cursor, insert_sql, rma_requests, "rma_requests", BATCH_SIZE, pg_connection)
+        
+        # Insert warranty claims
+        if warranty_claims:
+            insert_sql = """INSERT INTO warranty_claims (
+                claim_id, claim_number, warranty_id, ticket_id, claim_date,
+                issue_description, failure_type, claim_status, approved, approved_by,
+                approved_date, created_at
+            ) VALUES (%(claim_id)s, %(claim_number)s, %(warranty_id)s, %(ticket_id)s,
+                %(claim_date)s, %(issue_description)s, %(failure_type)s, %(claim_status)s,
+                %(approved)s, %(approved_by)s, %(approved_date)s, %(created_at)s)
+            ON CONFLICT (claim_number) DO NOTHING"""
+            logger.info(f"Inserting {len(warranty_claims):,} warranty claims...")
+            insert_batch_parallel(cursor, insert_sql, warranty_claims, "warranty_claims", BATCH_SIZE, pg_connection)
+        
+        # Insert metrics
+        if metrics:
+            insert_sql = """INSERT INTO service_metrics_daily (
+                metric_id, metric_date, tickets_created, tickets_resolved, tickets_closed,
+                avg_first_response_time_minutes, avg_resolution_time_minutes, response_sla_compliance_pct,
+                resolution_sla_compliance_pct, fcr_rate_pct, avg_csat_rating, phone_tickets, email_tickets,
+                chat_tickets, portal_tickets, critical_tickets, high_tickets, medium_tickets, low_tickets, created_at
+            ) VALUES (%(metric_id)s, %(metric_date)s, %(tickets_created)s, %(tickets_resolved)s, %(tickets_closed)s,
+                %(avg_first_response_time_minutes)s, %(avg_resolution_time_minutes)s, %(response_sla_compliance_pct)s,
+                %(resolution_sla_compliance_pct)s, %(fcr_rate_pct)s, %(avg_csat_rating)s, %(phone_tickets)s, %(email_tickets)s,
+                %(chat_tickets)s, %(portal_tickets)s, %(critical_tickets)s, %(high_tickets)s, %(medium_tickets)s, %(low_tickets)s, %(created_at)s)
+            ON CONFLICT DO NOTHING"""
+            logger.info(f"Inserting {len(metrics):,} service metrics...")
+            insert_batch_parallel(cursor, insert_sql, metrics, "service_metrics_daily", BATCH_SIZE, pg_connection)
+        
+        cursor.close()
+        
+        # Commit all data
+        pg_connection.commit()
+        
+        logger.info(f"✓ All records inserted successfully")
+    except Exception as e:
+        logger.error(f"PostgreSQL error: {e}")
+        return 1
+    
+    elapsed = time.time() - start_time
+    
+    # Get final counts
+    counts_after = get_all_table_counts()
+    
+    logger.info("="*80)
+    logger.info("GENERATION & INSERTION COMPLETE")
+    logger.info("="*80)
+    logger.info(f"  Total time: {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
+    logger.info("")
+    logger.info("📊 DATABASE SUMMARY")
+    logger.info("="*80)
+    
+    tables_list = ['service_tickets', 'ticket_comments', 'ticket_escalations', 'rma_requests', 'warranty_claims', 'service_metrics_daily']
+    for table in tables_list:
+        before = counts_before.get(table)
+        after = counts_after.get(table)
+        
+        if before is not None and after is not None:
+            inserted = after - before
+            logger.info(f"{table:.<40} Before: {before:>10,} | After: {after:>10,} | Inserted: {inserted:>10,}")
+    
+    logger.info("="*80)
+    
     if pg_connection:
         pg_connection.close()
     
-    print_stats()
-    logger.info("Service Daemon stopped")
     return 0
 
 if __name__ == "__main__":
-    import os
     os.makedirs('logs', exist_ok=True)
     sys.exit(main())

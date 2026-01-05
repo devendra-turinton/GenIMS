@@ -27,6 +27,8 @@ except ImportError:
     POSTGRES_AVAILABLE = False
     print("WARNING: psycopg2 not installed. Install with: pip install psycopg2-binary")
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 # ============================================================================
 # CONFIGURATION - Environment Variables with Defaults
 # ============================================================================
@@ -222,13 +224,13 @@ def _initialize_counters():
             'supplier': ('suppliers', 'supplier_id', 'SUP'),
             'bom': ('bill_of_materials', 'bom_id', 'BOM'),
             'sales_order': ('sales_orders', 'sales_order_id', 'SO'),
-            'prod_order': ('production_orders', 'production_order_id', 'PO'),
+            'prod_order': ('production_orders', 'production_order_id', 'PROD'),
             'purchase_req': ('purchase_requisitions', 'requisition_id', 'PR'),
             'purchase_order': ('purchase_orders', 'purchase_order_id', 'PO'),
             'goods_receipt': ('goods_receipts', 'goods_receipt_id', 'GR'),
-            'inv_transaction': ('inventory_transactions', 'transaction_id', 'INV'),
-            'mrp_run': ('mrp_runs', 'run_id', 'MRP'),
-            'gl_transaction': ('general_ledger', 'transaction_id', 'GL')
+            'inv_transaction': ('inventory_transactions', 'transaction_id', 'INVT'),
+            'mrp_run': ('mrp_runs', 'run_number', 'MRP'),
+            'gl_transaction': ('general_ledger', 'gl_transaction_id', 'GL')
         }
         
         for key, (table, id_col, prefix) in tables.items():
@@ -1149,11 +1151,52 @@ def wait_until_next_run():
     time.sleep(sleep_seconds)
 
 
+
+def get_table_count(table_name):
+    """Get current count from any table in PostgreSQL"""
+    try:
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_DATABASE,
+            user=PG_USER,
+            password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE,
+            connect_timeout=10
+        )
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT COUNT(*) FROM {table_name};")
+        count = cursor.fetchone()[0]
+        cursor.close()
+        conn.close()
+        return count
+    except Exception as e:
+        logger.warning(f"Could not get {table_name} count: {e}")
+        return None
+
+
+def get_all_table_counts():
+    """Get baseline counts for all ERP tables"""
+    tables = ['sales_orders', 'sales_order_lines', 'purchase_orders', 
+              'purchase_order_lines', 'goods_receipts', 'mrp_runs',
+              'purchase_requisitions', 'production_orders', 'inventory_transactions',
+              'general_ledger']
+    counts = {}
+    for table in tables:
+        counts[table] = get_table_count(table)
+    return counts
+
+
 def main():
-    """Main daemon loop"""
+    """Main daemon loop - ULTRA FAST MODE (In-Memory Generation)"""
     logger.info("="*80)
-    logger.info("GenIMS ERP Daily Business Cycle Daemon Starting")
-    logger.info(f"Scheduled run time: {RUN_TIME_HOUR:02d}:00 daily")
+    logger.info("GenIMS ERP Daily Business Cycle Daemon - ULTRA FAST MODE")
+    logger.info("="*80)
+    
+def main():
+    """Main daemon loop - ULTRA FAST MODE (In-Memory Generation)"""
+    logger.info("="*80)
+    logger.info("GenIMS ERP Daily Business Cycle Daemon - ULTRA FAST MODE")
     logger.info("="*80)
     
     # Initialize
@@ -1163,70 +1206,627 @@ def main():
     if not load_master_data():
         return 1
     
-    logger.info("Press Ctrl+C to stop")
+    start_time = time.time()
+    
+    # Get baseline counts before generation
+    logger.info("="*80)
+    logger.info("📊 BASELINE DATABASE COUNTS (Before Generation)")
+    logger.info("="*80)
+    counts_before = get_all_table_counts()
+    for table, count in counts_before.items():
+        if count is not None:
+            logger.info(f"  {table:.<40} {count:>10,} records")
     logger.info("="*80)
     
-    while running:
+    logger.info("="*80)
+    logger.info("GENERATING ALL DATA IN MEMORY...")
+    logger.info("="*80)
+    
+    # Generate all data for single cycle in memory
+    sales_orders_list = []
+    sales_order_lines_list = []
+    purchase_orders_list = []
+    purchase_order_lines_list = []
+    goods_receipts_list = []
+    mrp_runs_list = []
+    purchase_requisitions_list = []
+    production_orders_list = []
+    inventory_transactions_list = []
+    general_ledger_list = []
+    
+    # Simulate current date
+    current_date = datetime.now().strftime('%Y-%m-%d')
+    
+    # Generate Sales Orders
+    num_so = random.randint(*SALES_ORDERS_PER_DAY)
+    logger.info(f"Generating {num_so} sales orders...")
+    
+    finished_goods = [m for m in master_data['materials'] if m.get('material_type') == 'finished_good']
+    if not finished_goods:
+        finished_goods = master_data['materials'][:5] if master_data['materials'] else []
+    
+    for i in range(num_so):
+        customer = random.choice(master_data['customers'])
+        so_id = f"SO-{(counters['sales_order'] + i):06d}"
+        so_number = f"SO-{datetime.now().strftime('%Y%m%d')}-{i:04d}"
+        
+        delivery_date = (datetime.now() + timedelta(days=random.randint(5, 30))).date()
+        
+        so_data = {
+            'sales_order_id': so_id,
+            'sales_order_number': so_number,
+            'customer_id': customer.get('customer_id', 'CUST-001'),
+            'customer_po_number': f"CUS-PO-{random.randint(10000, 99999)}",
+            'sales_organization': 'S001',
+            'distribution_channel': 'DC01',
+            'division': 'DIV01',
+            'order_date': datetime.now().date(),
+            'requested_delivery_date': delivery_date,
+            'order_status': 'open',
+            'total_net_value': 0,
+            'total_value': 0,
+            'currency': 'INR',
+            'created_by': 'SYSTEM',
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        sales_orders_list.append(so_data)
+        
+        # Create SO lines (1-5 products)
+        num_lines = random.randint(1, 5)
+        total_value = 0
+        
+        for line_num in range(1, num_lines + 1):
+            material = random.choice(finished_goods) if finished_goods else {'material_id': 'PROD-001', 'material_name': 'Default', 'standard_cost': 100}
+            quantity = random.randint(10, 100)
+            unit_price = float(material.get('standard_cost', 100)) * random.uniform(1.2, 1.5)
+            net_price = quantity * unit_price
+            
+            sol_data = {
+                'sales_order_line_id': f"SOL-{(counters['sales_order'] + i):06d}-{line_num}",
+                'sales_order_id': so_id,
+                'line_number': line_num * 10,
+                'material_id': material.get('material_id', 'PROD-001'),
+                'product_id': material.get('product_id', 'PROD-001'),
+                'material_description': material.get('material_name', 'Default Product'),
+                'order_quantity': quantity,
+                'unit_of_measure': 'EA',
+                'unit_price': round(unit_price, 2),
+                'net_price': round(net_price, 2),
+                'requested_delivery_date': delivery_date.strftime('%Y-%m-%d'),
+                'line_status': 'open',
+                'make_to_order': True,
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+            sales_order_lines_list.append(sol_data)
+            total_value += net_price
+        
+        # Update SO totals
+        so_data['total_net_value'] = round(total_value, 2)
+        so_data['total_value'] = round(total_value * 1.18, 2)
+    
+    logger.info(f"✓ Generated {len(sales_orders_list)} sales orders")
+    logger.info(f"✓ Generated {len(sales_order_lines_list)} sales order lines")
+    
+    # Generate Purchase Requisitions and Orders
+    num_pr = num_so * random.randint(2, 4)
+    logger.info(f"Generating {num_pr} purchase requisitions...")
+    
+    raw_materials = [m for m in master_data['materials'] if m.get('material_type') in ['raw_material', 'component']]
+    if not raw_materials:
+        raw_materials = master_data['materials'][5:10] if len(master_data['materials']) > 5 else []
+    
+    for i in range(num_pr):
+        material = random.choice(raw_materials) if raw_materials else {'material_id': 'MAT-001', 'material_name': 'Default Material'}
+        required_date = (datetime.now() + timedelta(days=random.randint(10, 60))).date()
+        quantity = random.randint(50, 500)
+        
+        pr_id = f"PR-{(counters['purchase_req'] + i):06d}"
+        pr_number = f"PR-{datetime.now().strftime('%Y%m%d')}-{i:04d}"
+        
+        pr_data = {
+            'requisition_id': pr_id,
+            'requisition_number': pr_number,
+            'requisition_type': 'stock',
+            'requisition_date': datetime.now().date(),
+            'required_date': required_date,
+            'requester_id': master_data['employees'][0]['employee_id'] if master_data.get('employees') else 'EMP-001',
+            'cost_center_id': 'CC-001',
+            'plant_id': master_data['factories'][0]['factory_id'] if master_data.get('factories') else 'FAC-001',
+            'priority': 'normal',
+            'approval_status': 'approved',
+            'overall_status': 'open',
+            'source_type': 'mrp',
+            'source_document': 'MRP',
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        purchase_requisitions_list.append(pr_data)
+        
+        # Create PR line
+        prl_data = {
+            'requisition_line_id': f"PRL-{(counters['purchase_req'] + i):06d}-01",
+            'requisition_id': pr_id,
+            'line_number': 10,
+            'material_id': material.get('material_id', 'MAT-001'),
+            'quantity': quantity,
+            'unit_of_measure': 'EA',
+            'delivery_date': required_date,
+            'line_status': 'open',
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        # Create PO from PR
+        supplier = random.choice(master_data['suppliers']) if master_data.get('suppliers') else {'supplier_id': 'SUP-001', 'supplier_name': 'Default Supplier'}
+        po_id = f"PO-{(counters['purchase_order'] + i):06d}"
+        po_number = f"PO-{datetime.now().strftime('%Y%m%d')}-{i:04d}"
+        
+        unit_price = float(material.get('standard_cost', 50)) * random.uniform(0.9, 1.1)
+        net_price = quantity * unit_price
+        
+        po_data = {
+            'purchase_order_id': po_id,
+            'po_number': po_number,
+            'supplier_id': supplier.get('supplier_id', 'SUP-001'),
+            'po_date': datetime.now().date(),
+            'po_type': 'standard',
+            'currency': 'INR',
+            'po_status': 'released',
+            'total_value': round(net_price, 2),
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        purchase_orders_list.append(po_data)
+        
+        pol_data = {
+            'po_line_id': f"POL-{(counters['purchase_order'] + i):06d}-01",
+            'purchase_order_id': po_id,
+            'line_number': 10,
+            'material_id': material.get('material_id', 'MAT-001'),
+            'material_description': material.get('material_name', 'Default Material'),
+            'order_quantity': quantity,
+            'unit_of_measure': 'EA',
+            'unit_price': round(unit_price, 2),
+            'net_price': round(net_price, 2),
+            'delivery_date': required_date,
+            'line_status': 'open',
+            'requisition_id': pr_id,
+            'requisition_line': 10,
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        purchase_order_lines_list.append(pol_data)
+    
+    logger.info(f"✓ Generated {len(purchase_requisitions_list)} purchase requisitions")
+    logger.info(f"✓ Generated {len(purchase_orders_list)} purchase orders")
+    logger.info(f"✓ Generated {len(purchase_order_lines_list)} PO lines")
+    
+    # Generate Goods Receipts for some POs
+    num_gr = max(1, len(purchase_order_lines_list) // 3)
+    logger.info(f"Generating {num_gr} goods receipts...")
+    
+    for i in range(min(num_gr, len(purchase_order_lines_list))):
+        pol = purchase_order_lines_list[i]
+        receive_qty = pol['order_quantity'] * random.uniform(0.5, 1.0)
+        
+        gr_id = f"GR-{(counters['goods_receipt'] + i):06d}"
+        gr_number = f"GR-{datetime.now().strftime('%Y%m%d')}-{i:05d}"
+        batch_number = f"BATCH-{datetime.now().strftime('%Y%m%d')}-{random.randint(1000, 9999)}"
+        
+        gr_data = {
+            'goods_receipt_id': gr_id,
+            'gr_number': gr_number,
+            'gr_date': datetime.now().date(),
+            'posting_date': datetime.now().date(),
+            'purchase_order_id': pol['purchase_order_id'],
+            'po_line_id': pol['po_line_id'],
+            'supplier_id': 'SUP-001',
+            'material_id': pol['material_id'],
+            'quantity_received': round(receive_qty, 2),
+            'unit_of_measure': 'EA',
+            'plant_id': 'FAC-001',
+            'storage_location': 'WH01',
+            'batch_number': batch_number,
+            'quality_status': 'unrestricted',
+            'unit_price': pol['unit_price'],
+            'total_value': round(receive_qty * pol['unit_price'], 2),
+            'gr_status': 'posted',
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        goods_receipts_list.append(gr_data)
+        
+        # Create inventory transaction
+        invt_data = {
+            'transaction_id': f"INVT-{(counters['inv_transaction'] + i):08d}",
+            'material_document': f"MAT-{datetime.now().strftime('%Y%m%d')}-{i:05d}",
+            'document_item': 1,
+            'transaction_type': 'goods_receipt',
+            'movement_type': '101',
+            'posting_date': datetime.now().date(),
+            'document_date': datetime.now().date(),
+            'material_id': pol['material_id'],
+            'plant_id': 'FAC-001',
+            'storage_location': 'WH01',
+            'quantity': round(receive_qty, 2),
+            'unit_of_measure': 'EA',
+            'amount': round(receive_qty * pol['unit_price'], 2),
+            'purchase_order_id': pol['purchase_order_id'],
+            'goods_receipt_id': gr_id,
+            'created_by': 'SYSTEM',
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        inventory_transactions_list.append(invt_data)
+        
+        # Create GL posting
+        gl_data_dr = {
+            'gl_transaction_id': f"GL-{(counters['gl_transaction'] + i*2):08d}",
+            'document_number': f"GL-{datetime.now().strftime('%Y%m%d')}-{i*2:05d}",
+            'document_type': 'SA',
+            'posting_date': datetime.now().date(),
+            'document_date': datetime.now().date(),
+            'gl_account': '1400',
+            'company_code': 'C001',
+            'debit_amount': round(receive_qty * pol['unit_price'], 2),
+            'credit_amount': 0,
+            'currency': 'INR',
+            'text': f"GR {gr_number} - {pol['material_description']}",
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        general_ledger_list.append(gl_data_dr)
+        
+        gl_data_cr = {
+            'gl_transaction_id': f"GL-{(counters['gl_transaction'] + i*2 + 1):08d}",
+            'document_number': f"GL-{datetime.now().strftime('%Y%m%d')}-{i*2+1:05d}",
+            'document_type': 'SA',
+            'posting_date': datetime.now().date(),
+            'document_date': datetime.now().date(),
+            'gl_account': '2110',
+            'company_code': 'C001',
+            'debit_amount': 0,
+            'credit_amount': round(receive_qty * pol['unit_price'], 2),
+            'currency': 'INR',
+            'text': f"GR {gr_number} - GR/IR Clearing",
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        general_ledger_list.append(gl_data_cr)
+    
+    logger.info(f"✓ Generated {len(goods_receipts_list)} goods receipts")
+    logger.info(f"✓ Generated {len(inventory_transactions_list)} inventory transactions")
+    logger.info(f"✓ Generated {len(general_ledger_list)} GL transactions")
+    
+    # Generate MRP run
+    mrp_run_id = f"MRP-{(counters['mrp_run']):06d}"
+    mrp_data = {
+        'mrp_run_id': mrp_run_id,
+        'run_number': f"MRP-{datetime.now().strftime('%Y%m%d')}",
+        'planning_date': datetime.now().date(),
+        'planning_horizon_days': MRP_PLANNING_HORIZON_DAYS,
+        'planning_mode': 'net_change',
+        'create_purchase_requisitions': True,
+        'create_production_orders': True,
+        'run_status': 'completed',
+        'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'completed_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'materials_planned': len(purchase_requisitions_list),
+        'purchase_reqs_created': len(purchase_requisitions_list),
+        'production_orders_created': len(purchase_requisitions_list) // 2,
+        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+    
+    mrp_runs_list.append(mrp_data)
+    
+    logger.info(f"✓ Generated 1 MRP run")
+    
+    # Generate Production Orders
+    num_prod = len(purchase_requisitions_list) // 2
+    logger.info(f"Generating {num_prod} production orders...")
+    
+    for i in range(num_prod):
+        material = random.choice(finished_goods) if finished_goods else {'material_id': 'PROD-001', 'material_name': 'Default'}
+        po_id = f"PROD-{(counters['prod_order'] + i):06d}"
+        po_number = f"PROD-{(counters['prod_order'] + i):08d}"
+        
+        required_date = (datetime.now() + timedelta(days=random.randint(15, 45))).date()
+        start_date = required_date - timedelta(days=random.randint(5, 15))
+        quantity = random.randint(50, 200)
+        
+        prod_data = {
+            'production_order_id': po_id,
+            'production_order_number': po_number,
+            'material_id': material.get('material_id', 'PROD-001'),
+            'plant_id': 'FAC-001',
+            'sales_order_id': None,
+            'order_type': 'production',
+            'order_quantity': quantity,
+            'basic_start_date': start_date,
+            'basic_end_date': required_date,
+            'system_status': 'created',
+            'priority': 5,
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        production_orders_list.append(prod_data)
+    
+    logger.info(f"✓ Generated {len(production_orders_list)} production orders")
+    
+    # Bulk dump to PostgreSQL
+    logger.info("="*80)
+    logger.info("BULK DUMPING TO POSTGRESQL...")
+    logger.info("="*80)
+    
+    if POSTGRES_AVAILABLE:
         try:
-            cycle_start = time.time()
-            current_date = datetime.now().strftime('%Y-%m-%d')
+            conn = psycopg2.connect(
+                host=PG_HOST,
+                port=PG_PORT,
+                database=PG_DATABASE,
+                user=PG_USER,
+                password=PG_PASSWORD,
+                sslmode=PG_SSL_MODE,
+                connect_timeout=30
+            )
+            conn.autocommit = False
+            cursor = conn.cursor()
             
-            logger.info(f"\n{'='*80}")
-            logger.info(f"Daily ERP Business Cycle - {current_date}")
-            logger.info(f"{'='*80}")
+            # Disable FK checks for synthetic data
+            cursor.execute("SET CONSTRAINTS ALL DEFERRED;")
             
-            # Execute daily ERP operations
-            logger.info("\n1. Processing Sales Orders...")
-            process_new_sales_orders()
+            # Insert sales orders
+            if sales_orders_list:
+                insert_sql = """
+                    INSERT INTO sales_orders (
+                        sales_order_id, sales_order_number, customer_id, customer_po_number,
+                        sales_organization, distribution_channel, division, order_date,
+                        requested_delivery_date, order_status, currency, total_net_value,
+                        total_value, created_by, created_at
+                    ) VALUES (
+                        %(sales_order_id)s, %(sales_order_number)s, %(customer_id)s, %(customer_po_number)s,
+                        %(sales_organization)s, %(distribution_channel)s, %(division)s, %(order_date)s,
+                        %(requested_delivery_date)s, %(order_status)s, %(currency)s, %(total_net_value)s,
+                        %(total_value)s, %(created_by)s, %(created_at)s
+                    )
+                    ON CONFLICT (sales_order_number) DO NOTHING
+                """
+                
+                logger.info(f"Inserting {len(sales_orders_list):,} sales orders...")
+                execute_batch(cursor, insert_sql, sales_orders_list, page_size=5000)
+                conn.commit()
+                logger.info(f"  ✓ Flushed {len(sales_orders_list):,} sales orders")
             
-            logger.info("\n2. Running MRP...")
-            run_mrp()
+            # Insert sales order lines
+            if sales_order_lines_list:
+                insert_sql = """
+                    INSERT INTO sales_order_lines (
+                        sales_order_line_id, sales_order_id, line_number, material_id,
+                        product_id, material_description, order_quantity, unit_of_measure,
+                        unit_price, net_price, requested_delivery_date, line_status,
+                        make_to_order, created_at
+                    ) VALUES (
+                        %(sales_order_line_id)s, %(sales_order_id)s, %(line_number)s, %(material_id)s,
+                        %(product_id)s, %(material_description)s, %(order_quantity)s, %(unit_of_measure)s,
+                        %(unit_price)s, %(net_price)s, %(requested_delivery_date)s, %(line_status)s,
+                        %(make_to_order)s, %(created_at)s
+                    )
+                    ON CONFLICT (sales_order_line_id) DO NOTHING
+                """
+                
+                logger.info(f"Inserting {len(sales_order_lines_list):,} sales order lines...")
+                execute_batch(cursor, insert_sql, sales_order_lines_list, page_size=5000)
+                conn.commit()
+                logger.info(f"  ✓ Flushed {len(sales_order_lines_list):,} sales order lines")
             
-            logger.info("\n3. Processing Purchase Orders...")
-            process_purchase_orders()
+            # Insert purchase requisitions
+            if purchase_requisitions_list:
+                insert_sql = """
+                    INSERT INTO purchase_requisitions (
+                        requisition_id, requisition_number, requisition_type, requisition_date,
+                        required_date, requester_id, cost_center_id, plant_id, priority,
+                        approval_status, overall_status, source_type, source_document, created_at
+                    ) VALUES (
+                        %(requisition_id)s, %(requisition_number)s, %(requisition_type)s, %(requisition_date)s,
+                        %(required_date)s, %(requester_id)s, %(cost_center_id)s, %(plant_id)s, %(priority)s,
+                        %(approval_status)s, %(overall_status)s, %(source_type)s, %(source_document)s, %(created_at)s
+                    )
+                    ON CONFLICT (requisition_number) DO NOTHING
+                """
+                
+                logger.info(f"Inserting {len(purchase_requisitions_list):,} purchase requisitions...")
+                execute_batch(cursor, insert_sql, purchase_requisitions_list, page_size=5000)
+                conn.commit()
+                logger.info(f"  ✓ Flushed {len(purchase_requisitions_list):,} purchase requisitions")
             
-            logger.info("\n4. Processing Goods Receipts...")
-            process_goods_receipts()
+            # Insert purchase orders
+            if purchase_orders_list:
+                insert_sql = """
+                    INSERT INTO purchase_orders (
+                        purchase_order_id, po_number, supplier_id, po_date, po_type,
+                        currency, po_status, total_value, created_at
+                    ) VALUES (
+                        %(purchase_order_id)s, %(po_number)s, %(supplier_id)s, %(po_date)s, %(po_type)s,
+                        %(currency)s, %(po_status)s, %(total_value)s, %(created_at)s
+                    )
+                    ON CONFLICT (po_number) DO NOTHING
+                """
+                
+                logger.info(f"Inserting {len(purchase_orders_list):,} purchase orders...")
+                execute_batch(cursor, insert_sql, purchase_orders_list, page_size=5000)
+                conn.commit()
+                logger.info(f"  ✓ Flushed {len(purchase_orders_list):,} purchase orders")
             
-            logger.info("\n5. Releasing Production Orders to MES...")
-            release_production_orders()
+            # Insert PO lines
+            if purchase_order_lines_list:
+                insert_sql = """
+                    INSERT INTO purchase_order_lines (
+                        po_line_id, purchase_order_id, line_number, material_id, material_description,
+                        order_quantity, unit_of_measure, unit_price, net_price, delivery_date,
+                        line_status, requisition_id, requisition_line, created_at
+                    ) VALUES (
+                        %(po_line_id)s, %(purchase_order_id)s, %(line_number)s, %(material_id)s, %(material_description)s,
+                        %(order_quantity)s, %(unit_of_measure)s, %(unit_price)s, %(net_price)s, %(delivery_date)s,
+                        %(line_status)s, %(requisition_id)s, %(requisition_line)s, %(created_at)s
+                    )
+                    ON CONFLICT (po_line_id) DO NOTHING
+                """
+                
+                logger.info(f"Inserting {len(purchase_order_lines_list):,} PO lines...")
+                execute_batch(cursor, insert_sql, purchase_order_lines_list, page_size=5000)
+                conn.commit()
+                logger.info(f"  ✓ Flushed {len(purchase_order_lines_list):,} PO lines")
             
-            logger.info("\n6. Receiving MES Confirmations...")
-            receive_mes_confirmations()
+            # Insert goods receipts
+            if goods_receipts_list:
+                insert_sql = """
+                    INSERT INTO goods_receipts (
+                        goods_receipt_id, gr_number, gr_date, posting_date, purchase_order_id,
+                        po_line_id, supplier_id, material_id, quantity_received, unit_of_measure,
+                        plant_id, storage_location, batch_number, quality_status, unit_price,
+                        total_value, gr_status, created_at
+                    ) VALUES (
+                        %(goods_receipt_id)s, %(gr_number)s, %(gr_date)s, %(posting_date)s, %(purchase_order_id)s,
+                        %(po_line_id)s, %(supplier_id)s, %(material_id)s, %(quantity_received)s, %(unit_of_measure)s,
+                        %(plant_id)s, %(storage_location)s, %(batch_number)s, %(quality_status)s, %(unit_price)s,
+                        %(total_value)s, %(gr_status)s, %(created_at)s
+                    )
+                    ON CONFLICT (gr_number) DO NOTHING
+                """
+                
+                logger.info(f"Inserting {len(goods_receipts_list):,} goods receipts...")
+                execute_batch(cursor, insert_sql, goods_receipts_list, page_size=5000)
+                conn.commit()
+                logger.info(f"  ✓ Flushed {len(goods_receipts_list):,} goods receipts")
             
-            logger.info("\n7. Posting Period-End Entries...")
-            post_period_end_entries()
+            # Insert MRP runs
+            if mrp_runs_list:
+                insert_sql = """
+                    INSERT INTO mrp_runs (
+                        mrp_run_id, run_number, planning_date, planning_horizon_days,
+                        planning_mode, create_purchase_requisitions, create_production_orders,
+                        run_status, started_at, completed_at, materials_planned,
+                        purchase_reqs_created, production_orders_created, created_at
+                    ) VALUES (
+                        %(mrp_run_id)s, %(run_number)s, %(planning_date)s, %(planning_horizon_days)s,
+                        %(planning_mode)s, %(create_purchase_requisitions)s, %(create_production_orders)s,
+                        %(run_status)s, %(started_at)s, %(completed_at)s, %(materials_planned)s,
+                        %(purchase_reqs_created)s, %(production_orders_created)s, %(created_at)s
+                    )
+                    ON CONFLICT (run_number) DO NOTHING
+                """
+                
+                logger.info(f"Inserting {len(mrp_runs_list):,} MRP runs...")
+                execute_batch(cursor, insert_sql, mrp_runs_list, page_size=5000)
+                conn.commit()
+                logger.info(f"  ✓ Flushed {len(mrp_runs_list):,} MRP runs")
             
-            stats['cycles_completed'] += 1
+            # Insert production orders
+            if production_orders_list:
+                insert_sql = """
+                    INSERT INTO production_orders (
+                        production_order_id, production_order_number, material_id, plant_id,
+                        sales_order_id, order_type, order_quantity, basic_start_date,
+                        basic_end_date, system_status, priority, created_at
+                    ) VALUES (
+                        %(production_order_id)s, %(production_order_number)s, %(material_id)s, %(plant_id)s,
+                        %(sales_order_id)s, %(order_type)s, %(order_quantity)s, %(basic_start_date)s,
+                        %(basic_end_date)s, %(system_status)s, %(priority)s, %(created_at)s
+                    )
+                    ON CONFLICT (production_order_number) DO NOTHING
+                """
+                
+                logger.info(f"Inserting {len(production_orders_list):,} production orders...")
+                execute_batch(cursor, insert_sql, production_orders_list, page_size=5000)
+                conn.commit()
+                logger.info(f"  ✓ Flushed {len(production_orders_list):,} production orders")
             
-            # Print stats every cycle
-            print_daily_stats()
+            # Insert inventory transactions
+            if inventory_transactions_list:
+                insert_sql = """
+                    INSERT INTO inventory_transactions (
+                        transaction_id, material_document, document_item, transaction_type,
+                        movement_type, posting_date, document_date, material_id, plant_id,
+                        storage_location, quantity, unit_of_measure, amount, purchase_order_id,
+                        goods_receipt_id, created_by, created_at
+                    ) VALUES (
+                        %(transaction_id)s, %(material_document)s, %(document_item)s, %(transaction_type)s,
+                        %(movement_type)s, %(posting_date)s, %(document_date)s, %(material_id)s, %(plant_id)s,
+                        %(storage_location)s, %(quantity)s, %(unit_of_measure)s, %(amount)s, %(purchase_order_id)s,
+                        %(goods_receipt_id)s, %(created_by)s, %(created_at)s
+                    )
+                    ON CONFLICT (transaction_id) DO NOTHING
+                """
+                
+                logger.info(f"Inserting {len(inventory_transactions_list):,} inventory transactions...")
+                execute_batch(cursor, insert_sql, inventory_transactions_list, page_size=5000)
+                conn.commit()
+                logger.info(f"  ✓ Flushed {len(inventory_transactions_list):,} inventory transactions")
             
-            elapsed = time.time() - cycle_start
-            logger.info(f"\nCycle completed in {elapsed:.1f} seconds")
+            # Insert GL transactions
+            if general_ledger_list:
+                insert_sql = """
+                    INSERT INTO general_ledger (
+                        gl_transaction_id, document_number, document_type, posting_date,
+                        document_date, gl_account, company_code, debit_amount, credit_amount,
+                        currency, text, created_at
+                    ) VALUES (
+                        %(gl_transaction_id)s, %(document_number)s, %(document_type)s, %(posting_date)s,
+                        %(document_date)s, %(gl_account)s, %(company_code)s, %(debit_amount)s, %(credit_amount)s,
+                        %(currency)s, %(text)s, %(created_at)s
+                    )
+                    ON CONFLICT (gl_transaction_id) DO NOTHING
+                """
+                
+                logger.info(f"Inserting {len(general_ledger_list):,} GL transactions...")
+                execute_batch(cursor, insert_sql, general_ledger_list, page_size=5000)
+                conn.commit()
+                logger.info(f"  ✓ Flushed {len(general_ledger_list):,} GL transactions")
             
-            # Wait until next scheduled run
-            wait_until_next_run()
+            cursor.close()
+            conn.close()
+            
+            logger.info(f"✓ All records inserted successfully")
             
         except Exception as e:
-            logger.error(f"Error in main loop: {e}", exc_info=True)
-            stats['errors'] += 1
-            time.sleep(3600)  # Wait 1 hour before retrying
+            logger.error(f"PostgreSQL error: {e}")
+            return 1
     
-    # Cleanup
-    logger.info("Shutting down...")
+    elapsed = time.time() - start_time
     
-    if pg_connection:
-        pg_connection.close()
-        logger.info("PostgreSQL connection closed")
+    # Get final counts after insertion
+    counts_after = get_all_table_counts()
     
-    print_daily_stats()
-    logger.info("ERP Daily Daemon stopped")
+    logger.info("="*80)
+    logger.info("GENERATION & INSERTION COMPLETE")
+    logger.info("="*80)
+    logger.info(f"  Total time: {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
+    logger.info("")
+    logger.info("📊 DATABASE SUMMARY")
+    logger.info("="*80)
+    
+    # Show before/after for all tables
+    tables_list = ['sales_orders', 'sales_order_lines', 'purchase_orders', 
+                   'purchase_order_lines', 'goods_receipts', 'mrp_runs',
+                   'purchase_requisitions', 'production_orders', 'inventory_transactions',
+                   'general_ledger']
+    
+    for table in tables_list:
+        before = counts_before.get(table)
+        after = counts_after.get(table)
+        
+        if before is not None and after is not None:
+            inserted = after - before
+            logger.info(f"{table:.<40} Before: {before:>10,} | After: {after:>10,} | Inserted: {inserted:>10,}")
+        else:
+            logger.info(f"{table:.<40} [Count unavailable]")
+    
+    logger.info("="*80)
     
     return 0
 
 
 if __name__ == "__main__":
-    import os
     os.makedirs('logs', exist_ok=True)
     sys.exit(main())
