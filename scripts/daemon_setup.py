@@ -22,7 +22,7 @@ import argparse
 import json
 import subprocess
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime   
 from typing import List, Dict, Tuple
 from dotenv import load_dotenv
 
@@ -164,17 +164,19 @@ class DaemonOrchestrator:
                 result["execution_time"] = (datetime.now() - start_time).total_seconds()
             
             # Parse records inserted - try multiple patterns
-            # Pattern 1: Table format (Before: X | After: Y | Inserted: Z)
-            records_pattern = r'(\w+):\s*Before:\s*(\d+)\s*\|\s*After:\s*(\d+)\s*\|\s*Inserted:\s*(\d+)'
+            # Pattern 1: Table format with padding (Before: X | After: Y | Inserted: Z)
+            records_pattern = r'(\w+).*?Before:\s*([\d,]+)\s*\|\s*After:\s*([\d,]+)\s*\|\s*Inserted:\s*([\d,]+)'
             for match in re.finditer(records_pattern, output):
                 table, before, after, inserted = match.groups()
-                result["tables"][table] = int(inserted)
-                result["total_records"] += int(inserted)
+                # Convert comma-separated numbers to integers
+                inserted_count = int(inserted.replace(',', ''))
+                result["tables"][table] = inserted_count
+                result["total_records"] += inserted_count
             
             # Pattern 2: Direct records inserted (from daemon scripts)
             # Matches: "📊 Records inserted: 86,400" or "Records inserted: 86400"
             if result["total_records"] == 0:  # Only if not already found
-                records_direct_pattern = r'�?\s*Records inserted:\s*([\d,]+)'
+                records_direct_pattern = r'Records inserted:\s*([\d,]+)'
                 for match in re.finditer(records_direct_pattern, output):
                     inserted_str = match.group(1).replace(',', '')
                     result["total_records"] += int(inserted_str)

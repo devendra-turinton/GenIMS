@@ -51,12 +51,15 @@ logger = logging.getLogger('QmsDaemon')
 pg_connection = None
 
 def get_max_id_counter(cursor, table, id_column='id'):
-    """Get the maximum ID counter from a table"""
+    """Get the maximum ID counter from a table - simplified version that avoids type issues"""
     try:
-        cursor.execute(f"SELECT COALESCE(MAX(CAST(SUBSTRING({id_column} FROM '[0-9]+') AS INTEGER)), 0) FROM {table}")
-        return cursor.fetchone()[0]
+        # For safety, just return 0 and let counters start from 1
+        # This avoids type casting issues with mixed TEXT/INTEGER columns
+        cursor.execute(f"SELECT COUNT(*) FROM {table}")
+        count = cursor.fetchone()[0]
+        return count  # Start next counter after existing records
     except Exception as e:
-        logger.warning(f"Could not get max ID for {table}: {e}")
+        logger.warning(f"Could not get record count for {table}: {e}")
         return 0
 
 def load_master_data(cursor):
@@ -128,15 +131,16 @@ def generate_batch_data(master_data, start_time, run_timestamp):
     """Generate 30 days of QMS data (14,400 5-minute intervals)"""
     logger.info("Generating batch data...")
     
-    # Initialize ID counters
+    # Initialize ID counters - extract from numeric fields only to avoid timestamp overflow
     cursor = pg_connection.cursor()
     complaint_counter = get_max_id_counter(cursor, 'customer_complaints', 'complaint_number')
     ncr_counter = get_max_id_counter(cursor, 'ncr_headers', 'ncr_number')
     capa_counter = get_max_id_counter(cursor, 'capa_headers', 'capa_number')
     kpi_counter = get_max_id_counter(cursor, 'quality_kpis', 'kpi_id')
-    alert_counter = get_max_id_counter(cursor, 'calibration_alerts', 'alert_id')
-    finding_counter = get_max_id_counter(cursor, 'audit_findings', 'finding_id')
-    datapoint_counter = get_max_id_counter(cursor, 'spc_data_points', 'data_point_id')
+    # For alert/datapoint counters, just use 1 since we'll use timestamp-based IDs
+    alert_counter = 1
+    finding_counter = get_max_id_counter(cursor, 'audit_findings', 'finding_number')
+    datapoint_counter = 1
     cursor.close()
     
     # Data containers
