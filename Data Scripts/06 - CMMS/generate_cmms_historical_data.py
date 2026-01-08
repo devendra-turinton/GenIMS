@@ -6,10 +6,14 @@ Generates 90 days of maintenance history with referential integrity
 
 import random
 import json
+import os
 from datetime import datetime, timedelta
 from typing import List, Dict
 import sys
 from pathlib import Path
+import logging
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # Add scripts to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
@@ -23,29 +27,48 @@ MRO_PARTS_COUNT = 200
 PM_SCHEDULES_PER_ASSET = 2
 WORK_ORDERS_PER_DAY = (3, 10)
 
+# Database configuration
+PG_HOST = os.getenv('POSTGRES_HOST', 'insights-db.postgres.database.azure.com')
+PG_PORT = int(os.getenv('POSTGRES_PORT', '5432'))
+PG_USER = os.getenv('POSTGRES_USER', 'turintonadmin')
+PG_PASSWORD = os.getenv('POSTGRES_PASSWORD', 'Passw0rd123!')
+CMMS_DB = os.getenv('DB_MAINTENANCE', 'genims_maintenance_db')
+MASTER_DB = os.getenv('DB_MASTER', 'genims_master_db')
+ERP_DB = os.getenv('DB_ERP', 'genims_erp_db')
+WMS_DB = os.getenv('DB_WMS', 'genims_wms_db')
+MES_DB = os.getenv('DB_MANUFACTURING', 'genims_manufacturing_db')
+
+# Logging setup
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 class CMMSDataGenerator:
     def __init__(self, master_data_file=None):
         """Initialize with master data and registry"""
         from pathlib import Path
         
+        # Initialize master data
+        self.factories = []
+        self.employees = []
+        self.production_lines = []
+        self.machines = []
+        self.warehouses = []
+        self.suppliers = []
+        
+        # Try to load from JSON file first (preferred during setup)
         if master_data_file is None:
             master_data_file = Path(__file__).parent.parent / "01 - Base Data" / "genims_master_data.json"
         
-        print(f"Loading master data from {master_data_file}...")
-        
-        with open(master_data_file, 'r') as f:
-            self.master_data = json.load(f)
+        # Load master data: prioritize JSON file, fallback to database
+        if Path(master_data_file).exists():
+            self.load_master_data_from_json(master_data_file)
+        else:
+            logger.info("JSON master data not found, attempting database connections...")
+            self.load_master_data_from_databases()
         
         # Load helper for FK validation
         self.helper = get_helper()
         self.registry = self.helper.registry
-        
-        self.factories = self.master_data['factories']
-        self.employees = self.master_data['employees']
-        self.production_lines = self.master_data.get('production_lines', [])
-        
-        # CMMS-generated master data (generated during __init__)
-        self.machines = []
         
         # CMMS Data
         self.assets = []
@@ -68,7 +91,144 @@ class CMMSDataGenerator:
             'labor': 1, 'meter': 1, 'failure': 1, 'history': 1
         }
         
-        print(f"Loaded: {len(self.factories)} factories, {len(self.machines)} machines")
+        logger.info(f"Loaded: {len(self.factories)} factories, {len(self.machines)} machines, {len(self.production_lines)} lines")
+    
+    def load_master_data_from_json(self, master_data_file):
+        """Load master data from JSON file (preferred during setup)"""
+        try:
+            logger.info(f"Loading master data from JSON: {master_data_file}")
+            
+            with open(master_data_file, 'r') as f:
+                master_data = json.load(f)
+            
+            # Load core data
+            self.factories = master_data.get('factories', [])
+            self.employees = master_data.get('employees', [])
+            self.production_lines = master_data.get('production_lines', [])
+            self.machines = master_data.get('machines', [])
+            
+            # Generate minimal external data if not available
+            self.warehouses = master_data.get('warehouses', [
+                {'warehouse_id': 'WH-000001', 'warehouse_name': 'Main Warehouse', 'warehouse_type': 'finished_goods'},
+                {'warehouse_id': 'WH-000002', 'warehouse_name': 'Parts Warehouse', 'warehouse_type': 'raw_materials'}
+            ])
+            
+            self.suppliers = master_data.get('suppliers', [
+                {'supplier_id': 'SUP-000001', 'supplier_name': 'Main Parts Supplier', 'supplier_type': 'spare_parts'},
+                {'supplier_id': 'SUP-000002', 'supplier_name': 'Equipment Supplier', 'supplier_type': 'equipment'}
+            ])
+            
+            logger.info(f"Successfully loaded from JSON: {len(self.factories)} factories, {len(self.machines)} machines, {len(self.production_lines)} lines")
+            
+        except Exception as e:
+            logger.error(f"Failed to load from JSON: {e}")
+            logger.info("Attempting database connections as fallback...")
+            self.load_master_data_from_databases()
+    
+    def load_master_data_from_databases(self):
+        """Load master data from source databases"""
+        try:
+            logger.info(f"Attempting to connect to databases on {PG_HOST}...")
+            
+            # Connect to master_db for factories and machines
+            master_conn = psycopg2.connect(
+                host=PG_HOST, port=PG_PORT, database=MASTER_DB, 
+                user=PG_USER, password=PG_PASSWORD,
+                sslmode='require', cursor_factory=RealDictCursor
+            )
+            
+            with master_conn.cursor() as master_cursor:
+                # Load factories
+                master_cursor.execute("SELECT * FROM factories LIMIT 100")
+                self.factories = [dict(row) for row in master_cursor.fetchall()]
+                
+                # Load machines
+                master_cursor.execute("SELECT * FROM machines LIMIT 500")
+                self.machines = [dict(row) for row in master_cursor.fetchall()]
+                
+                # Load production lines
+                master_cursor.execute("SELECT * FROM production_lines LIMIT 100")
+                self.production_lines = [dict(row) for row in master_cursor.fetchall()]
+                
+                # Load employees (for technicians base)
+                master_cursor.execute("SELECT * FROM employees WHERE department = 'maintenance' LIMIT 100")
+                self.employees = [dict(row) for row in master_cursor.fetchall()]
+                
+                logger.info(f"Loaded from master_db: {len(self.factories)} factories, {len(self.machines)} machines")
+            
+            # Try to load suppliers and warehouses from other databases
+            try:
+                # Connect to ERP for suppliers
+                erp_conn = psycopg2.connect(
+                    host=PG_HOST, port=PG_PORT, database=ERP_DB,
+                    user=PG_USER, password=PG_PASSWORD,
+                    sslmode='require', cursor_factory=RealDictCursor
+                )
+                
+                with erp_conn.cursor() as erp_cursor:
+                    erp_cursor.execute("SELECT supplier_id, supplier_name, supplier_type FROM suppliers WHERE supplier_type = 'spare_parts' AND is_active = true LIMIT 50")
+                    self.suppliers = [dict(row) for row in erp_cursor.fetchall()]
+                
+                erp_conn.close()
+                logger.info(f"Loaded {len(self.suppliers)} suppliers from ERP")
+                
+            except Exception as e:
+                logger.warning(f"Could not load from ERP database: {e}. Using default suppliers.")
+                self.suppliers = [
+                    {'supplier_id': 'SUP-000001', 'supplier_name': 'Main Parts Supplier', 'supplier_type': 'spare_parts'},
+                    {'supplier_id': 'SUP-000002', 'supplier_name': 'Equipment Supplier', 'supplier_type': 'equipment'}
+                ]
+                
+            try:
+                # Connect to WMS for warehouses
+                wms_conn = psycopg2.connect(
+                    host=PG_HOST, port=PG_PORT, database=WMS_DB,
+                    user=PG_USER, password=PG_PASSWORD,
+                    sslmode='require', cursor_factory=RealDictCursor
+                )
+                
+                with wms_conn.cursor() as wms_cursor:
+                    wms_cursor.execute("SELECT warehouse_id, warehouse_name, warehouse_type FROM warehouses WHERE is_active = true LIMIT 50")
+                    self.warehouses = [dict(row) for row in wms_cursor.fetchall()]
+                
+                wms_conn.close()
+                logger.info(f"Loaded {len(self.warehouses)} warehouses from WMS")
+                
+            except Exception as e:
+                logger.warning(f"Could not load from WMS database: {e}. Using default warehouses.")
+                self.warehouses = [
+                    {'warehouse_id': 'WH-000001', 'warehouse_name': 'Main Warehouse', 'warehouse_type': 'finished_goods'},
+                    {'warehouse_id': 'WH-000002', 'warehouse_name': 'Parts Warehouse', 'warehouse_type': 'raw_materials'}
+                ]
+                
+        except Exception as e:
+            logger.error(f"Error loading master data: {e}")
+            # Fallback to default data
+            self._load_fallback_data()
+        finally:
+            if 'master_conn' in locals():
+                master_conn.close()
+    
+    def _load_fallback_data(self):
+        """Load fallback data if databases are not available"""
+        logger.warning("Using fallback master data")
+        
+        # Minimal fallback factories
+        self.factories = [
+            {'factory_id': 'FAC-000001', 'factory_name': 'Main Plant', 'factory_code': 'MP'},
+            {'factory_id': 'FAC-000002', 'factory_name': 'Secondary Plant', 'factory_code': 'SP'}
+        ]
+        
+        # Generate basic machines
+        machine_types = ['pump', 'compressor', 'motor', 'conveyor']
+        for factory in self.factories:
+            for i in range(5):  # 5 machines per factory
+                self.machines.append({
+                    'machine_id': f"MCH-{factory['factory_code']}-{i+1:03d}",
+                    'factory_id': factory['factory_id'],
+                    'machine_name': f"{factory['factory_name']} Equipment {i+1}",
+                    'machine_type': random.choice(machine_types)
+                })
     
     def generate_id(self, prefix: str, counter_key: str) -> str:
         id_val = f"{prefix}-{str(self.counters[counter_key]).zfill(6)}"
@@ -77,9 +237,9 @@ class CMMSDataGenerator:
     
     def generate_all_data(self):
         """Generate all CMMS data"""
-        print(f"\n{'='*80}")
-        print(f"Generating CMMS Data ({DAYS_OF_HISTORY} days of history)")
-        print(f"{'='*80}\n")
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Generating CMMS Data ({DAYS_OF_HISTORY} days of history)")
+        logger.info(f"{'='*80}\n")
         
         # Master Data
         self.generate_machines()
@@ -100,36 +260,33 @@ class CMMSDataGenerator:
     # ========================================================================
     
     def generate_machines(self):
-        """Generate equipment/machines for each factory"""
-        print("Generating machines...")
-        machine_types = ['pump', 'compressor', 'motor', 'conveyor', 'press', 'lathe', 'drill', 'welder']
+        """Use machines from master database - no generation needed"""
+        logger.info(f"Using {len(self.machines)} machines from master database")
         
-        for factory in self.factories:
-            for i in range(ASSETS_PER_FACTORY):
-                # Assign a line if available (most equipment belongs to lines - increased to 95%)
-                line_id = None
-                if random.random() < 0.95 and self.production_lines:
-                    line_id = random.choice(self.production_lines).get('line_id')
-                
-                machine = {
-                    'machine_id': self.generate_id('MCH', 'asset'),
-                    'factory_id': factory['factory_id'],
-                    'line_id': line_id,
-                    'machine_name': f"{factory['factory_name']} - Equipment {i+1}",
-                    'machine_type': random.choice(machine_types),
-                    'manufacturer': random.choice(['Siemens', 'ABB', 'Mitsubishi', 'FANUC', 'Bosch']),
-                    'model': f"MD-{random.randint(100, 999)}",
-                    'serial_number': f"SN-{factory['factory_id']}-{i+1:04d}",
-                    'install_date': (datetime.now() - timedelta(days=random.randint(365, 1825))).strftime('%Y-%m-%d'),
-                    'status': random.choice(['operational', 'under_maintenance', 'idle'])
-                }
-                self.machines.append(machine)
-        
-        print(f"Generated {len(self.machines)} machines")
+        # If no machines loaded, generate minimal ones
+        if not self.machines:
+            logger.warning("No machines found in master database, generating basic ones")
+            machine_types = ['pump', 'compressor', 'motor', 'conveyor', 'press']
+            
+            for factory in self.factories:
+                for i in range(ASSETS_PER_FACTORY):
+                    machine = {
+                        'machine_id': self.generate_id('MCH', 'asset'),
+                        'factory_id': factory['factory_id'],
+                        'line_id': random.choice(self.production_lines)['line_id'] if self.production_lines else None,
+                        'machine_name': f"{factory['factory_name']} - Equipment {i+1}",
+                        'machine_type': random.choice(machine_types),
+                        'manufacturer': random.choice(['Siemens', 'ABB', 'Mitsubishi', 'FANUC', 'Bosch']),
+                        'model': f"MD-{random.randint(100, 999)}",
+                        'serial_number': f"SN-{factory['factory_id']}-{i+1:04d}",
+                        'install_date': (datetime.now() - timedelta(days=random.randint(365, 1825))).strftime('%Y-%m-%d'),
+                        'status': random.choice(['operational', 'under_maintenance', 'idle'])
+                    }
+                    self.machines.append(machine)
     
     def generate_failure_codes(self):
         """Generate failure classification codes"""
-        print("Generating failure codes...")
+        logger.info("Generating failure codes...")
         
         failures = [
             {'class': 'mechanical', 'type': 'wear', 'desc': 'Bearing Wear'},
@@ -158,13 +315,18 @@ class CMMSDataGenerator:
             }
             self.failure_codes.append(code)
         
-        print(f"Generated {len(self.failure_codes)} failure codes")
+        logger.info(f"Generated {len(self.failure_codes)} failure codes")
     
     def generate_assets(self):
         """Generate maintenance assets"""
-        print("Generating maintenance assets...")
+        logger.info("Generating maintenance assets...")
         
         asset_types = ['machine', 'equipment', 'vehicle', 'facility', 'instrument']
+        
+        # Ensure we have machines to create assets from
+        if not self.machines:
+            logger.warning("No machines available for asset generation")
+            return
         
         for factory in self.factories:
             # Link production machines
@@ -174,17 +336,17 @@ class CMMSDataGenerator:
                 asset = {
                     'asset_id': self.generate_id('AST', 'asset'),
                     'asset_number': f"AST-{self.counters['asset']-1:05d}",
-                    'asset_name': machine['machine_name'],
+                    'asset_name': machine.get('machine_name', f"Asset {self.counters['asset']}"),
                     'asset_type': 'machine',
                     'asset_category': 'production',
                     'asset_class': random.choice(['critical', 'essential', 'important']),
                     'machine_id': machine['machine_id'],
                     'factory_id': factory['factory_id'],
                     'line_id': machine.get('line_id'),
-                    'manufacturer': random.choice(['Siemens', 'Fanuc', 'Haas', 'DMG Mori']),
-                    'model_number': f"MDL-{random.randint(1000, 9999)}",
-                    'serial_number': f"SN{random.randint(100000, 999999)}",
-                    'installation_date': (datetime.now() - timedelta(days=random.randint(365, 3650))).strftime('%Y-%m-%d'),
+                    'manufacturer': machine.get('manufacturer', 'Unknown'),
+                    'model_number': machine.get('model', f"MDL-{random.randint(1000, 9999)}"),
+                    'serial_number': machine.get('serial_number', f"SN{random.randint(100000, 999999)}"),
+                    'installation_date': machine.get('install_date', (datetime.now() - timedelta(days=random.randint(365, 3650))).strftime('%Y-%m-%d')),
                     'criticality_rating': random.choice(['critical', 'high', 'medium']),
                     'safety_critical': random.choice([True, False]),
                     'production_critical': True,
@@ -194,31 +356,32 @@ class CMMSDataGenerator:
                     'meter_unit': 'hours',
                     'current_meter_reading': round(random.uniform(5000, 50000), 2),
                     'asset_condition': random.choice(['excellent', 'good', 'fair']),
-                    'asset_status': 'operational',
+                    'asset_status': machine.get('status', 'operational'),
                     'downtime_cost_per_hour': round(random.uniform(5000, 50000), 2),
                     'is_active': True,
                     'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
                 self.assets.append(asset)
         
-        print(f"Generated {len(self.assets)} maintenance assets")
+        logger.info(f"Generated {len(self.assets)} maintenance assets")
     
     def generate_technicians(self):
-        """Generate maintenance technicians"""
-        print("Generating maintenance technicians...")
+        """Generate maintenance technicians based on employees"""
+        logger.info("Generating maintenance technicians...")
         
         trades = ['mechanical', 'electrical', 'instrumentation', 'multi_craft']
         skill_levels = ['technician', 'senior_technician', 'specialist']
         
-        for factory in self.factories:
-            factory_code = factory.get('factory_code', f"FAC-{factory['factory_id'][-4:]}")
-            for i in range(TECHNICIANS_PER_FACTORY):
+        # Use existing employees if available, otherwise generate
+        if self.employees:
+            for employee in self.employees[:len(self.factories) * TECHNICIANS_PER_FACTORY]:
                 tech = {
                     'technician_id': self.generate_id('TECH', 'tech'),
+                    'employee_id': employee.get('employee_id'),
                     'technician_code': f"TECH{self.counters['tech']-1:04d}",
-                    'first_name': f"Tech{i+1}",
-                    'last_name': factory_code,
-                    'hire_date': (datetime.now() - timedelta(days=random.randint(365, 3650))).strftime('%Y-%m-%d'),
+                    'first_name': employee.get('first_name', f"Tech{self.counters['tech']}"),
+                    'last_name': employee.get('last_name', 'Maintenance'),
+                    'hire_date': employee.get('hire_date', (datetime.now() - timedelta(days=random.randint(365, 3650))).strftime('%Y-%m-%d')),
                     'skill_level': random.choice(skill_levels),
                     'trade': random.choice(trades),
                     'certifications': json.dumps(['forklift', 'electrical_license']),
@@ -230,23 +393,58 @@ class CMMSDataGenerator:
                     'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
                 self.technicians.append(tech)
+        else:
+            # Generate basic technicians if no employees found
+            for factory in self.factories:
+                factory_code = factory.get('factory_code', f"FAC-{factory['factory_id'][-4:]}")
+                for i in range(TECHNICIANS_PER_FACTORY):
+                    tech = {
+                        'technician_id': self.generate_id('TECH', 'tech'),
+                        'employee_id': None,
+                        'technician_code': f"TECH{self.counters['tech']-1:04d}",
+                        'first_name': f"Tech{i+1}",
+                        'last_name': factory_code,
+                        'hire_date': (datetime.now() - timedelta(days=random.randint(365, 3650))).strftime('%Y-%m-%d'),
+                        'skill_level': random.choice(skill_levels),
+                        'trade': random.choice(trades),
+                        'certifications': json.dumps(['forklift', 'electrical_license']),
+                        'primary_shift': random.choice(['day', 'evening', 'night']),
+                        'hourly_rate': round(random.uniform(500, 2000), 2),
+                        'overtime_rate': round(random.uniform(750, 3000), 2),
+                        'technician_status': 'available',
+                        'is_active': True,
+                        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    self.technicians.append(tech)
         
-        print(f"Generated {len(self.technicians)} technicians")
+        logger.info(f"Generated {len(self.technicians)} technicians")
     
     def generate_mro_parts(self):
-        """Generate MRO spare parts"""
-        print("Generating MRO spare parts...")
+        """Generate MRO spare parts with supplier validation"""
+        logger.info("Generating MRO spare parts...")
         
         part_types = ['mechanical', 'electrical', 'hydraulic', 'pneumatic', 'electronic']
         part_categories = ['spare_part', 'consumable']
         
         for i in range(MRO_PARTS_COUNT):
+            # Select supplier if available
+            supplier_id = None
+            if self.suppliers:
+                supplier_id = random.choice(self.suppliers)['supplier_id']
+            
+            # Select warehouse if available
+            warehouse_id = None
+            if self.warehouses:
+                warehouse_id = random.choice(self.warehouses)['warehouse_id']
+            
             part = {
                 'mro_part_id': self.generate_id('MRO', 'part'),
                 'part_number': f"MRO-{self.counters['part']-1:05d}",
                 'part_name': f"Spare Part {i+1}",
                 'part_category': random.choice(part_categories),
                 'part_type': random.choice(part_types),
+                'primary_supplier_id': supplier_id,
+                'warehouse_id': warehouse_id,
                 'unit_of_measure': random.choice(['EA', 'SET', 'L', 'KG']),
                 'current_stock': random.randint(0, 100),
                 'min_stock_level': random.randint(5, 20),
@@ -262,11 +460,11 @@ class CMMSDataGenerator:
             }
             self.mro_parts.append(part)
         
-        print(f"Generated {len(self.mro_parts)} MRO parts")
+        logger.info(f"Generated {len(self.mro_parts)} MRO parts")
     
     def generate_pm_schedules(self):
         """Generate PM schedules"""
-        print("Generating PM schedules...")
+        logger.info("Generating PM schedules...")
         
         for asset in self.assets:
             for pm_num in range(PM_SCHEDULES_PER_ASSET):
@@ -292,7 +490,7 @@ class CMMSDataGenerator:
                 }
                 self.pm_schedules.append(schedule)
         
-        print(f"Generated {len(self.pm_schedules)} PM schedules")
+        logger.info(f"Generated {len(self.pm_schedules)} PM schedules")
     
     # ========================================================================
     # MAINTENANCE OPERATIONS
@@ -746,7 +944,7 @@ class CMMSDataGenerator:
     
     def to_json(self, output_file='cmms_historical_data.json'):
         """Export to JSON with flat structure matching actual table names"""
-        print(f"\nExporting to JSON...")
+        logger.info(f"\nExporting to JSON...")
         
         # Generate data for empty tables
         maintenance_teams = self._generate_maintenance_teams()
@@ -799,25 +997,34 @@ class CMMSDataGenerator:
         with open(output_file, 'w') as f:
             json.dump(data, f, indent=2)
         
-        print(f"Data exported to {output_file}")
+        logger.info(f"Data exported to {output_file}")
 
 
 if __name__ == "__main__":
     from pathlib import Path
+    import sys
     
-    # Get the directory of this script (data folder)
-    script_dir = Path(__file__).parent
-    
-    # Load master data from the same folder structure
-    master_data_file = script_dir.parent / "01 - Base Data" / "genims_master_data.json"
-    
-    generator = CMMSDataGenerator(str(master_data_file))
-    generator.generate_all_data()
-    
-    # Export to JSON (in same folder as script)
-    json_file = script_dir / "genims_cmms_data.json"
-    generator.to_json(str(json_file))
-    
-    print("\n" + "="*80)
-    print("CMMS Historical Data Generation Complete!")
-    print("="*80)
+    try:
+        # Get the directory of this script (data folder)
+        script_dir = Path(__file__).parent
+        
+        # Load master data from the same folder structure
+        master_data_file = script_dir.parent / "01 - Base Data" / "genims_master_data.json"
+        
+        generator = CMMSDataGenerator(str(master_data_file))
+        generator.generate_all_data()
+        
+        # Export to JSON (in same folder as script)
+        json_file = script_dir / "genims_cmms_data.json"
+        generator.to_json(str(json_file))
+        
+        logger.info("\n" + "="*80)
+        logger.info("CMMS Historical Data Generation Complete!")
+        logger.info("="*80)
+        
+        # Explicit success exit
+        sys.exit(0)
+        
+    except Exception as e:
+        logger.error(f"CMMS generation failed: {e}")
+        sys.exit(1)

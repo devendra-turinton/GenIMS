@@ -555,7 +555,7 @@ class ERPDataGenerator:
                 
                 for line_num in range(1, num_lines + 1):
                     material = random.choice(finished_goods)
-                    quantity = random.randint(10, 100)
+                    quantity = round(random.uniform(10.0, 100.0), 4)
                     unit_price = material['standard_cost'] * random.uniform(1.2, 1.5)
                     net_price = quantity * unit_price
                     
@@ -666,7 +666,15 @@ class ERPDataGenerator:
         """Generate purchase orders"""
         print(f"Generating purchase orders for {days} days...")
         
+        # Ensure material IDs are consistent with generated materials
+        material_id_set = {m['material_id'] for m in self.materials}
         purchasable_materials = [m for m in self.materials if m['procurement_type'] in ['buy', 'both']]
+        
+        if not purchasable_materials:
+            print("WARNING: No purchasable materials found, using first 10 materials")
+            purchasable_materials = self.materials[:10] if self.materials else []
+        
+        print(f"Using {len(purchasable_materials)} purchasable materials from {len(self.materials)} total materials")
         current_date = start_date
         
         for day in range(days):
@@ -696,7 +704,7 @@ class ERPDataGenerator:
                 
                 for line_num in range(1, num_lines + 1):
                     material = random.choice(purchasable_materials)
-                    quantity = random.randint(100, 1000)
+                    quantity = round(random.uniform(100.0, 1000.0), 4)
                     unit_price = material['standard_cost'] * random.uniform(0.9, 1.1)
                     net_price = quantity * unit_price
                     
@@ -1065,7 +1073,7 @@ class ERPDataGenerator:
                 'scheduled_receipt': random.randint(0, 4000),
                 'available_inventory': random.randint(0, 3000),
                 'net_requirement': random.randint(0, 3000),
-                'planned_order_quantity': random.randint(100, 3000),
+                'planned_order_quantity': round(random.uniform(100.0, 3000.0), 4),
                 'planned_order_date': planned_order_dt.strftime('%Y-%m-%d'),
                 'lead_time_days': random.randint(1, 30)
             })
@@ -1180,6 +1188,43 @@ if __name__ == "__main__":
     # Export to JSON (in same folder as script)
     json_file = script_dir / "genims_erp_data.json"
     generator.to_json(str(json_file))
+    
+    # Validate data consistency
+    print("\n" + "="*50)
+    print("PERFORMING DATA CONSISTENCY VALIDATION")
+    print("="*50)
+    
+    # Check FK references
+    material_ids = set(m['material_id'] for m in generator.materials)
+    supplier_ids = set(s['supplier_id'] for s in generator.suppliers)
+    
+    # Validate sales order lines reference valid materials
+    invalid_materials = 0
+    for so_line in generator.sales_order_lines:
+        if so_line['material_id'] not in material_ids:
+            invalid_materials += 1
+    
+    # Validate purchase orders reference valid suppliers
+    invalid_suppliers = 0
+    for po in generator.purchase_orders:
+        if po['supplier_id'] not in supplier_ids:
+            invalid_suppliers += 1
+    
+    # Validate purchase order lines reference valid materials
+    invalid_po_materials = 0
+    for po_line in generator.purchase_order_lines:
+        if po_line['material_id'] not in material_ids:
+            invalid_po_materials += 1
+            print(f"Invalid PO line material: {po_line['material_id']}")
+    
+    print(f"✓ Material references in SO lines: {len(generator.sales_order_lines) - invalid_materials}/{len(generator.sales_order_lines)} valid")
+    print(f"✓ Material references in PO lines: {len(generator.purchase_order_lines) - invalid_po_materials}/{len(generator.purchase_order_lines)} valid")
+    print(f"✓ Supplier references: {len(generator.purchase_orders) - invalid_suppliers}/{len(generator.purchase_orders)} valid")
+    
+    if invalid_materials > 0 or invalid_suppliers > 0 or invalid_po_materials > 0:
+        print("⚠️  WARNING: Some FK references are invalid - check data quality")
+    else:
+        print("✅ All FK references are valid")
     
     print("\n" + "="*80)
     print("ERP Historical Data Generation Complete!")

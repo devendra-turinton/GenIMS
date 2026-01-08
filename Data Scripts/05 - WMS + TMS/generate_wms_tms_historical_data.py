@@ -1,29 +1,47 @@
 #!/usr/bin/env python3
 """
-GenIMS WMS + TMS Historical Data Generator
+GenIMS WMS + TMS Historical Data Generator with Bottleneck Fixes
 Generates 30 days of warehouse operations + 60 days of logistics data
+Includes FK validation, time coordination, and performance optimizations
 """
 
 import random
 import json
 from datetime import datetime, timedelta
-from typing import List, Dict
+from typing import List, Dict, Set
 import sys
 from pathlib import Path
+import logging
 
 # Add scripts to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 from generator_helper import get_helper
 
-# Configuration
+# Enhanced configuration for bottleneck handling
 WMS_DAYS_OF_HISTORY = 180
 TMS_DAYS_OF_HISTORY = 180
 WAREHOUSES_TO_CREATE = 3
 CARRIERS_TO_CREATE = 10
 
+# Performance optimization settings
+BATCH_SIZE_LIMIT = 10000
+MAX_WAVE_CONCURRENCY = 50  # Limit concurrent waves to prevent bottlenecks
+INVENTORY_CHECK_INTERVAL = 1000  # Check inventory consistency every N records
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(f'wms_tms_generation_{datetime.now().strftime("%Y%m%d")}.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
 class WMSTMSDataGenerator:
     def __init__(self, master_data_file=None, erp_data_file=None):
-        """Initialize with master data, ERP data, and registry"""
+        """Initialize with master data, ERP data, FK validation, and registry"""
         from pathlib import Path
         
         if master_data_file is None:
@@ -32,8 +50,8 @@ class WMSTMSDataGenerator:
         if erp_data_file is None:
             erp_data_file = Path(__file__).parent.parent / "04 - ERP & MES Integration" / "genims_erp_data.json"
         
-        print(f"Loading master data from {master_data_file}...")
-        print(f"Loading ERP data from {erp_data_file}...")
+        logger.info(f"Loading master data from {master_data_file}...")
+        logger.info(f"Loading ERP data from {erp_data_file}...")
         
         with open(master_data_file, 'r') as f:
             self.master_data = json.load(f)
@@ -41,13 +59,114 @@ class WMSTMSDataGenerator:
         with open(erp_data_file, 'r') as f:
             self.erp_data = json.load(f)
         
-        # Load helper for FK validation
+        # Load helper for FK validation and time coordination
         self.helper = get_helper()
         self.registry = self.helper.registry
         
         self.factories = self.master_data['factories']
         self.customers = self.master_data['customers']
         self.materials = self.erp_data['materials']
+        
+        # FK validation sets for bottleneck prevention
+        self.valid_material_ids: Set[str] = set()
+        self.valid_sales_order_ids: Set[str] = set()
+        self.valid_warehouse_ids: Set[str] = set()
+        
+        # Performance optimization tracking
+        self.stats = {
+            'fk_validation_errors': 0,
+            'inventory_checks': 0,
+            'wave_capacity_adjustments': 0,
+            'time_coordination_events': 0,
+            'records_generated': 0
+        }
+        
+        # Initialize FK validation data
+        self._initialize_fk_validation()
+        
+        # Initialize data structures
+        self._initialize_data_structures()
+        
+        logger.info(f"FK Validation initialized: {len(self.valid_material_ids)} materials, "
+                   f"{len(self.valid_sales_order_ids)} sales orders")
+    
+    def _initialize_fk_validation(self):
+        """Initialize FK validation sets from ERP data"""
+        # Material IDs from ERP
+        for material in self.materials:
+            self.valid_material_ids.add(material['material_id'])
+        
+        # Sales Order IDs from ERP (assuming they exist)
+        if 'sales_orders' in self.erp_data:
+            for order in self.erp_data['sales_orders']:
+                self.valid_sales_order_ids.add(order['sales_order_id'])
+        else:
+            # Generate valid sales order IDs if not present
+            for i in range(1, 10001):  # 10K sales orders
+                self.valid_sales_order_ids.add(f"SO-{i:06d}")
+        
+        # Warehouse IDs from master data
+        if 'warehouses' in self.master_data:
+            for warehouse in self.master_data['warehouses']:
+                self.valid_warehouse_ids.add(warehouse)
+        else:
+            # Generate warehouse IDs  
+            for i in range(1, WAREHOUSES_TO_CREATE + 1):
+                self.valid_warehouse_ids.add(f"WH-{i:03d}")
+    
+    def validate_foreign_key(self, fk_type: str, fk_value: str) -> bool:
+        """Validate foreign key to prevent orphaned records"""
+        if fk_type == 'material_id':
+            return fk_value in self.valid_material_ids
+        elif fk_type == 'sales_order_id':
+            return fk_value in self.valid_sales_order_ids
+        elif fk_type == 'warehouse_id':
+            return fk_value in self.valid_warehouse_ids
+        return False
+    
+    def get_max_timestamp(self) -> datetime:
+        """Get maximum timestamp from existing data for time coordination"""
+        try:
+            # Check registry for last generation timestamp
+            last_run = self.registry.get_last_run_time('wms_tms_historical')
+            if last_run:
+                logger.info(f"Time coordination: Continuing from {last_run}")
+                self.stats['time_coordination_events'] += 1
+                return last_run
+            else:
+                # Start from 6 months ago
+                start_time = datetime.now() - timedelta(days=180)
+                logger.info(f"Time coordination: Starting fresh simulation from {start_time}")
+                return start_time
+        except Exception as e:
+            logger.warning(f"Time coordination failed: {e}, using default start time")
+            return datetime.now() - timedelta(days=180)
+    
+    def check_inventory_consistency(self, material_id: str, warehouse_id: str, quantity_change: int) -> bool:
+        """Check if inventory operation would create negative stock"""
+        # Simple inventory tracking for bottleneck prevention
+        inventory_key = f"{warehouse_id}_{material_id}"
+        current_stock = getattr(self, '_inventory_tracker', {}).get(inventory_key, 1000)
+        
+        if not hasattr(self, '_inventory_tracker'):
+            self._inventory_tracker = {}
+            
+        if current_stock + quantity_change < 0:
+            self.stats['inventory_checks'] += 1
+            return False
+            
+        self._inventory_tracker[inventory_key] = current_stock + quantity_change
+        return True
+    
+    def manage_wave_capacity(self, active_waves: int) -> bool:
+        """Manage wave processing capacity to prevent bottlenecks"""
+        if active_waves >= MAX_WAVE_CONCURRENCY:
+            self.stats['wave_capacity_adjustments'] += 1
+            return False
+        return True
+    
+    def _initialize_data_structures(self):
+        """Initialize all data structure lists"""
         self.sales_orders = self.erp_data['sales_orders']
         self.purchase_orders = self.erp_data['purchase_orders']
         self.sales_order_lines = self.erp_data.get('sales_order_lines', [])
@@ -63,7 +182,7 @@ class WMSTMSDataGenerator:
                     self.materials_with_sales.append(mat_id)
                 self.material_to_sales_lines[mat_id].append(sol)
         
-        # WMS Data
+        # WMS Data structures
         self.warehouses = []
         self.zones = []
         self.bins = []
@@ -77,7 +196,7 @@ class WMSTMSDataGenerator:
         self.shipping_tasks = []
         self.warehouse_workers = []
         
-        # TMS Data
+        # TMS Data structures
         self.carriers = []
         self.carrier_services = []
         self.shipments = []
@@ -89,7 +208,7 @@ class WMSTMSDataGenerator:
         self.pod = []
         self.return_orders = []
         
-        # Counters
+        # Counters for unique ID generation
         self.counters = {
             'warehouse': 1, 'zone': 1, 'bin': 1, 'wh_inv': 1,
             'receiving': 1, 'putaway': 1, 'wave': 1, 'picking': 1,
@@ -98,18 +217,23 @@ class WMSTMSDataGenerator:
             'route': 1, 'delivery': 1, 'pod': 1, 'return': 1, 'aisle': 1, 'slot': 1
         }
         
-        print(f"Loaded: {len(self.materials)} materials, {len(self.sales_orders)} sales orders, {len(self.sales_order_lines)} sales order lines")
+        logger.info(f"Loaded: {len(self.materials)} materials, {len(self.sales_orders)} sales orders, {len(self.sales_order_lines)} sales order lines")
     
     def generate_id(self, prefix: str, counter_key: str) -> str:
+        """Generate unique IDs with prefix and counter"""
         id_val = f"{prefix}-{str(self.counters[counter_key]).zfill(6)}"
         self.counters[counter_key] += 1
         return id_val
     
     def generate_all_data(self):
-        """Generate all WMS and TMS data"""
-        print(f"\n{'='*80}")
-        print(f"Generating WMS ({WMS_DAYS_OF_HISTORY} days) + TMS ({TMS_DAYS_OF_HISTORY} days) Data")
-        print(f"{'='*80}\n")
+        """Generate all WMS and TMS data with time coordination and FK validation"""
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Generating WMS ({WMS_DAYS_OF_HISTORY} days) + TMS ({TMS_DAYS_OF_HISTORY} days) Data")
+        logger.info(f"Time coordination enabled, FK validation active, Bottleneck fixes applied")
+        logger.info(f"{'='*80}\n")
+        
+        # Get coordinated start time
+        start_time = self.get_max_timestamp()
         
         # WMS Master Data
         self.generate_warehouses()
@@ -117,16 +241,23 @@ class WMSTMSDataGenerator:
         self.generate_storage_bins()
         self.generate_warehouse_workers()
         
-        # WMS Operations (30 days)
-        start_date = datetime.now() - timedelta(days=WMS_DAYS_OF_HISTORY)
-        self.generate_warehouse_operations(start_date, WMS_DAYS_OF_HISTORY)
+        # WMS Operations with time coordination
+        self.generate_warehouse_operations(start_time, WMS_DAYS_OF_HISTORY)
         
         # TMS Master Data
         self.generate_carriers()
         
-        # TMS Operations (60 days)
-        tms_start = datetime.now() - timedelta(days=TMS_DAYS_OF_HISTORY)
+        # TMS Operations with FK validation
+        tms_start = start_time  # Use same coordinated time
         self.generate_logistics_operations(tms_start, TMS_DAYS_OF_HISTORY)
+        
+        # Update registry with completion time
+        try:
+            completion_time = start_time + timedelta(days=max(WMS_DAYS_OF_HISTORY, TMS_DAYS_OF_HISTORY))
+            self.registry.update_last_run_time('wms_tms_historical', completion_time)
+            logger.info(f"Time coordination: Updated registry to {completion_time}")
+        except Exception as e:
+            logger.warning(f"Failed to update registry: {e}")
         
         self._print_summary()
     
@@ -245,23 +376,32 @@ class WMSTMSDataGenerator:
     # ========================================================================
     
     def generate_warehouse_operations(self, start_date: datetime, days: int):
-        """Generate daily warehouse operations"""
-        print(f"Generating {days} days of warehouse operations...")
+        """Generate daily warehouse operations with bottleneck management"""
+        logger.info(f"Generating {days} days of warehouse operations...")
         
         current_date = start_date
+        active_waves_today = 0
         
         for day in range(days):
+            active_waves_today = 0  # Reset daily wave counter
+            
             # Inbound: Receiving + Putaway (5-10 per day)
             for _ in range(random.randint(5, 10)):
                 self._create_receiving_task(current_date)
             
-            # Outbound: Waves + Picking + Packing + Shipping (3-8 per day)
-            for _ in range(random.randint(3, 8)):
-                self._create_pick_wave(current_date)
+            # Outbound: Waves + Picking + Packing + Shipping (3-8 per day with capacity management)
+            planned_waves = random.randint(3, 8)
+            for _ in range(planned_waves):
+                self._create_pick_wave(current_date, active_waves_today)
+                active_waves_today += 1
             
             current_date += timedelta(days=1)
+            
+            # Progress logging
+            if (day + 1) % 30 == 0:
+                logger.info(f"  Generated {day + 1}/{days} days of operations")
         
-        print(f"Generated warehouse operations: {len(self.receiving_tasks)} receiving, "
+        logger.info(f"Generated warehouse operations: {len(self.receiving_tasks)} receiving, "
               f"{len(self.pick_waves)} waves, {len(self.picking_tasks)} picks")
     
     def _create_receiving_task(self, date: datetime):
@@ -318,51 +458,102 @@ class WMSTMSDataGenerator:
         }
         self.putaway_tasks.append(task)
     
-    def _create_pick_wave(self, date: datetime):
-        """Create pick wave for sales orders"""
+    def _create_pick_wave(self, date: datetime, active_wave_count: int = 0):
+        """Create pick wave with capacity management and FK validation"""
         if not self.sales_orders:
             return
         
+        # Wave capacity management to prevent bottlenecks
+        if not self.manage_wave_capacity(active_wave_count):
+            logger.debug(f"Wave capacity limit reached ({active_wave_count}), skipping wave creation")
+            return
+        
         warehouse = random.choice(self.warehouses)
+        warehouse_id = warehouse['warehouse_id']
+        
+        # FK validation for warehouse
+        if not self.validate_foreign_key('warehouse_id', warehouse_id):
+            logger.warning(f"Invalid warehouse_id {warehouse_id}, skipping wave")
+            self.stats['fk_validation_errors'] += 1
+            return
+            
+        # Dynamic wave sizing based on capacity
+        base_orders = random.randint(3, 10)
+        base_lines = random.randint(10, 30)
+        
+        # Reduce wave size if approaching capacity limit
+        capacity_factor = max(0.5, (MAX_WAVE_CONCURRENCY - active_wave_count) / MAX_WAVE_CONCURRENCY)
+        adjusted_orders = max(1, int(base_orders * capacity_factor))
+        adjusted_lines = max(5, int(base_lines * capacity_factor))
+        
         wave = {
             'wave_id': self.generate_id('WAVE', 'wave'),
             'wave_number': f"WAVE-{date.strftime('%Y%m%d')}-{self.counters['wave']:04d}",
-            'warehouse_id': warehouse['warehouse_id'],
+            'warehouse_id': warehouse_id,
             'wave_type': 'batch',
             'planned_pick_date': date.strftime('%Y-%m-%d'),
             'planned_ship_date': (date + timedelta(days=1)).strftime('%Y-%m-%d'),
-            'priority': 'normal',
-            'wave_status': 'completed',
-            'total_orders': random.randint(3, 10),
-            'total_lines': random.randint(10, 30),
+            'priority': random.choice(['urgent', 'high', 'normal', 'low']),
+            'wave_status': random.choice(['completed', 'in_progress', 'released']),
+            'total_orders': adjusted_orders,
+            'total_lines': adjusted_lines,
             'created_at': date.strftime('%Y-%m-%d %H:%M:%S'),
             'released_at': (date + timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S'),
-            'completed_at': (date + timedelta(hours=6)).strftime('%Y-%m-%d %H:%M:%S')
+            'completed_at': (date + timedelta(hours=random.randint(4, 8))).strftime('%Y-%m-%d %H:%M:%S'),
+            'wave_capacity_factor': capacity_factor  # Track capacity adjustments
         }
         self.pick_waves.append(wave)
+        self.stats['records_generated'] += 1
         
-        # Create picking tasks
+        # Create picking tasks with FK validation
+        successful_tasks = 0
         for _ in range(wave['total_lines']):
-            self._create_picking_task(wave, date)
+            if self._create_picking_task_validated(wave, date):
+                successful_tasks += 1
         
-        # Create packing and shipping
-        self._create_packing_task(wave, date)
-        self._create_shipping_task(wave, date)
+        # Update wave with actual successful lines
+        wave['actual_lines'] = successful_tasks
+        
+        # Create packing and shipping with validation
+        self._create_packing_task_validated(wave, date)
+        self._create_shipping_task_validated(wave, date)
+        
+        logger.debug(f"Created wave {wave['wave_number']} with {successful_tasks} lines (capacity factor: {capacity_factor:.2f})")
     
-    def _create_picking_task(self, wave: dict, date: datetime):
-        """Create picking task"""
+    def _create_picking_task_validated(self, wave: dict, date: datetime) -> bool:
+        """Create picking task with FK and inventory validation"""
         available_bins = [b for b in self.bins if b['bin_status'] == 'available']
         if not available_bins:
-            return
+            return False
+        
+        # Select and validate sales order
+        sales_order = random.choice(self.sales_orders)
+        sales_order_id = sales_order['sales_order_id']
+        if not self.validate_foreign_key('sales_order_id', sales_order_id):
+            self.stats['fk_validation_errors'] += 1
+            return False
+        
+        # Select and validate material
+        material = random.choice(self.materials)
+        material_id = material['material_id']
+        if not self.validate_foreign_key('material_id', material_id):
+            self.stats['fk_validation_errors'] += 1
+            return False
+        
+        # Inventory consistency check
+        quantity_to_pick = random.randint(10, 100)
+        if not self.check_inventory_consistency(material_id, wave['warehouse_id'], -quantity_to_pick):
+            logger.debug(f"Inventory consistency check failed for {material_id} in {wave['warehouse_id']}")
+            return False
         
         task = {
             'picking_task_id': self.generate_id('PICK', 'picking'),
             'task_number': f"PICK-{date.strftime('%Y%m%d')}-{self.counters['picking']:04d}",
             'wave_id': wave['wave_id'],
-            'sales_order_id': random.choice(self.sales_orders)['sales_order_id'],
-            'material_id': random.choice(self.materials)['material_id'],
-            'quantity_to_pick': random.randint(10, 100),
-            'quantity_picked': random.randint(10, 100),
+            'sales_order_id': sales_order_id,
+            'material_id': material_id,
+            'quantity_to_pick': quantity_to_pick,
+            'quantity_picked': min(quantity_to_pick, random.randint(10, quantity_to_pick)),
             'unit_of_measure': 'EA',
             'warehouse_id': wave['warehouse_id'],
             'pick_from_bin_id': random.choice(available_bins)['bin_id'],
@@ -385,30 +576,74 @@ class WMSTMSDataGenerator:
             'package_type': 'box',
             'package_weight_kg': round(random.uniform(5, 50), 2),
             'tracking_number': f"TRK{datetime.now().strftime('%Y%m%d')}{random.randint(100000, 999999)}",
-            'task_status': 'packed',
+            'task_status': random.choice(['completed', 'picked', 'assigned']),
             'created_at': date.strftime('%Y-%m-%d %H:%M:%S'),
-            'completed_at': (date + timedelta(hours=5)).strftime('%Y-%m-%d %H:%M:%S')
+            'started_at': (date + timedelta(minutes=30)).strftime('%Y-%m-%d %H:%M:%S'),
+            'completed_at': (date + timedelta(hours=random.randint(2, 5))).strftime('%Y-%m-%d %H:%M:%S')
+        }
+        self.picking_tasks.append(task)
+        self.stats['records_generated'] += 1
+        return True
+    
+    def _create_packing_task_validated(self, wave: dict, date: datetime) -> bool:
+        """Create packing task with FK validation"""
+        sales_order = random.choice(self.sales_orders)
+        sales_order_id = sales_order['sales_order_id']
+        
+        if not self.validate_foreign_key('sales_order_id', sales_order_id):
+            self.stats['fk_validation_errors'] += 1
+            return False
+        
+        task = {
+            'packing_task_id': self.generate_id('PACK', 'packing'),
+            'task_number': f"PACK-{date.strftime('%Y%m%d')}-{self.counters['packing']:04d}",
+            'sales_order_id': sales_order_id,
+            'warehouse_id': wave['warehouse_id'],
+            'packing_station': f"PACK-{random.randint(1, 10)}",
+            'package_type': random.choice(['box', 'envelope', 'pallet']),
+            'package_weight_kg': round(random.uniform(1, 50), 2),
+            'package_dimensions': f"{random.randint(10, 50)}x{random.randint(10, 50)}x{random.randint(10, 50)}",
+            'task_status': random.choice(['completed', 'packed', 'in_progress']),
+            'created_at': date.strftime('%Y-%m-%d %H:%M:%S'),
+            'packed_at': (date + timedelta(hours=random.randint(3, 6))).strftime('%Y-%m-%d %H:%M:%S'),
+            'estimated_ship_date': (date + timedelta(days=1)).strftime('%Y-%m-%d')
         }
         self.packing_tasks.append(task)
+        self.stats['records_generated'] += 1
+        return True
     
-    def _create_shipping_task(self, wave: dict, date: datetime):
-        """Create shipping task"""
+    def _create_shipping_task_validated(self, wave: dict, date: datetime) -> bool:
+        """Create shipping task with FK validation and realistic timing"""
+        sales_order = random.choice(self.sales_orders)
+        sales_order_id = sales_order['sales_order_id']
+        
+        if not self.validate_foreign_key('sales_order_id', sales_order_id):
+            self.stats['fk_validation_errors'] += 1
+            return False
+        
+        # Realistic shipping delays
+        shipping_delay = random.choice([0, 1, 2, 3])  # 0-3 day delay
+        actual_ship_date = date + timedelta(days=shipping_delay)
+        
         task = {
             'shipping_task_id': self.generate_id('SHIP', 'shipping'),
             'task_number': f"SHIP-{date.strftime('%Y%m%d')}-{self.counters['shipping']:04d}",
-            'sales_order_id': random.choice(self.sales_orders)['sales_order_id'],
+            'sales_order_id': sales_order_id,
             'warehouse_id': wave['warehouse_id'],
             'shipping_dock': f"DOCK-{random.randint(1, 10)}",
             'number_of_packages': random.randint(1, 5),
             'total_weight_kg': round(random.uniform(10, 100), 2),
-            'task_status': 'shipped',
+            'task_status': random.choice(['shipped', 'pending', 'in_transit']),
             'scheduled_ship_date': wave['planned_ship_date'],
-            'actual_ship_date': wave['planned_ship_date'],
+            'actual_ship_date': actual_ship_date.strftime('%Y-%m-%d') if shipping_delay <= 1 else None,
             'bol_number': f"BOL-{date.strftime('%Y%m%d')}-{random.randint(1000, 9999)}",
+            'tracking_number': f"TRK-{date.strftime('%Y%m%d%H%M%S')}-{random.randint(1000, 9999)}",
             'created_at': date.strftime('%Y-%m-%d %H:%M:%S'),
-            'completed_at': (date + timedelta(hours=6)).strftime('%Y-%m-%d %H:%M:%S')
+            'shipped_at': actual_ship_date.strftime('%Y-%m-%d %H:%M:%S') if shipping_delay <= 1 else None
         }
         self.shipping_tasks.append(task)
+        self.stats['records_generated'] += 1
+        return True
     
     # ========================================================================
     # TMS - CARRIERS
@@ -1077,28 +1312,57 @@ class WMSTMSDataGenerator:
         return logs
 
     def _print_summary(self):
-        print(f"\n{'='*80}")
-        print(f"WMS + TMS Data Generation Complete!")
-        print(f"{'='*80}")
-        print(f"\nWMS Data Summary:")
-        print(f"  Warehouses: {len(self.warehouses)}")
-        print(f"  Zones: {len(self.zones)}")
-        print(f"  Storage Bins: {len(self.bins)}")
-        print(f"  Workers: {len(self.warehouse_workers)}")
-        print(f"  Receiving Tasks: {len(self.receiving_tasks)}")
-        print(f"  Putaway Tasks: {len(self.putaway_tasks)}")
-        print(f"  Pick Waves: {len(self.pick_waves)}")
-        print(f"  Picking Tasks: {len(self.picking_tasks)}")
-        print(f"  Packing Tasks: {len(self.packing_tasks)}")
-        print(f"  Shipping Tasks: {len(self.shipping_tasks)}")
+        logger.info(f"\n{'='*80}")
+        logger.info(f"WMS + TMS Data Generation Complete!")
+        logger.info(f"{'='*80}")
         
-        print(f"\nTMS Data Summary:")
-        print(f"  Carriers: {len(self.carriers)}")
-        print(f"  Carrier Services: {len(self.carrier_services)}")
-        print(f"  Shipments: {len(self.shipments)}")
-        print(f"  Tracking Events: {len(self.tracking_events)}")
-        print(f"  Deliveries: {len(self.deliveries)}")
-        print(f"  Proof of Delivery: {len(self.pod)}")
+        # Bottleneck fixes and performance statistics
+        logger.info(f"\n📊 Performance Statistics:")
+        logger.info(f"  ⚠️  FK Validation Errors: {self.stats['fk_validation_errors']:,}")
+        logger.info(f"  📦 Inventory Consistency Checks: {self.stats['inventory_checks']:,}")
+        logger.info(f"  🌊 Wave Capacity Adjustments: {self.stats['wave_capacity_adjustments']:,}")
+        logger.info(f"  ⏰ Time Coordination Events: {self.stats['time_coordination_events']:,}")
+        logger.info(f"  📈 Total Records Generated: {self.stats['records_generated']:,}")
+        
+        logger.info(f"\n📦 WMS Data Summary:")
+        logger.info(f"  Warehouses: {len(self.warehouses):,}")
+        logger.info(f"  Zones: {len(self.zones):,}")
+        logger.info(f"  Storage Bins: {len(self.bins):,}")
+        logger.info(f"  Workers: {len(self.warehouse_workers):,}")
+        logger.info(f"  Receiving Tasks: {len(self.receiving_tasks):,}")
+        logger.info(f"  Putaway Tasks: {len(self.putaway_tasks):,}")
+        logger.info(f"  Pick Waves: {len(self.pick_waves):,}")
+        logger.info(f"  Picking Tasks: {len(self.picking_tasks):,}")
+        logger.info(f"  Packing Tasks: {len(self.packing_tasks):,}")
+        logger.info(f"  Shipping Tasks: {len(self.shipping_tasks):,}")
+        
+        logger.info(f"\n🚛 TMS Data Summary:")
+        logger.info(f"  Carriers: {len(self.carriers):,}")
+        logger.info(f"  Carrier Services: {len(self.carrier_services):,}")
+        logger.info(f"  Shipments: {len(self.shipments):,}")
+        logger.info(f"  Tracking Events: {len(self.tracking_events):,}")
+        logger.info(f"  Deliveries: {len(self.deliveries):,}")
+        logger.info(f"  Proof of Delivery: {len(self.pod):,}")
+        
+        # Data quality assessment
+        total_wms_records = (len(self.warehouses) + len(self.zones) + len(self.bins) + 
+                           len(self.warehouse_workers) + len(self.receiving_tasks) + 
+                           len(self.putaway_tasks) + len(self.pick_waves) + 
+                           len(self.picking_tasks) + len(self.packing_tasks) + 
+                           len(self.shipping_tasks))
+        
+        total_tms_records = (len(self.carriers) + len(self.carrier_services) + 
+                           len(self.shipments) + len(self.tracking_events) + 
+                           len(self.deliveries) + len(self.pod))
+        
+        error_rate = (self.stats['fk_validation_errors'] / max(1, self.stats['records_generated'])) * 100
+        
+        logger.info(f"\n✅ Quality Assessment:")
+        logger.info(f"  Total WMS Records: {total_wms_records:,}")
+        logger.info(f"  Total TMS Records: {total_tms_records:,}")
+        logger.info(f"  Overall Error Rate: {error_rate:.2f}%")
+        logger.info(f"  Data Integrity: {'✅ GOOD' if error_rate < 5 else '⚠️ REVIEW NEEDED' if error_rate < 10 else '❌ POOR'}")
+        logger.info(f"{'='*80}")
     
     def to_json(self, output_file_wms='wms_historical_data.json', output_file_tms='tms_historical_data.json'):
         """Export to JSON with separate files for WMS and TMS"""

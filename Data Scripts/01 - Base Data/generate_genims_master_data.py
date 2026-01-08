@@ -119,6 +119,27 @@ PRODUCTS = [
     # Transmission Components
     {"code": "TRAN-001", "name": "Clutch Assembly", "category": "transmission", "type": "assembly", "components": 9, "cycle_time": 420, "weight": 6.5},
     {"code": "TRAN-002", "name": "Gear Set", "category": "transmission", "type": "component", "components": 5, "cycle_time": 300, "weight": 4.2},
+    
+    # Engine Components
+    {"code": "ENG-001", "name": "Engine Block Assembly", "category": "engine_components", "type": "assembly", "components": 45, "cycle_time": 1200, "weight": 85.5},
+    {"code": "ENG-002", "name": "Cylinder Head", "category": "engine_components", "type": "component", "components": 16, "cycle_time": 480, "weight": 18.2},
+    {"code": "ENG-003", "name": "Piston Assembly", "category": "engine_components", "type": "component", "components": 6, "cycle_time": 240, "weight": 1.8},
+    {"code": "ENG-004", "name": "Crankshaft", "category": "engine_components", "type": "component", "components": 1, "cycle_time": 600, "weight": 22.5},
+    {"code": "ENG-005", "name": "Camshaft", "category": "engine_components", "type": "component", "components": 1, "cycle_time": 450, "weight": 5.2},
+    
+    # Body Parts
+    {"code": "BDY-001", "name": "Door Assembly - Front", "category": "body_parts", "type": "assembly", "components": 25, "cycle_time": 900, "weight": 45.0},
+    {"code": "BDY-002", "name": "Door Assembly - Rear", "category": "body_parts", "type": "assembly", "components": 22, "cycle_time": 850, "weight": 42.5},
+    {"code": "BDY-003", "name": "Roof Panel", "category": "body_parts", "type": "component", "components": 1, "cycle_time": 600, "weight": 35.0},
+    {"code": "BDY-004", "name": "Floor Pan Assembly", "category": "body_parts", "type": "assembly", "components": 8, "cycle_time": 480, "weight": 55.5},
+    {"code": "BDY-005", "name": "Trunk Lid", "category": "body_parts", "type": "component", "components": 1, "cycle_time": 300, "weight": 18.2},
+    
+    # Exhaust System Components
+    {"code": "EXH-001", "name": "Exhaust Manifold", "category": "exhaust", "type": "component", "components": 5, "cycle_time": 360, "weight": 8.5},
+    {"code": "EXH-002", "name": "Catalytic Converter", "category": "exhaust", "type": "assembly", "components": 6, "cycle_time": 240, "weight": 5.2},
+    {"code": "EXH-003", "name": "Muffler Assembly", "category": "exhaust", "type": "assembly", "components": 4, "cycle_time": 300, "weight": 12.0},
+    {"code": "EXH-004", "name": "Exhaust Pipe Section", "category": "exhaust", "type": "component", "components": 1, "cycle_time": 180, "weight": 4.2},
+    {"code": "EXH-005", "name": "Oxygen Sensor", "category": "exhaust", "type": "component", "components": 2, "cycle_time": 90, "weight": 0.4},
 ]
 
 CUSTOMERS = [
@@ -133,6 +154,43 @@ CUSTOMERS = [
     {"code": "MERC-DE", "name": "Mercedes-Benz Group", "type": "oem", "country": "Germany", "region": "Europe", "segment": "automotive_oem"},
     {"code": "VOLK-DE", "name": "Volkswagen AG", "type": "oem", "country": "Germany", "region": "Europe", "segment": "automotive_oem"},
 ]
+
+
+# Machine type to required sensor types mapping
+MACHINE_TYPE_SENSORS = {
+    "robot_arm": ["temperature", "current", "vibration", "force", "torque"],
+    "cnc_mill": ["temperature", "vibration", "force", "pressure", "speed"],
+    "cnc_lathe": ["temperature", "vibration", "speed", "torque", "pressure"],
+    "drill_press": ["temperature", "vibration", "force", "torque"],
+    "press_fit": ["force", "pressure", "displacement", "temperature"],
+    "conveyor": ["temperature", "speed", "vibration", "current"],
+    "screw_driver": ["torque", "current", "force"],
+    "pick_place": ["temperature", "vibration", "force", "current"],
+    "spray_booth": ["temperature", "pressure", "flow", "voltage"],
+    "powder_coating": ["temperature", "voltage", "current"],
+    "curing_oven": ["temperature", "flow", "pressure"],
+    "inspection_booth": ["temperature", "voltage", "current"],
+    "spot_welder": ["current", "voltage", "force", "temperature"],
+    "arc_welder": ["current", "voltage", "temperature"],
+    "laser_welder": ["temperature", "voltage"],
+    "leak_tester": ["pressure", "flow", "temperature"],
+    "torque_tester": ["torque", "force", "temperature"],
+    "dimension_scanner": ["displacement", "temperature"],
+    "x_ray": ["voltage", "temperature"],
+    "ultrasonic_tester": ["temperature", "voltage", "current"],
+    "grinding_machine": ["temperature", "vibration", "speed"],
+    "boring_machine": ["temperature", "vibration", "speed", "torque"],
+    "surface_prep": ["temperature", "pressure", "flow"],
+    "mig_welder": ["current", "voltage", "temperature"],
+    "robot_welder": ["current", "voltage", "temperature", "force"]
+}
+
+# Customer type to product category preferences
+CUSTOMER_PRODUCT_PREFERENCES = {
+    "oem": ["suspension", "brake", "electrical", "steering", "transmission", "engine_components", "body_parts", "exhaust"],
+    "aftermarket": ["suspension", "brake", "electrical"],
+    "commercial": ["engine_components", "transmission", "steering", "electrical"]
+}
 
 MACHINE_MANUFACTURERS = {
     "robot_arm": ["Fanuc", "Kuka", "ABB", "Yaskawa"],
@@ -164,6 +222,7 @@ class DataGenerator:
         self.customers = []
         self.line_product_mapping = []
         self.customer_product_mapping = []
+        self.shift_map = {}  # Map factory_id -> {shift_name: shift_id}
         
     def generate_id(self, prefix: str, index: int) -> str:
         """Generate unique ID with prefix using registry"""
@@ -295,14 +354,24 @@ class DataGenerator:
         print(f"Generated {len(self.machines)} machines")
     
     def generate_sensors(self):
-        """Generate sensor master data"""
+        """Generate sensor master data - machine-type aware assignment"""
         print("Generating sensors...")
         sensor_counter = 1
         
         for machine in self.machines:
-            num_sensors = random.randint(*SENSORS_PER_MACHINE)
-            sensor_types_list = list(SENSOR_TYPES.keys())
-            selected_sensors = random.sample(sensor_types_list, min(num_sensors, len(sensor_types_list)))
+            machine_type = machine["machine_type"]
+            
+            # Get required sensors for this machine type
+            required_sensors = MACHINE_TYPE_SENSORS.get(machine_type, ["temperature", "vibration"])
+            # Limit to available sensors for this machine
+            num_sensors = min(random.randint(*SENSORS_PER_MACHINE), len(SENSOR_TYPES))
+            
+            # Ensure at least required sensors, then add random ones
+            selected_sensors = list(required_sensors[:min(len(required_sensors), num_sensors)])
+            remaining_needed = num_sensors - len(selected_sensors)
+            if remaining_needed > 0:
+                extra_sensors = [s for s in SENSOR_TYPES.keys() if s not in selected_sensors]
+                selected_sensors.extend(random.sample(extra_sensors, min(remaining_needed, len(extra_sensors))))
             
             for idx, sensor_type in enumerate(selected_sensors):
                 sensor_config = SENSOR_TYPES[sensor_type]
@@ -347,10 +416,10 @@ class DataGenerator:
         
         # Register sensor IDs with registry
         self.registry.register_master_ids('sensor', self.sensors)
-        print(f"Generated {len(self.sensors)} sensors")
+        print(f"Generated {len(self.sensors)} sensors (machine-type aware)")
     
     def generate_employees(self):
-        """Generate employee master data"""
+        """Generate employee master data with role distribution per line type"""
         print("Generating employees...")
         employee_counter = 1
         
@@ -363,10 +432,35 @@ class DataGenerator:
         for factory in self.factories:
             num_employees = random.randint(*EMPLOYEES_PER_FACTORY)
             factory_lines = [line for line in self.production_lines if line["factory_id"] == factory["factory_id"]]
+            factory_shifts = [s for s in self.shifts if s["factory_id"] == factory["factory_id"]]
             
             for _ in range(num_employees):
-                # Select role based on distribution
-                role = random.choices(list(EMPLOYEE_ROLES.keys()), weights=list(EMPLOYEE_ROLES.values()))[0]
+                # Select line and adjust role weights based on line type
+                line = random.choice(factory_lines) if factory_lines else None
+                line_type = line["line_type"] if line else "assembly"
+                
+                # Vary employee roles by line type
+                role_weights = EMPLOYEE_ROLES.copy()
+                if line_type == "testing":
+                    # Testing lines need more QC inspectors
+                    role_weights["quality_inspector"] = 0.25
+                    role_weights["quality_engineer"] = 0.05
+                    role_weights["operator"] = 0.30
+                elif line_type == "assembly":
+                    # Assembly lines need more operators
+                    role_weights["operator"] = 0.55
+                    role_weights["quality_inspector"] = 0.08
+                elif line_type == "machining":
+                    # Machining lines need more technicians and engineers
+                    role_weights["technician"] = 0.25
+                    role_weights["production_engineer"] = 0.08
+                    role_weights["operator"] = 0.35
+                
+                # Normalize weights
+                total_weight = sum(role_weights.values())
+                role_weights = {k: v/total_weight for k, v in role_weights.items()}
+                
+                role = random.choices(list(role_weights.keys()), weights=list(role_weights.values()))[0]
                 
                 # Determine department
                 department = None
@@ -377,26 +471,21 @@ class DataGenerator:
                 if not department:
                     department = "production"
                 
-                # Assign line (for production roles, maintenance, and 60% of other staff working in factories)
-                line_id = None
-                if role in ["operator", "supervisor", "quality_inspector", "technician", "maintenance_engineer"]:
-                    # Production-related roles: 90% get assigned to a line
-                    if factory_lines and random.random() < 0.90:
-                        line_id = random.choice(factory_lines)["line_id"]
-                elif factory_lines and random.random() < 0.60:
-                    # Other roles: 60% get assigned to support a line (engineers, planners, etc)
-                    line_id = random.choice(factory_lines)["line_id"]
-                
-                # Assign shift
-                if role in ["operator", "technician", "quality_inspector", "supervisor"]:
-                    shift = random.choice(["shift_a", "shift_b", "shift_c", "weekend_a", "weekend_b"])
-                else:
-                    shift = "general"
-                
                 # Generate employee data
                 first_name = random.choice(first_names)
                 last_name = random.choice(last_names)
                 experience_years = round(random.uniform(0.5, 25), 2)
+                
+                # Get shift_id from factory's shifts (FK reference instead of string)
+                shift_id = None
+                if factory_shifts:
+                    if role in ["operator", "technician", "quality_inspector", "supervisor"]:
+                        # Shift workers get actual shifts
+                        shift_id = random.choice(factory_shifts)["shift_id"]
+                    else:
+                        # Office workers get general shift
+                        general_shifts = [s for s in factory_shifts if s["shift_name"] == "general"]
+                        shift_id = general_shifts[0]["shift_id"] if general_shifts else random.choice(factory_shifts)["shift_id"]
                 
                 skill_level = "trainee" if experience_years < 2 else \
                              "skilled" if experience_years < 5 else \
@@ -405,7 +494,8 @@ class DataGenerator:
                 employee = {
                     "employee_id": self.generate_id("employee", employee_counter),
                     "factory_id": factory["factory_id"],  # FK - valid from registry
-                    "line_id": line_id,  # Optional FK
+                    "line_id": line["line_id"] if line else None,  # FK to production line
+                    "shift_id": shift_id,  # FK to shifts (not string)
                     "employee_code": f"{factory['factory_id'][-3:]}-{str(employee_counter).zfill(5)}",
                     "first_name": first_name,
                     "last_name": last_name,
@@ -414,7 +504,6 @@ class DataGenerator:
                     "role": role,
                     "department": department,
                     "skill_level": skill_level,
-                    "shift": shift,
                     "hire_date": self.random_date(2010, 2024),
                     "experience_years": experience_years,
                     "certifications": random.choices([
@@ -515,42 +604,67 @@ class DataGenerator:
         print(f"Generated {len(self.customers)} customers")
     
     def generate_line_product_mapping(self):
-        """Generate line-product mapping"""
-        print("Generating line-product mappings...")
+        """Generate line-product mapping ensuring 100% line coverage"""
+        print("Generating line-product mappings (ensuring full coverage)...")
         mapping_counter = 1
+        
+        # Ensure every line gets at least one product
         for line in self.production_lines:
-            # Each line produces 1-3 products from its category
+            # Match products by product_category
             line_products = [p for p in self.products if p["product_category"] == line["product_category"]]
-            if line_products:
+            
+            if not line_products:
+                # If no exact category match, assign from any category as fallback
+                line_products = random.sample(self.products, min(random.randint(1, 3), len(self.products)))
+            else:
+                # Ensure 1-3 products per line, all from matching category
                 num_products = min(random.randint(1, 3), len(line_products))
-                selected_products = random.sample(line_products, num_products)
-                
-                for idx, product in enumerate(selected_products):
-                    mapping = {
-                        "mapping_id": self.generate_id("mapping", mapping_counter),
-                        "line_id": line["line_id"],  # FK - valid from registry
-                        "product_id": product["product_id"],  # FK - valid from registry
-                        "factory_id": line["factory_id"],  # FK - valid from registry
-                        "is_primary_line": idx == 0,
-                        "standard_cycle_time_seconds": product["standard_cycle_time_seconds"],
-                        "setup_time_minutes": random.randint(15, 60),
-                        "changeover_time_minutes": random.randint(30, 120),
-                        "yield_percentage": round(random.uniform(94, 99.5), 2),
-                        "status": "active",
-                        "created_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    }
-                    self.line_product_mapping.append(mapping)
-                    mapping_counter += 1
-        print(f"Generated {len(self.line_product_mapping)} line-product mappings")
+                line_products = random.sample(line_products, num_products)
+            
+            # Create mappings for assigned products
+            for idx, product in enumerate(line_products):
+                mapping = {
+                    "mapping_id": self.generate_id("mapping", mapping_counter),
+                    "line_id": line["line_id"],  # FK - valid from registry
+                    "product_id": product["product_id"],  # FK - valid from registry
+                    "factory_id": line["factory_id"],  # FK - valid from registry
+                    "is_primary_line": idx == 0,
+                    "standard_cycle_time_seconds": product["standard_cycle_time_seconds"],
+                    "setup_time_minutes": random.randint(15, 60),
+                    "changeover_time_minutes": random.randint(30, 120),
+                    "yield_percentage": round(random.uniform(94, 99.5), 2),
+                    "status": "active",
+                    "created_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                self.line_product_mapping.append(mapping)
+                mapping_counter += 1
+        
+        print(f"Generated {len(self.line_product_mapping)} line-product mappings (all {len(self.production_lines)} lines covered)")
     
     def generate_customer_product_mapping(self):
-        """Generate customer-product mapping"""
-        print("Generating customer-product mappings...")
+        """Generate customer-product mapping with business logic"""
+        print("Generating customer-product mappings (business logic based)...")
         mapping_counter = 1
+        
         for customer in self.customers:
-            # Each customer orders 3-8 products
-            num_products = random.randint(3, 8)
-            selected_products = random.sample(self.products, min(num_products, len(self.products)))
+            # Get preferred product categories based on customer type
+            customer_type = customer["customer_type"]
+            preferred_categories = CUSTOMER_PRODUCT_PREFERENCES.get(customer_type, ["suspension", "brake", "electrical"])
+            
+            # Filter products based on customer preferences
+            eligible_products = [p for p in self.products if p["product_category"] in preferred_categories]
+            
+            if not eligible_products:
+                # Fallback to random products if no matches
+                eligible_products = random.sample(self.products, min(random.randint(3, 8), len(self.products)))
+            
+            # Select 3-8 products based on customer type
+            if customer_type == "oem":
+                num_products = random.randint(6, 8)  # OEM orders many types
+            else:
+                num_products = random.randint(3, 5)  # Aftermarket/Commercial order fewer
+            
+            selected_products = random.sample(eligible_products, min(num_products, len(eligible_products)))
             
             for product in selected_products:
                 mapping = {
@@ -558,15 +672,16 @@ class DataGenerator:
                     "customer_id": customer["customer_id"],  # FK - valid from registry
                     "product_id": product["product_id"],  # FK - valid from registry
                     "is_active": True,
-                    "annual_volume": random.randint(5000, 100000),
+                    "annual_volume": random.randint(10000, 500000) if customer_type == "oem" else random.randint(5000, 100000),
                     "unit_price_usd": round(random.uniform(10, 500), 2),
-                    "lead_time_days": random.randint(15, 90),
-                    "quality_requirement_ppm": random.randint(100, 1000),
+                    "lead_time_days": random.randint(15, 45) if customer_type == "oem" else random.randint(30, 90),
+                    "quality_requirement_ppm": random.randint(50, 500) if customer_type == "oem" else random.randint(200, 1000),
                     "created_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
                 self.customer_product_mapping.append(mapping)
                 mapping_counter += 1
-        print(f"Generated {len(self.customer_product_mapping)} customer-product mappings")
+        
+        print(f"Generated {len(self.customer_product_mapping)} customer-product mappings (business logic based)")
     
     def generate_all(self):
         """Generate all master data"""

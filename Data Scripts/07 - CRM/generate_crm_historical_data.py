@@ -27,6 +27,7 @@ class CRMDataGenerator:
     def __init__(self, master_data_file=None, erp_data_file=None):
         """Initialize with master data, ERP data, and registry"""
         from pathlib import Path
+        from time_coordinator import TimeCoordinator
         
         if master_data_file is None:
             master_data_file = Path(__file__).parent.parent / "01 - Base Data" / "genims_master_data.json"
@@ -48,9 +49,23 @@ class CRMDataGenerator:
             print(f"Note: {erp_data_file} not found, using minimal product/material data")
             self.erp_data = {'materials': [], 'products': []}
         
-        # Load helper for FK validation
+        # Load helper for FK validation and time coordinator
         self.helper = get_helper()
         self.registry = self.helper.registry
+        
+        # Simple time coordinator
+        class TimeCoordinator:
+            def __init__(self):
+                self.base_time = datetime.now()
+            def get_current_time(self):
+                return self.base_time
+        
+        self.time_coord = TimeCoordinator()
+        
+        print(f"Time coordinator initialized: {self.time_coord.get_current_time()}")
+        # Get total registered IDs for logging
+        total_ids = sum(len(ids) for ids in self.registry.registered_ids.values()) if hasattr(self.registry, 'registered_ids') else 0
+        print(f"Registry loaded with {total_ids} total registered IDs")
         
         self.customers = self.master_data.get('customers', [])
         self.materials = self.erp_data.get('materials', [])
@@ -210,6 +225,18 @@ class CRMDataGenerator:
         
         print(f"Generated {len(self.campaigns)} campaigns")
     
+    def _validate_campaign_exists(self, campaign_id: str) -> bool:
+        """Validate campaign exists"""
+        return any(c['campaign_id'] == campaign_id for c in self.campaigns)
+    
+    def _validate_material_exists(self, material_id: str) -> bool:
+        """Validate material exists in ERP data"""
+        return any(m.get('material_id') == material_id for m in self.materials)
+    
+    def _validate_customer_exists(self, customer_id: str) -> bool:
+        """Validate customer exists in master data"""
+        return any(c.get('customer_id') == customer_id for c in self.customers)
+    
     def generate_accounts_from_customers(self):
         """Generate accounts from existing customers"""
         print("Generating accounts from customers...")
@@ -320,33 +347,45 @@ class CRMDataGenerator:
               f"{len(self.opportunities)} opportunities, {len(self.cases)} cases")
     
     def _create_lead(self, date: datetime):
-        """Create a lead"""
+        """Create a lead with proper FK validation"""
         campaign = random.choice(self.campaigns) if self.campaigns else None
         rep = random.choice(self.sales_reps) if self.sales_reps else None
         
         # FK from registry - GUARANTEED VALID
         valid_employee_ids = list(self.helper.get_valid_employee_ids())
-        assigned_to = random.choice(valid_employee_ids)
+        if not valid_employee_ids:
+            print("Warning: No valid employee IDs found, using sales rep fallback")
+            assigned_to = rep['sales_rep_id'] if rep else 'SREP-000001'
+        else:
+            assigned_to = random.choice(valid_employee_ids)
+        
+        # Validate campaign reference
+        campaign_id = campaign['campaign_id'] if campaign else None
+        if campaign_id and not self._validate_campaign_exists(campaign_id):
+            print(f"Warning: Campaign {campaign_id} not found, setting to None")
+            campaign_id = None
+        
+        lead_status = random.choice(['new', 'contacted', 'qualified', 'unqualified', 'converted'])
         
         lead = {
             'lead_id': self.generate_id('LEAD', 'lead'),
             'lead_number': f"LEAD-{date.strftime('%Y%m%d')}-{self.counters['lead']:04d}",
             'company_name': f"Prospect Company {self.counters['lead']-1}",
             'lead_source': random.choice(['website', 'referral', 'trade_show', 'cold_call', 'social_media']),
-            'source_campaign_id': campaign['campaign_id'],
+            'source_campaign_id': campaign_id,
             'contact_first_name': f"Lead{self.counters['lead']-1}",
             'contact_last_name': "Contact",
             'email': f"lead{self.counters['lead']-1}@prospect.com",
             'phone': f"+91 {random.randint(7000000000, 9999999999)}",
-            'industry': random.choice(['Automotive', 'Electronics', 'Aerospace', 'Packaging']),
+            'industry': random.choice(['automotive', 'electronics', 'aerospace', 'packaging']),
             'company_size': random.choice(['small', 'medium', 'large']),
             'lead_score': random.randint(0, 100),
-            'lead_status': random.choice(['new', 'contacted', 'qualified', 'unqualified', 'converted']),
+            'lead_status': lead_status,
             'estimated_deal_value': round(random.uniform(500000, 10000000), 2),
             'assigned_to': assigned_to,
-            'converted': random.choice([True, False]),
+            'converted': lead_status == 'converted',
             'is_active': True,
-            'created_at': date.strftime('%Y-%m-%d %H:%M:%S')
+            'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
         }
         self.leads.append(lead)
         
@@ -418,12 +457,24 @@ class CRMDataGenerator:
         return stage_probs.get(stage, 10)
     
     def _add_opportunity_products(self, opp: dict):
-        """Add products to opportunity"""
+        """Add products to opportunity with material validation"""
         num_products = random.randint(1, 3)
         
+        if not self.materials:
+            print(f"Warning: No materials available for opportunity {opp['opportunity_id']}")
+            return
+        
         for line_num in range(1, num_products + 1):
-            material = random.choice(self.materials) if self.materials else None
-            if not material:
+            material = random.choice(self.materials)
+            
+            # Validate material data integrity
+            material_id = material.get('material_id')
+            if not material_id:
+                print(f"Warning: Material missing ID, skipping line {line_num}")
+                continue
+            
+            if not self._validate_material_exists(material_id):
+                print(f"Warning: Material {material_id} validation failed")
                 continue
             
             qty = random.randint(100, 5000)
@@ -433,30 +484,35 @@ class CRMDataGenerator:
                 'opp_product_id': self.generate_id('OPPPROD', 'opp_prod'),
                 'opportunity_id': opp['opportunity_id'],
                 'line_number': line_num,
-                'material_id': material['material_id'],
-                'product_name': material['material_name'],
+                'material_id': material_id,
+                'product_name': material.get('material_name', f'Product {line_num}'),
                 'quantity': qty,
                 'unit_of_measure': material.get('base_uom', 'EA'),
                 'unit_price': unit_price,
                 'line_total': round(qty * unit_price, 2),
-                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
             }
             self.opp_products.append(opp_prod)
     
     def _create_quotation(self, opp: dict, date: datetime):
-        """Create quotation"""
+        """Create quotation with validation"""
+        # Validate opportunity exists
+        if not opp.get('opportunity_id'):
+            print("Warning: Cannot create quote without valid opportunity ID")
+            return
+        
         quote = {
             'quotation_id': self.generate_id('QUOTE', 'quote'),
             'quotation_number': f"QUOTE-{date.strftime('%Y%m%d')}-{self.counters['quote']:04d}",
-            'quotation_name': f"Quote for {opp['opportunity_name']}",
+            'quotation_name': f"Quote for {opp.get('opportunity_name', 'Unknown Opportunity')}",
             'opportunity_id': opp['opportunity_id'],
             'account_id': opp['account_id'],
-            'quotation_date': date.strftime('%Y-%m-%d'),
-            'valid_until_date': (date + timedelta(days=30)).strftime('%Y-%m-%d'),
-            'quotation_status': random.choice(['sent', 'under_review', 'accepted']),
-            'total_amount': opp['amount'],
+            'quotation_date': self.time_coord.get_current_time().strftime('%Y-%m-%d'),
+            'valid_until_date': (self.time_coord.get_current_time() + timedelta(days=30)).strftime('%Y-%m-%d'),
+            'quotation_status': random.choice(['draft', 'sent', 'under_review', 'accepted']),
+            'total_amount': opp.get('amount', 0),
             'payment_terms': random.choice(['NET30', 'NET60', 'advance']),
-            'created_at': date.strftime('%Y-%m-%d %H:%M:%S')
+            'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
         }
         self.quotations.append(quote)
         

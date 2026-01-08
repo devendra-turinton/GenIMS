@@ -47,7 +47,7 @@ PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
 MES_ENABLED = os.getenv('MES_ENABLED', 'true').lower() == 'true'
 MES_RECORDS_PER_CYCLE = int(os.getenv('MES_RECORDS_PER_CYCLE', '200'))
 MES_BATCH_SIZE = int(os.getenv('MES_BATCH_SIZE', '5000'))  # Large batches for fast insertion
-MES_TOTAL_RECORDS = int(os.getenv('MES_TOTAL_RECORDS', '28800'))  # 8 hours of hourly data (24h max)
+MES_TOTAL_RECORDS = int(os.getenv('MES_TOTAL_RECORDS', '2880'))  # 1 day of production data (was 28800 = 100 days!)
 BATCH_SIZE = MES_BATCH_SIZE  # For backward compatibility
 
 # Production Rates (per hour)
@@ -105,6 +105,8 @@ logger = logging.getLogger('MESHourlyDaemon')
 running = True
 pg_connection = None
 master_data = {}
+sim_base_time = datetime.now()  # Base timestamp for simulation, updated from DB max
+
 counters = {
     'work_order': 1,
     'operation': 1,
@@ -297,6 +299,9 @@ def load_master_data():
         # Initialize counters based on existing data
         _initialize_counters()
         
+        # Get base timestamp from existing data (for next-day generation)
+        _get_max_timestamp()
+        
         return True
     except Exception as e:
         logger.error(f"Failed to load master data from {PG_MASTER_DATABASE}: {e}")
@@ -341,6 +346,56 @@ def _initialize_counters():
         cursor.close()
     except Exception as e:
         logger.warning(f"Could not initialize counters: {e}")
+
+
+def _get_max_timestamp():
+    """Get maximum timestamp from work_orders and return next day at midnight for data generation"""
+    global sim_base_time
+    try:
+        cursor = pg_connection.cursor()
+        
+        # Query MAX(actual_start_time) from work_orders where actual_start_time is NOT NULL
+        cursor.execute("""
+            SELECT MAX(actual_start_time) FROM work_orders 
+            WHERE actual_start_time IS NOT NULL
+        """)
+        
+        max_timestamp_tuple = cursor.fetchone()
+        cursor.close()
+        
+        if max_timestamp_tuple and max_timestamp_tuple[0]:
+            max_timestamp = max_timestamp_tuple[0]
+            logger.info(f"Found max work_order timestamp: {max_timestamp}")
+            
+            # Start next day at midnight
+            if isinstance(max_timestamp, str):
+                max_ts = datetime.strptime(max_timestamp, '%Y-%m-%d %H:%M:%S')
+            else:
+                max_ts = max_timestamp
+            
+            # CRITICAL FIX: Never use future dates - cap at current date
+            current_date = datetime.now()
+            if max_ts > current_date:
+                logger.warning(f"Found future timestamp {max_ts}, using current date {current_date} instead")
+                max_ts = current_date
+            
+            # Move to next day at 00:00:00
+            sim_base_time = max_ts.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            
+            # Double-check: if next day is still future, use current time
+            if sim_base_time > current_date:
+                logger.warning(f"Next day {sim_base_time} is in future, using current time instead")
+                sim_base_time = current_date.replace(hour=0, minute=0, second=0, microsecond=0)
+                
+            logger.info(f"Simulation will start from: {sim_base_time}")
+        else:
+            # No existing data, use current time
+            sim_base_time = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            logger.info(f"No existing data found, using current date: {sim_base_time}")
+        
+    except Exception as e:
+        logger.warning(f"Could not get max timestamp: {e}")
+        sim_base_time = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
 
 def flush_buffers():
@@ -492,6 +547,45 @@ def flush_buffers():
         return False
 
 
+def reset_mes_counters():
+    """Reset counter values based on current max IDs in database (like folders 1&2)"""
+    global counters
+    
+    if not check_connection():
+        logger.warning("Cannot reset counters - database connection unavailable")
+        return
+    
+    try:
+        cursor = pg_connection.cursor()
+        
+        # Counter reset for all MES tables using VARCHAR primary keys
+        counter_queries = {
+            'work_order': ("SELECT MAX(CAST(SUBSTRING(work_order_id FROM 4) AS INTEGER)) FROM work_orders WHERE work_order_id ~ '^WO-[0-9]+$'", 'WO'),
+            'material': ("SELECT MAX(CAST(SUBSTRING(transaction_id FROM 5) AS INTEGER)) FROM material_transactions WHERE transaction_id ~ '^MAT-[0-9]+$'", 'MAT'),
+            'inspection': ("SELECT MAX(CAST(SUBSTRING(inspection_id FROM 6) AS INTEGER)) FROM quality_inspections WHERE inspection_id ~ '^INSP-[0-9]+$'", 'INSP'),
+            'labor': ("SELECT MAX(CAST(SUBSTRING(labor_transaction_id FROM 5) AS INTEGER)) FROM labor_transactions WHERE labor_transaction_id ~ '^LAB-[0-9]+$'", 'LAB'),
+            'schedule': ("SELECT MAX(CAST(SUBSTRING(schedule_id FROM 5) AS INTEGER)) FROM production_schedule WHERE schedule_id ~ '^SCH-[0-9]+$'", 'SCH'),
+            'ebr': ("SELECT MAX(CAST(SUBSTRING(ebr_id FROM 5) AS INTEGER)) FROM electronic_batch_records WHERE ebr_id ~ '^EBR-[0-9]+$'", 'EBR')
+        }
+        
+        for key, (query, prefix) in counter_queries.items():
+            try:
+                cursor.execute(query)
+                result = cursor.fetchone()
+                max_id = result[0] if result and result[0] else 0
+                counters[key] = max_id + 1
+                logger.info(f"Reset counter {key}: next ID will be {prefix}-{str(counters[key]).zfill(6)}")
+            except Exception as e:
+                logger.warning(f"Could not reset counter {key}: {e}")
+                # Keep existing counter value
+        
+        cursor.close()
+        logger.info("✓ MES counters reset successfully")
+        
+    except Exception as e:
+        logger.error(f"Error resetting MES counters: {e}")
+
+
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
@@ -501,6 +595,11 @@ def generate_id(prefix: str, counter_key: str) -> str:
     id_val = f"{prefix}-{str(counters[counter_key]).zfill(6)}"
     counters[counter_key] += 1
     return id_val
+
+
+def get_sim_timestamp(offset_hours: int = 0) -> str:
+    """Get timestamp from sim_base_time with optional hour offset"""
+    return (sim_base_time + timedelta(hours=offset_hours)).strftime('%Y-%m-%d %H:%M:%S')
 
 
 def get_shift_for_time(factory_id: str, dt: datetime) -> dict:
@@ -584,10 +683,10 @@ def create_new_work_orders(count: int):
             # Quantities
             planned_qty = random.randint(50, 500)
             
-            # Timing
-            now = datetime.now()
-            start_hour = random.randint(now.hour, min(now.hour + 2, 23))
-            planned_start = now.replace(hour=start_hour, minute=random.randint(0, 59), second=0, microsecond=0)
+            # Timing - use sim_base_time to prevent overlaps with existing data
+            now = sim_base_time + timedelta(hours=random.randint(0, 12))  # Distribute within next 12 hours
+            start_hour = now.hour
+            planned_start = now.replace(minute=random.randint(0, 59), second=0, microsecond=0)
             
             # Duration
             cycle_time = product['standard_cycle_time_seconds']
@@ -597,14 +696,14 @@ def create_new_work_orders(count: int):
             
             planned_end = planned_start + timedelta(minutes=total_minutes)
             
-            # Batch/lot numbers
-            batch_number = f"BATCH-{now.strftime('%Y%m%d')}-{counters['work_order']:04d}"
+            # Batch/lot numbers - use date from sim_base_time
+            batch_number = f"BATCH-{sim_base_time.strftime('%Y%m%d')}-{counters['work_order']:04d}"
             lot_number = f"LOT-{factory_id[-3:]}-{counters['work_order']:05d}"
             
             # Create work order
             work_order = {
                 'work_order_id': generate_id('WO', 'work_order'),
-                'work_order_number': f"WO-{now.strftime('%Y%m%d')}-{counters['work_order']-1:04d}",
+                'work_order_number': f"WO-{sim_base_time.strftime('%Y%m%d')}-{counters['work_order']-1:04d}",
                 'product_id': product_id,
                 'customer_id': customer_id,
                 'sales_order_number': f"SO-{random.randint(10000, 99999)}" if customer_id else None,
@@ -941,8 +1040,8 @@ def _create_schedule_entry(wo: dict):
         'schedule_adherence_percentage': None,
         'planner_id': wo['created_by'],
         'planning_notes': None,
-        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        'created_at': get_sim_timestamp(0),
+        'updated_at': get_sim_timestamp(0)
     }
     
     buffers['schedule'].append(schedule)
@@ -966,12 +1065,16 @@ def _record_material_transaction(wo: dict):
             quantity = wo['planned_quantity'] * random.randint(1, 4)
             unit = 'EA'
         
+        # Fix cost calculation - unit_cost and total_cost should be consistent
+        unit_cost = round(random.uniform(1, 50), 4)
+        total_cost = round(quantity * unit_cost, 2)
+        
         transaction = {
             'transaction_id': generate_id('MAT', 'material'),
             'transaction_type': 'issue',
-            'transaction_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'transaction_date': get_sim_timestamp(0),
             'work_order_id': wo['work_order_id'],
-            'operation_id': None,
+            'operation_id': None,  # TODO: Link to specific operation in future
             'material_code': material_code,
             'material_name': mat_name,
             'material_type': mat_type,
@@ -980,13 +1083,13 @@ def _record_material_transaction(wo: dict):
             'lot_number': f"MAT-LOT-{random.randint(10000, 99999)}",
             'batch_number': f"MAT-BATCH-{random.randint(1000, 9999)}",
             'serial_number': None,
-            'expiry_date': (datetime.now() + timedelta(days=180)).strftime('%Y-%m-%d'),
+            'expiry_date': (sim_base_time + timedelta(days=180)).strftime('%Y-%m-%d'),
             'supplier_lot_number': f"SUP-{random.randint(10000, 99999)}",
             'from_location': 'WAREHOUSE-A',
             'to_location': f"LINE-{wo['line_id'][-3:]}",
             'warehouse_location': f"BIN-{random.choice(['A', 'B', 'C'])}-{random.randint(1, 50):02d}",
-            'unit_cost': round(random.uniform(1, 50), 4),
-            'total_cost': round(quantity * random.uniform(1, 50), 2),
+            'unit_cost': unit_cost,
+            'total_cost': total_cost,
             'quality_status': 'approved',
             'inspection_required': mat_type == 'raw_material',
             'certificate_of_analysis': f"COA-{random.randint(10000, 99999)}" if mat_type == 'raw_material' else None,
@@ -995,7 +1098,7 @@ def _record_material_transaction(wo: dict):
             'performed_by': random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] == 'operator'] or [master_data['employees'][0]['employee_id']]),
             'requires_documentation': mat_type == 'raw_material',
             'documentation_complete': True,
-            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            'created_at': get_sim_timestamp(0)
         }
         
         buffers['materials'].append(transaction)
@@ -1014,16 +1117,18 @@ def _record_labor_transaction(wo: dict):
     operator = random.choice(operators)
     now = datetime.now()
     
+    current_time = get_sim_timestamp(0)
+    
     labor = {
         'labor_transaction_id': generate_id('LAB', 'labor'),
-        'transaction_date': now.strftime('%Y-%m-%d %H:%M:%S'),
+        'transaction_date': current_time,
         'employee_id': operator['employee_id'],
         'shift_id': shift['shift_id'],
         'work_order_id': wo['work_order_id'],
-        'operation_id': None,
+        'operation_id': None,  # TODO: Link to specific operation
         'activity_code': 'DIRECT',
         'activity_type': 'direct_labor',
-        'clock_in_time': now.strftime('%Y-%m-%d %H:%M:%S'),
+        'clock_in_time': current_time,
         'clock_out_time': None,
         'duration_minutes': None,
         'break_time_minutes': 0,
@@ -1040,7 +1145,7 @@ def _record_labor_transaction(wo: dict):
         'approved_by': None,
         'approved_at': None,
         'notes': None,
-        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        'created_at': current_time
     }
     
     buffers['labor'].append(labor)
@@ -1062,7 +1167,8 @@ def _complete_labor_for_order(wo: dict):
         columns = [d[0] for d in cursor.description]
         open_labor = [dict(zip(columns, row)) for row in cursor.fetchall()]
         
-        now = datetime.now()
+        completion_time = get_sim_timestamp(0)
+        now = datetime.strptime(completion_time, '%Y-%m-%d %H:%M:%S')
         
         for labor in open_labor:
             clock_in = labor['clock_in_time']
@@ -1089,7 +1195,11 @@ def _complete_labor_for_order(wo: dict):
 
 def _perform_final_inspection(wo: dict, produced_qty: int, good_qty: int):
     """Perform final quality inspection"""
-    inspection_passed = random.random() < INSPECTION_PASS_RATE
+    rejected_qty = produced_qty - good_qty
+    
+    # Base inspection pass on actual quality (align with First Pass Yield)
+    fpy = (good_qty / produced_qty) if produced_qty > 0 else 1.0
+    inspection_passed = fpy >= 0.95  # Pass if 95%+ yield
     
     if inspection_passed:
         result = 'pass'
@@ -1101,24 +1211,28 @@ def _perform_final_inspection(wo: dict, produced_qty: int, good_qty: int):
     else:
         result = random.choice(['fail', 'conditional_pass'])
         disposition = random.choice(['reject', 'rework'])
-        defects = random.randint(1, 5)
-        critical = random.randint(0, 1)
-        major = random.randint(0, 2)
+        # Correlate defects with rejected quantity
+        defects = min(rejected_qty, random.randint(1, max(1, rejected_qty)))
+        critical = random.randint(0, min(1, defects))
+        major = random.randint(0, min(2, defects - critical))
         minor = defects - critical - major
+    
+    inspection_time = get_sim_timestamp(0)
+    current_date = sim_base_time.strftime('%Y%m%d')
     
     inspection = {
         'inspection_id': generate_id('INSP', 'inspection'),
         'inspection_type': 'final',
-        'inspection_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'inspection_date': inspection_time,
         'work_order_id': wo['work_order_id'],
-        'operation_id': None,
+        'operation_id': None,  # TODO: Link to final operation
         'product_id': wo['product_id'],
-        'sample_size': min(random.randint(10, 30), produced_qty),
+        'sample_size': min(max(1, produced_qty // 10), produced_qty),  # 10% sample
         'lot_number': wo['lot_number'],
         'batch_number': wo['batch_number'],
         'serial_number': None,
         'inspector_id': random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] == 'quality_inspector'] or [master_data['employees'][0]['employee_id']]),
-        'shift_id': get_shift_for_time(wo['factory_id'], datetime.now())['shift_id'],
+        'shift_id': get_shift_for_time(wo['factory_id'], sim_base_time)['shift_id'],
         'inspection_result': result,
         'defects_found': defects,
         'critical_defects': critical,
@@ -1127,17 +1241,17 @@ def _perform_final_inspection(wo: dict, produced_qty: int, good_qty: int):
         'measured_values': None,
         'specification_values': None,
         'disposition': disposition,
-        'disposition_reason': 'Quality standards met' if inspection_passed else 'Dimensional non-conformance',
+        'disposition_reason': 'Quality standards met' if inspection_passed else f'{rejected_qty} units failed quality check',
         'disposition_by': random.choice([e['employee_id'] for e in master_data['employees'] if e['role'] == 'quality_inspector'] or [master_data['employees'][0]['employee_id']]),
-        'ncr_number': f"NCR-{random.randint(1000, 9999)}" if not inspection_passed else None,
+        'ncr_number': f"NCR-{current_date}-{counters['inspection']:04d}" if not inspection_passed else None,
         'corrective_action_required': not inspection_passed,
         'inspection_plan_id': f"IP-{random.randint(100, 999)}",
         'inspection_checklist_id': f"CL-{random.randint(100, 999)}",
-        'photos_attached': False,
+        'photos_attached': defects > 0,
         'approved_by': None,
         'approved_at': None,
-        'notes': 'Final inspection completed',
-        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        'notes': f'Final inspection completed. {defects} defects found.' if defects > 0 else 'Final inspection passed.',
+        'created_at': inspection_time
     }
     
     buffers['inspections'].append(inspection)
@@ -1146,7 +1260,7 @@ def _perform_final_inspection(wo: dict, produced_qty: int, good_qty: int):
 
 def _generate_ebr(wo: dict):
     """Generate electronic batch record"""
-    now = datetime.now()
+    now = sim_base_time + timedelta(hours=1)  # eBR generated 1 hour after completion
     
     # Handle datetime objects
     if isinstance(wo['actual_start_time'], str):
@@ -1381,9 +1495,21 @@ def main():
         line_id = random.choice(list(available_lines)) if available_lines else 'LINE-001'
         customer = random.choice(available_customers)
         
-        # Simulated timestamp advances
-        timestamp_offset = i * 300  # 5 minutes per record
-        current_ts = sim_base_time + timedelta(seconds=timestamp_offset)
+        # FIXED: Realistic timestamp advances - spread over 24 hours instead of 100+ days
+        # Distribute records over 1 day (1440 minutes) with some randomness
+        hours_in_day = 24
+        minutes_per_record = (hours_in_day * 60) / MES_TOTAL_RECORDS  # ~3 seconds per record
+        timestamp_offset_minutes = i * minutes_per_record
+        
+        # Add some randomness within each time slot (±30 seconds)
+        random_offset = random.randint(-30, 30)  # seconds
+        total_offset_seconds = (timestamp_offset_minutes * 60) + random_offset
+        
+        current_ts = sim_base_time + timedelta(seconds=total_offset_seconds)
+        
+        # Ensure we never go beyond current date
+        if current_ts > datetime.now():
+            current_ts = datetime.now() - timedelta(hours=random.randint(1, 48))  # Use recent past instead
         
         wo_id = f"WO-{(counters['work_order'] + i):06d}"
         wo_number = f"WO-{(counters['work_order'] + i):08d}"
@@ -1622,7 +1748,6 @@ def main():
                         %(validation_status)s, %(parent_work_order_id)s, %(erp_order_id)s, %(created_by)s,
                         %(created_at)s, %(updated_at)s, %(completed_by)s, %(closed_at)s
                     )
-                    ON CONFLICT (work_order_number) DO NOTHING
                 """
                 
                 logger.info(f"Inserting {len(work_orders):,} work orders in batches of {MES_BATCH_SIZE:,}...")
@@ -1648,7 +1773,6 @@ def main():
                         %(consumed_by_lot_number)s, %(performed_by)s, %(requires_documentation)s, %(documentation_complete)s,
                         %(created_at)s
                     )
-                    ON CONFLICT (transaction_id) DO NOTHING
                 """
                 
                 logger.info(f"Inserting {len(material_transactions):,} material transactions in batches of {MES_BATCH_SIZE:,}...")
@@ -1670,7 +1794,6 @@ def main():
                         %(standard_hours)s, %(actual_hours)s, %(efficiency_percentage)s, %(hourly_rate)s, %(labor_cost)s,
                         %(overtime_hours)s, %(overtime_cost)s, %(approved)s, %(approved_by)s, %(approved_at)s, %(notes)s, %(created_at)s
                     )
-                    ON CONFLICT (labor_transaction_id) DO NOTHING
                 """
                 
                 logger.info(f"Inserting {len(labor_transactions):,} labor transactions in batches of {MES_BATCH_SIZE:,}...")
@@ -1694,7 +1817,6 @@ def main():
                         %(disposition_by)s, %(ncr_number)s, %(corrective_action_required)s, %(inspection_plan_id)s,
                         %(inspection_checklist_id)s, %(photos_attached)s, %(approved_by)s, %(approved_at)s, %(notes)s, %(created_at)s
                     )
-                    ON CONFLICT (inspection_id) DO NOTHING
                 """
                 
                 logger.info(f"Inserting {len(quality_inspections):,} quality inspections in batches of {MES_BATCH_SIZE:,}...")
@@ -1704,6 +1826,9 @@ def main():
             conn.close()
             
             logger.info(f"✓ All records inserted successfully")
+            
+            # Reset counters to sync with database (like folders 1&2)
+            reset_mes_counters()
             
         except Exception as e:
             logger.error(f"PostgreSQL error: {e}")

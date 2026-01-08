@@ -40,6 +40,7 @@ class OperationsDataGenerator:
         self.products = {p['product_id']: p for p in master_data['products']}
         self.employees = {e['employee_id']: e for e in master_data['employees']}
         self.customers = master_data['customers']
+        self.shifts = master_data.get('shifts', [])  # Load shifts for FK references
         
         # Load master data that was already generated
         self.production_lines = master_data.get('production_lines', [])
@@ -131,21 +132,52 @@ class OperationsDataGenerator:
         print(f"✓ Generated {len(self.sensors)} sensors")
     
     def generate_sensor_data(self):
-        """Generate sensor measurements"""
+        """Generate sensor measurements with realistic manufacturing ranges"""
         print("Generating sensor data...")
+        
+        # REALISTIC sensor ranges based on industrial manufacturing equipment
+        # These are actual ranges from ISO/IEC standards for manufacturing
+        sensor_ranges = {
+            'temperature': (35, 75),      # Motor/bearing operating range: 35-75°C
+            'vibration': (0.5, 8),        # ISO 10816: 0.5-8 mm/s normal, >8 alarm
+            'pressure': (4, 8),           # Hydraulic systems: 4-8 bar normal
+            'current': (5, 40),           # Motor current: 5-40A depending on load
+            'voltage': (210, 230),        # Single phase supply: ±10% of 220V
+            'flow': (10, 80),             # Flow rate: 10-80 L/min typical
+            'speed': (300, 2500),         # RPM varies by spindle type
+            'torque': (10, 80)            # Torque load: 10-80 Nm typical
+        }
         
         end_time = datetime.now()
         start_time = end_time - timedelta(days=14)
-        sensor_data_id = 1  # Track BIGSERIAL primary key
+        sensor_data_id = 1
         
         for sensor in self.sensors:
-            # ~100 records per sensor
+            sensor_type = sensor['sensor_type']
+            min_val, max_val = sensor_ranges.get(sensor_type, (10, 100))
+            
             for _ in range(100):
                 timestamp = start_time + timedelta(seconds=random.randint(0, int((end_time-start_time).total_seconds())))
-                measurement_value = round(random.uniform(10, 100), 4)
+                
+                # Normal distribution around midpoint (realistic)
+                midpoint = (min_val + max_val) / 2
+                sigma = (max_val - min_val) / 8  # Tighter distribution, 98% within range
+                measurement_value = random.gauss(midpoint, sigma)
+                # Clamp strictly to range
+                measurement_value = max(min_val * 0.95, min(max_val * 1.05, measurement_value))
+                measurement_value = round(measurement_value, 4)
+                
+                # Most readings should be normal (80%), rare anomalies (20%)
+                is_anomaly = random.random() < 0.02  # Only 2% true anomalies
+                if is_anomaly:
+                    # Force out-of-range anomaly
+                    measurement_value = round(random.uniform(max_val * 1.1, max_val * 1.3), 4)
+                    anomaly_score = round(random.uniform(0.85, 1.0), 4)
+                else:
+                    anomaly_score = round(random.uniform(0, 0.2), 4)
                 
                 record = {
-                    'sensor_data_id': sensor_data_id,  # BIGSERIAL primary key
+                    'sensor_data_id': sensor_data_id,
                     'sensor_id': sensor['sensor_id'],
                     'machine_id': sensor['machine_id'],
                     'line_id': sensor['line_id'],
@@ -153,18 +185,18 @@ class OperationsDataGenerator:
                     'timestamp': timestamp.strftime('%Y-%m-%d %H:%M:%S'),
                     'measurement_value': measurement_value,
                     'measurement_unit': random.choice(['°C', 'mm/s', 'bar', 'A', 'V', 'L/min', 'rpm', 'Nm']),
-                    'status': random.choice(['normal', 'warning', 'critical', 'fault']),
-                    'quality': random.choice(['good', 'uncertain', 'bad', 'out_of_range']),
-                    'is_below_warning': random.random() < 0.05,
-                    'is_above_warning': random.random() < 0.05,
-                    'is_below_critical': random.random() < 0.02,
-                    'is_above_critical': random.random() < 0.02,
-                    'min_value_1min': round(measurement_value - random.uniform(1, 5), 4),
-                    'max_value_1min': round(measurement_value + random.uniform(1, 5), 4),
-                    'avg_value_1min': round(measurement_value + random.uniform(-2, 2), 4),
-                    'std_dev_1min': round(random.uniform(0.1, 2), 4),
-                    'anomaly_score': round(random.uniform(0, 1), 4),
-                    'is_anomaly': random.random() < 0.1,
+                    'status': 'critical' if is_anomaly else ('warning' if random.random() < 0.05 else 'normal'),
+                    'quality': 'bad' if is_anomaly else ('uncertain' if random.random() < 0.05 else 'good'),
+                    'is_below_warning': measurement_value < min_val * 0.95,
+                    'is_above_warning': measurement_value > max_val * 1.05,
+                    'is_below_critical': measurement_value < min_val * 0.90,
+                    'is_above_critical': measurement_value > max_val * 1.10,
+                    'min_value_1min': round(measurement_value - random.uniform(0.5, 2), 4),
+                    'max_value_1min': round(measurement_value + random.uniform(0.5, 2), 4),
+                    'avg_value_1min': round(measurement_value + random.uniform(-0.5, 0.5), 4),
+                    'std_dev_1min': round(random.uniform(0.05, 0.5), 4),
+                    'is_anomaly': is_anomaly,
+                    'anomaly_score': anomaly_score,
                     'data_source': random.choice(['IoT', 'Edge', 'Gateway']),
                     'protocol': random.choice(['OPC-UA', 'Modbus', 'MQTT']),
                     'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -197,15 +229,21 @@ class OperationsDataGenerator:
             for _ in range(100):
                 timestamp = start_time + timedelta(seconds=random.randint(0, int((end_time-start_time).total_seconds())))
                 actual_cycle = round(random.uniform(15, 45), 2)
-                availability = round(random.uniform(70, 99), 2)
                 
-                # Determine if machine has faults (50% of records - increased from 45%)
-                # Weighted random selection to increase 'fault' and 'maintenance' states
+                # REALISTIC machine state distribution for good manufacturing
+                # running: 82%, idle: 10%, setup: 4%, stopped: 1%, maintenance: 2%, fault: 1%
                 machine_state = random.choices(
-                    ['running', 'idle', 'stopped', 'fault', 'maintenance', 'setup'],
-                    weights=[0.20, 0.10, 0.05, 0.50, 0.10, 0.05]  # 50% fault + 10% maintenance = 60%
+                    ['running', 'idle', 'setup', 'stopped', 'maintenance', 'fault'],
+                    weights=[0.82, 0.10, 0.04, 0.01, 0.02, 0.01]
                 )[0]
                 has_fault = machine_state in ['fault', 'maintenance']
+                
+                # Realistic availability: 95-99% for good manufacturing
+                if machine_state == 'running':
+                    availability = round(random.gauss(97, 1.5), 2)
+                    availability = max(95, min(99, availability))
+                else:
+                    availability = round(random.uniform(70, 95), 2)
                 
                 # Smart fault code/description linking
                 fault_code = None
@@ -247,6 +285,14 @@ class OperationsDataGenerator:
                             'Conveyor jam detected'
                         ])
                 
+                # Calculate realistic OEE for good manufacturing (75-85%)
+                # Availability: 95-99%, Performance: 90-98%, Quality: 95-99%
+                perf_pct = round(random.gauss(94, 2), 2)
+                perf_pct = max(90, min(98, perf_pct))
+                qual_pct = round(random.gauss(97, 1.5), 2)
+                qual_pct = max(95, min(99, qual_pct))
+                calculated_oee = round((availability * perf_pct * qual_pct) / 10000, 2)
+                
                 record = {
                     'scada_id': scada_id,  # BIGSERIAL primary key
                     'machine_id': machine['machine_id'],
@@ -263,9 +309,9 @@ class OperationsDataGenerator:
                     'target_cycle_time_seconds': 30,
                     'actual_cycle_time_seconds': actual_cycle,
                     'availability_percentage': availability,
-                    'performance_percentage': round(random.uniform(75, 95), 2),
-                    'quality_percentage': round(random.uniform(90, 99), 2),
-                    'oee_percentage': round((availability * random.uniform(0.7, 0.95) * random.uniform(0.8, 0.98)) / 100, 2),
+                    'performance_percentage': perf_pct,
+                    'quality_percentage': qual_pct,
+                    'oee_percentage': calculated_oee,
                     'spindle_speed_rpm': random.randint(500, 5000),
                     'feed_rate_mm_min': round(random.uniform(50, 500), 2),
                     'tool_number': random.randint(1, 20),
@@ -282,7 +328,7 @@ class OperationsDataGenerator:
                     'active_alarms': random.randint(0, 5),
                     'alarm_codes': ','.join([f"ALM-{random.randint(100, 999)}" for _ in range(random.randint(1, 4))]) if random.random() < 0.75 else None,
                     'warning_codes': ','.join([f"WRN-{random.randint(100, 999)}" for _ in range(random.randint(1, 3))]) if random.random() < 0.70 else None,
-                    'shift_id': random.choice(['SHIFT-001', 'SHIFT-002', 'SHIFT-003']),
+                    'shift_id': random.choice([s['shift_id'] for s in self.shifts]),
                     'operator_id': random.choice(list(self.employees.keys())),
                     'data_source': 'PLC',
                     'data_quality': random.choice(['good', 'uncertain', 'bad']),
@@ -304,14 +350,41 @@ class OperationsDataGenerator:
             for idx in range(num_runs):
                 start = datetime.now() - timedelta(days=random.randint(1, 7))
                 end = start + timedelta(hours=random.randint(2, 24))
+                actual_duration_minutes = int((end - start).total_seconds() / 60)
                 
-                # Use product_id from product_list (guaranteed to exist from master data)
                 selected_product_id = random.choice(product_list)
-                # Use previous product from list if available, otherwise use same product
                 previous_product_id = random.choice(product_list) if idx > 0 else selected_product_id
-                # Use valid customer_id from registry (guaranteed from master data)
                 customer_id = random.choice([c['customer_id'] for c in self.customers])
                 
+                # REALISTIC quality: 70-80% Grade A (zero-defect focus)
+                quality_grade = random.choices(
+                    ['A', 'B', 'C'],
+                    weights=[0.75, 0.20, 0.05]
+                )[0]
+                
+                # First pass yield: 90-98% (high, good manufacturing)
+                first_pass_yield = round(random.gauss(95, 1.5), 2)
+                first_pass_yield = max(90, min(99, first_pass_yield))
+                
+                # Defect rate: 100-500 PPM (good manufacturing)
+                if quality_grade == 'A':
+                    defect_rate = round(random.gauss(200, 80), 0)
+                elif quality_grade == 'B':
+                    defect_rate = round(random.gauss(800, 200), 0)
+                else:  # C grade
+                    defect_rate = round(random.gauss(2000, 400), 0)
+                defect_rate = max(0, min(5000, defect_rate))
+                
+                # Realistic OEE 70-85% (from component multiplication)
+                av_pct = round(random.gauss(96, 2), 2)
+                av_pct = max(90, min(99, av_pct))
+                perf_pct = round(random.gauss(92, 2), 2)
+                perf_pct = max(85, min(98, perf_pct))
+                qual_pct = round(random.gauss(96, 1.5), 2)
+                qual_pct = max(90, min(99, qual_pct))
+                oee_pct = round((av_pct * perf_pct * qual_pct) / 10000, 2)
+                
+                target_quantity = random.randint(100, 1000)
                 run = {
                     'run_id': self.get_next_id('RUN'),
                     'machine_id': machine['machine_id'],
@@ -325,22 +398,22 @@ class OperationsDataGenerator:
                     'run_start_time': start.strftime('%Y-%m-%d %H:%M:%S'),
                     'run_end_time': end.strftime('%Y-%m-%d %H:%M:%S'),
                     'planned_duration_minutes': random.randint(120, 720),
-                    'actual_duration_minutes': int((end - start).total_seconds() / 60),
+                    'actual_duration_minutes': actual_duration_minutes,
                     'target_quantity': random.randint(100, 1000),
-                    'actual_quantity': random.randint(80, 950),
-                    'rejected_quantity': random.randint(0, 50),
-                    'scrapped_quantity': random.randint(0, 20),
-                    'rework_quantity': random.randint(0, 30),
-                    'first_pass_yield_percentage': round(random.uniform(70, 99), 2),
-                    'defect_rate_ppm': random.randint(0, 5000),
-                    'quality_grade': random.choice(['A', 'B', 'C']),
-                    'oee_percentage': round(random.uniform(50, 95), 2),
-                    'availability_percentage': round(random.uniform(70, 99), 2),
-                    'performance_percentage': round(random.uniform(75, 95), 2),
-                    'quality_percentage': round(random.uniform(90, 99), 2),
+                    'actual_quantity': random.randint(int(target_quantity * 0.95), int(target_quantity * 0.99)),
+                    'rejected_quantity': random.randint(0, int(target_quantity * 0.01)),
+                    'scrapped_quantity': random.randint(0, int(target_quantity * 0.005)),
+                    'rework_quantity': random.randint(0, int(target_quantity * 0.01)),
+                    'first_pass_yield_percentage': first_pass_yield,
+                    'defect_rate_ppm': defect_rate,
+                    'quality_grade': quality_grade,
+                    'oee_percentage': oee_pct,
+                    'availability_percentage': av_pct,
+                    'performance_percentage': perf_pct,
+                    'quality_percentage': qual_pct,
                     'previous_product_id': previous_product_id,
                     'changeover_time_minutes': random.randint(5, 60),
-                    'shift_id': random.choice(['SHIFT-001', 'SHIFT-002', 'SHIFT-003']),
+                    'shift_id': random.choice([s['shift_id'] for s in self.shifts]),
                     'supervisor_id': random.choice(list(self.employees.keys())),
                     'status': random.choice(['completed', 'in_progress', 'paused', 'aborted']),
                     'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -351,48 +424,101 @@ class OperationsDataGenerator:
         print(f"✓ Generated {len(self.data['production_runs'])} production runs")
     
     def generate_machine_faults(self):
-        """Generate machine faults"""
+        """Generate machine faults - realistic rare events"""
         print("Generating machine faults...")
         
         employee_list = list(self.employees.keys())
-        fault_id = 1  # Track BIGSERIAL primary key
+        fault_id = 1
         
         for machine in self.machines:
-            num_faults = random.randint(2, 8)
+            # REALISTIC: Only 40% of machines experience faults in 14 days
+            # Those that do have 1-3 faults (not 2-8)
+            if random.random() < 0.40:
+                num_faults = random.randint(1, 3)
+            else:
+                num_faults = 0
+            
             for _ in range(num_faults):
-                start_time = datetime.now() - timedelta(days=random.randint(0, 7))
-                duration_hours = random.uniform(0.5, 24)
-                end_time = start_time + timedelta(hours=duration_hours)
-                fault_status = random.choice(['open', 'acknowledged', 'in_progress', 'resolved', 'closed'])
+                start_time = datetime.now() - timedelta(days=random.randint(0, 14))
                 
-                # Higher probability for end_time/duration when resolved or closed
-                has_end_time = fault_status in ['resolved', 'closed'] or random.random() < 0.85
-                has_resolved_by = fault_status in ['resolved', 'closed'] or random.random() < 0.80
+                # REALISTIC fault duration follows exponential distribution
+                # Most faults are short (< 1 hour), some longer
+                # 60% < 15 min, 25% 15min-2hr, 10% 2-8hr, 5% > 8hr
+                rand_val = random.random()
+                if rand_val < 0.60:
+                    duration_hours = random.uniform(0.05, 0.25)  # 3-15 minutes
+                elif rand_val < 0.85:
+                    duration_hours = random.uniform(0.25, 2)     # 15 min - 2 hours
+                elif rand_val < 0.95:
+                    duration_hours = random.uniform(2, 8)        # 2-8 hours
+                else:
+                    duration_hours = random.uniform(8, 24)       # 8-24 hours (rare)
+                
+                end_time = start_time + timedelta(hours=duration_hours)
+                # High probability to close faults (most get resolved)
+                fault_status = random.choices(
+                    ['closed', 'resolved', 'in_progress', 'acknowledged'],
+                    weights=[0.70, 0.20, 0.07, 0.03]
+                )[0]
+                
+                has_end_time = fault_status in ['resolved', 'closed'] or random.random() < 0.95
+                has_resolved_by = fault_status in ['resolved', 'closed'] or random.random() < 0.85
+                fault_duration_seconds = int((end_time - start_time).total_seconds()) if has_end_time else None
+                
+                # REALISTIC fault types by frequency
+                fault_categories = {
+                    'mechanical': 0.40,  # Most common (bearing, alignment)
+                    'electrical': 0.25,  # Second most common
+                    'hydraulic': 0.15,
+                    'quality': 0.10,
+                    'control': 0.07,
+                    'pneumatic': 0.03
+                }
+                fault_category = random.choices(
+                    list(fault_categories.keys()),
+                    weights=list(fault_categories.values())
+                )[0]
+                
+                # Severity matches category
+                if fault_category == 'mechanical':
+                    severity_dist = {'major': 0.50, 'critical': 0.30, 'minor': 0.20}
+                elif fault_category == 'electrical':
+                    severity_dist = {'critical': 0.60, 'major': 0.35, 'minor': 0.05}
+                else:
+                    severity_dist = {'major': 0.50, 'minor': 0.40, 'warning': 0.10}
+                
+                fault_severity = random.choices(
+                    list(severity_dist.keys()),
+                    weights=list(severity_dist.values())
+                )[0]
                 
                 fault = {
-                    'fault_id': fault_id,  # BIGSERIAL primary key
+                    'fault_id': fault_id,
                     'machine_id': machine['machine_id'],
                     'line_id': machine['line_id'],
                     'factory_id': machine['factory_id'],
                     'fault_code': f"ERR-{random.randint(100, 999)}",
-                    'fault_category': random.choice(['mechanical', 'electrical', 'hydraulic', 'pneumatic', 'control', 'quality']),
-                    'fault_severity': random.choice(['critical', 'major', 'minor', 'warning']),
-                    'fault_description': f"Machine fault detected",
+                    'fault_category': fault_category,
+                    'fault_severity': fault_severity,
+                    'fault_description': f"{fault_category.capitalize()} fault in {machine['machine_type']}",
                     'fault_start_time': start_time.strftime('%Y-%m-%d %H:%M:%S'),
                     'fault_end_time': end_time.strftime('%Y-%m-%d %H:%M:%S') if has_end_time else None,
-                    'fault_duration_seconds': int(duration_hours * 3600) if has_end_time else None,
-                    'production_loss_units': random.randint(0, 500),
+                    'fault_duration_seconds': fault_duration_seconds,
+                    'production_loss_units': int(100 * duration_hours) if fault_severity == 'critical' else int(50 * duration_hours),
                     'downtime_minutes': int(duration_hours * 60),
-                    'estimated_cost_usd': round(random.uniform(100, 10000), 2),
+                    'estimated_cost_usd': round(random.uniform(500, 5000) if fault_severity == 'critical' else random.uniform(100, 2000), 2),
                     'root_cause_category': random.choice(['bearing_failure', 'overheating', 'tool_wear', 'misalignment', 'power_issue', 'sensor_fault']),
-                    'root_cause_description': 'Root cause analysis pending',
-                    'contributing_sensors': ','.join([s['sensor_id'] for s in random.sample(self.sensors, min(3, len(self.sensors)))]),
-                    'resolution_action': 'Maintenance scheduled' if random.random() > 0.5 else 'Repaired on-site',
+                    'root_cause_description': 'Analysis completed',
+                    'contributing_sensors': ','.join([s['sensor_id'] for s in random.sample(self.sensors, min(2, len(self.sensors)))]),
+                    'resolution_action': random.choice(['Maintenance scheduled', 'Repaired on-site', 'Part replacement']),
                     'maintenance_ticket_id': f"MNT-{random.randint(100000, 999999)}",
                     'resolved_by': random.choice(employee_list) if has_resolved_by else None,
-                    'detection_method': random.choice(['sensor_threshold', 'predictive_model', 'operator_report', 'automatic']),
-                    'predicted_in_advance': random.random() < 0.75,  # 75% have advance warnings
-                    'advance_warning_hours': round(random.uniform(1, 72), 2) if random.random() < 0.80 else None,
+                    'detection_method': random.choices(
+                        ['sensor_threshold', 'predictive_model', 'operator_report', 'automatic'],
+                        weights=[0.40, 0.35, 0.15, 0.10]
+                    )[0],
+                    'predicted_in_advance': fault_severity in ['critical', 'major'],  # Predictability by severity
+                    'advance_warning_hours': round(random.uniform(4, 48), 2) if fault_severity in ['critical', 'major'] else None,
                     'status': fault_status,
                     'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -444,7 +570,7 @@ class OperationsDataGenerator:
         print(f"✓ Generated {len(self.data['sensor_health'])} sensor health records")
     
     def generate_maintenance_events(self):
-        """Generate maintenance events linked to machine faults"""
+        """Generate maintenance events - realistic distribution"""
         print("Generating maintenance events...")
         
         employee_list = list(self.employees.keys())
@@ -458,45 +584,63 @@ class OperationsDataGenerator:
             faults_by_machine[machine_id].append(fault['fault_id'])
         
         for machine in self.machines:
-            num_events = random.randint(3, 8)
-            for idx, _ in enumerate(range(num_events)):
-                event_start = datetime.now() - timedelta(days=random.randint(0, 30))
-                event_duration = timedelta(hours=random.uniform(0.5, 8))
-                event_end = event_start + event_duration
+            # REALISTIC: 4-6 maintenance events per machine per 2 weeks
+            num_events = random.randint(4, 6)
+            
+            for idx in range(num_events):
+                event_start = datetime.now() - timedelta(days=random.randint(0, 14))
                 
-                # Choose maintenance category
-                maintenance_category = random.choice(['mechanical', 'electrical', 'hydraulic', 'lubrication', 'calibration'])
-                maintenance_type = random.choice(['preventive', 'corrective', 'breakdown', 'inspection', 'replacement'])
+                # REALISTIC maintenance type distribution
+                # preventive: 65%, corrective: 20%, inspection: 10%, breakdown: 3%, replacement: 2%
+                maintenance_type = random.choices(
+                    ['preventive', 'corrective', 'inspection', 'breakdown', 'replacement'],
+                    weights=[0.65, 0.20, 0.10, 0.03, 0.02]
+                )[0]
                 
-                # Generate realistic data based on type
+                # Duration matches type
                 if maintenance_type == 'preventive':
-                    parts_cost = round(random.uniform(50, 500), 2)
-                    labor_hours = round(random.uniform(1, 4), 2)
+                    event_duration = timedelta(hours=round(random.gauss(2, 0.5), 1))
+                    parts_cost = round(random.gauss(200, 80), 2)
+                    labor_hours = round(random.gauss(2, 0.5), 2)
                 elif maintenance_type == 'breakdown':
-                    parts_cost = round(random.uniform(500, 3000), 2)
-                    labor_hours = round(random.uniform(4, 16), 2)
-                else:
-                    parts_cost = round(random.uniform(100, 1500), 2)
-                    labor_hours = round(random.uniform(1, 8), 2)
+                    event_duration = timedelta(hours=round(random.gauss(6, 1.5), 1))
+                    parts_cost = round(random.gauss(1500, 500), 2)
+                    labor_hours = round(random.gauss(8, 2), 2)
+                elif maintenance_type == 'corrective':
+                    event_duration = timedelta(hours=round(random.gauss(3, 0.8), 1))
+                    parts_cost = round(random.gauss(600, 200), 2)
+                    labor_hours = round(random.gauss(3, 0.8), 2)
+                elif maintenance_type == 'replacement':
+                    event_duration = timedelta(hours=round(random.gauss(4, 1), 1))
+                    parts_cost = round(random.gauss(2000, 600), 2)
+                    labor_hours = round(random.gauss(4, 1), 2)
+                else:  # inspection
+                    event_duration = timedelta(hours=round(random.gauss(1.5, 0.4), 1))
+                    parts_cost = round(random.gauss(100, 40), 2)
+                    labor_hours = round(random.gauss(1.5, 0.4), 2)
                 
-                labor_cost = labor_hours * round(random.uniform(75, 150), 2)  # hourly rate
+                event_end = event_start + event_duration
+                labor_cost = labor_hours * round(random.uniform(100, 150), 2)
                 total_cost = parts_cost + labor_cost
                 
-                # Link to fault if available - higher probability for corrective/breakdown (increased)
+                maintenance_category = random.choice(['mechanical', 'electrical', 'hydraulic', 'lubrication', 'calibration'])
+                priority = 'critical' if maintenance_type == 'breakdown' else random.choices(
+                    ['high', 'medium', 'low'],
+                    weights=[0.30, 0.50, 0.20]
+                )[0]
+                
+                # Link to fault: corrective/breakdown should link, preventive occasionally
                 related_fault_id = None
                 if machine['machine_id'] in faults_by_machine:
-                    if maintenance_type in ['corrective', 'breakdown']:
-                        # 95% for reactive maintenance (up from 85%)
-                        if random.random() < 0.95:
+                    if maintenance_type == 'corrective':
+                        if random.random() < 0.85:  # 85% of corrective linked to faults
                             related_fault_id = random.choice(faults_by_machine[machine['machine_id']])
-                    elif maintenance_type == 'replacement':
-                        # 75% for replacement (up from 50%)
-                        if random.random() < 0.75:
+                    elif maintenance_type == 'breakdown':
+                        if random.random() < 0.90:  # 90% of breakdowns linked to faults
                             related_fault_id = random.choice(faults_by_machine[machine['machine_id']])
-                    elif maintenance_type == 'inspection':
-                        # 30% for inspection
-                        if random.random() < 0.30:
-                            related_fault_id = random.choice(faults_by_machine[machine['machine_id']])
+                    elif maintenance_type == 'replacement' and random.random() < 0.40:
+                        # 40% of replacements linked to prior faults
+                        related_fault_id = random.choice(faults_by_machine[machine['machine_id']])
                 
                 event = {
                     'maintenance_id': self.get_next_id('MEVT'),
@@ -505,24 +649,27 @@ class OperationsDataGenerator:
                     'factory_id': machine['factory_id'],
                     'maintenance_type': maintenance_type,
                     'maintenance_category': maintenance_category,
-                    'priority': random.choice(['critical', 'high', 'medium', 'low']),
+                    'priority': priority,
                     'scheduled_start': (event_start - timedelta(days=random.randint(1, 7))).strftime('%Y-%m-%d %H:%M:%S'),
                     'actual_start': event_start.strftime('%Y-%m-%d %H:%M:%S'),
-                    'actual_end': event_end.strftime('%Y-%m-%d %H:%M:%S') if random.random() > 0.1 else None,
+                    'actual_end': event_end.strftime('%Y-%m-%d %H:%M:%S'),
                     'duration_minutes': int(event_duration.total_seconds() / 60),
-                    'work_description': f"{maintenance_category.capitalize()} maintenance for {machine['machine_name']}",
-                    'parts_replaced': ', '.join([f"PART-{random.randint(1000, 9999)}" for _ in range(random.randint(0, 5))]) or None,
+                    'work_description': f"{maintenance_category.capitalize()} maintenance - {maintenance_type.upper()}",
+                    'parts_replaced': ', '.join([f"PART-{random.randint(1000, 9999)}" for _ in range(random.randint(0, 3))]) if maintenance_type in ['corrective', 'breakdown', 'replacement'] else None,
                     'parts_cost_usd': parts_cost,
                     'labor_hours': labor_hours,
                     'labor_cost_usd': labor_cost,
                     'total_cost_usd': total_cost,
                     'technician_id': random.choice(employee_list),
                     'supervisor_id': random.choice(employee_list),
-                    'related_fault_id': related_fault_id,  # Now linked to actual faults
-                    'completion_status': random.choice(['completed', 'partial', 'deferred', 'cancelled']),
-                    'notes': f"Maintenance performed on {event_start.strftime('%Y-%m-%d')}",
-                    'follow_up_required': random.random() < 0.2,
-                    'next_maintenance_due': (event_end + timedelta(days=random.randint(30, 180))).strftime('%Y-%m-%d'),
+                    'related_fault_id': related_fault_id,
+                    'completion_status': random.choices(
+                        ['completed', 'partial', 'deferred'],
+                        weights=[0.95, 0.04, 0.01]
+                    )[0],
+                    'notes': f"{maintenance_type.capitalize()} maintenance completed",
+                    'follow_up_required': maintenance_type in ['breakdown', 'corrective'] and random.random() < 0.15,
+                    'next_maintenance_due': (event_end + timedelta(days=random.randint(30, 90))).strftime('%Y-%m-%d'),
                     'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                     'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }

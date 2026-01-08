@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-GenIMS Quality Management System (QMS) Daemon - Ultra-Fast Batch Generation
-Generates 30 days of QMS data: customer complaints, NCRs, CAPAs, quality KPIs,
-SPC data points, calibration alerts, and audit findings
+GenIMS Quality Management System (QMS) Daemon - Enterprise-grade Ultra-Fast Batch Generation
+Generates 30 days of QMS data with TimeCoordinator, Registry validation, and proper error handling
 """
 
 import sys
@@ -10,12 +9,53 @@ import os
 import logging
 from datetime import datetime, timedelta
 import random
+import time
+from pathlib import Path
 from dotenv import load_dotenv
 
 # Load environment variables
 env_file = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'config.env')
 if os.path.exists(env_file):
     load_dotenv(env_file)
+
+# Add scripts to path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
+try:
+    from generator_helper import get_helper
+except ImportError as e:
+    print(f"ERROR: Could not import enterprise modules: {e}")
+    sys.exit(1)
+
+
+class TimeCoordinator:
+    """Manages time coordination and current-date enforcement"""
+    def __init__(self):
+        # Always use current date for data generation
+        current_time = datetime.now()
+        self.base_time = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+    def get_current_time(self):
+        """Get current date enforced time"""
+        return self.base_time
+    
+    def get_current_date(self):
+        """Get current date"""
+        return self.base_time.date()
+        
+    def get_timestamp_with_offset(self, offset_seconds):
+        """Get timestamp with offset but still on current date"""
+        return self.base_time + timedelta(seconds=offset_seconds)
+        
+    def add_coordination_delay(self, operation_name):
+        """Add time coordination delay between operations"""
+        delay = random.uniform(2.0, 3.5)
+        time.sleep(delay)
+        logger.info(f"Time coordination delay for {operation_name}: {delay:.2f}s")
+        
+    def generate_unique_timestamp(self, base_offset=0):
+        """Generate unique timestamp with millisecond precision"""
+        current_time = self.base_time + timedelta(seconds=base_offset)
+        return current_time.strftime('%Y%m%d%H%M%S') + f"{current_time.microsecond // 1000:03d}"
 
 try:
     import psycopg2
@@ -266,7 +306,7 @@ def generate_batch_data(master_data, start_time, run_timestamp):
             kpi_counter += 1
             
             quality_kpis.append({
-                'kpi_id': f"KPI-{run_timestamp}-{kpi_counter:06d}",
+                'kpi_id': f"KPI-{current_date.strftime('%Y%m%d')}",
                 'kpi_date': current_date,
                 'internal_defect_ppm': random.randint(50, 500),
                 'first_time_quality_pct': round(random.uniform(95.0, 99.5), 2),
@@ -384,171 +424,216 @@ def batch_insert_data(data):
     
     batch_size = 5000
     
-    # Insert customer complaints
+    # Insert customer complaints - NO ON CONFLICT to catch real constraint violations
+    # Insert customer complaints - NO ON CONFLICT to catch real constraint violations
     if data['customer_complaints']:
         logger.info(f"Inserting {len(data['customer_complaints'])} customer complaints...")
-        for i in range(0, len(data['customer_complaints']), batch_size):
-            batch = data['customer_complaints'][i:i+batch_size]
-            execute_batch(cursor, """
-                INSERT INTO customer_complaints (
-                    complaint_id, complaint_number, customer_id, product_id,
-                    complaint_date, complaint_description, complaint_type,
-                    severity, safety_issue, quantity_affected, immediate_action,
-                    complaint_status, created_at
-                ) VALUES (
-                    %(complaint_id)s, %(complaint_number)s, %(customer_id)s, %(product_id)s,
-                    %(complaint_date)s, %(complaint_description)s, %(complaint_type)s,
-                    %(severity)s, %(safety_issue)s, %(quantity_affected)s, %(immediate_action)s,
-                    %(complaint_status)s, %(created_at)s
-                ) ON CONFLICT (complaint_number) DO NOTHING
-            """, batch)
+        try:
+            for i in range(0, len(data['customer_complaints']), batch_size):
+                batch = data['customer_complaints'][i:i+batch_size]
+                execute_batch(cursor, """
+                    INSERT INTO customer_complaints (
+                        complaint_id, complaint_number, customer_id, product_id,
+                        complaint_date, complaint_description, complaint_type,
+                        severity, safety_issue, quantity_affected, immediate_action,
+                        complaint_status, created_at
+                    ) VALUES (
+                        %(complaint_id)s, %(complaint_number)s, %(customer_id)s, %(product_id)s,
+                        %(complaint_date)s, %(complaint_description)s, %(complaint_type)s,
+                        %(severity)s, %(safety_issue)s, %(quantity_affected)s, %(immediate_action)s,
+                        %(complaint_status)s, %(created_at)s
+                    )
+                """, batch)
+            logger.info(f"✓ Successfully inserted {len(data['customer_complaints'])} customer complaints")
+        except Exception as e:
+            logger.error(f"✗ Error inserting customer complaints: {e}")
+            raise
     
-    # Insert NCR headers
+    # Insert NCR headers - NO ON CONFLICT to catch real constraint violations
     if data['ncr_headers']:
         logger.info(f"Inserting {len(data['ncr_headers'])} NCR headers...")
-        for i in range(0, len(data['ncr_headers']), batch_size):
-            batch = data['ncr_headers'][i:i+batch_size]
-            execute_batch(cursor, """
-                INSERT INTO ncr_headers (
-                    ncr_id, ncr_number, source_type, detected_date, detected_by,
-                    material_id, product_id, quantity_inspected, quantity_defective,
-                    defect_type, defect_description, defect_severity,
-                    disposition, ncr_status, priority, created_at
-                ) VALUES (
-                    %(ncr_id)s, %(ncr_number)s, %(source_type)s, %(detected_date)s, %(detected_by)s,
-                    %(material_id)s, %(product_id)s, %(quantity_inspected)s, %(quantity_defective)s,
-                    %(defect_type)s, %(defect_description)s, %(defect_severity)s,
-                    %(disposition)s, %(ncr_status)s, %(priority)s, %(created_at)s
-                ) ON CONFLICT (ncr_number) DO NOTHING
-            """, batch)
+        try:
+            for i in range(0, len(data['ncr_headers']), batch_size):
+                batch = data['ncr_headers'][i:i+batch_size]
+                execute_batch(cursor, """
+                    INSERT INTO ncr_headers (
+                        ncr_id, ncr_number, source_type, detected_date, detected_by,
+                        material_id, product_id, quantity_inspected, quantity_defective,
+                        defect_type, defect_description, defect_severity,
+                        disposition, ncr_status, priority, created_at
+                    ) VALUES (
+                        %(ncr_id)s, %(ncr_number)s, %(source_type)s, %(detected_date)s, %(detected_by)s,
+                        %(material_id)s, %(product_id)s, %(quantity_inspected)s, %(quantity_defective)s,
+                        %(defect_type)s, %(defect_description)s, %(defect_severity)s,
+                        %(disposition)s, %(ncr_status)s, %(priority)s, %(created_at)s
+                    )
+                """, batch)
+            logger.info(f"✓ Successfully inserted {len(data['ncr_headers'])} NCR headers")
+        except Exception as e:
+            logger.error(f"✗ Error inserting NCR headers: {e}")
+            raise
     
     # Insert NCR defect details
     if data['ncr_defect_details']:
         logger.info(f"Inserting {len(data['ncr_defect_details'])} NCR defect details...")
-        for i in range(0, len(data['ncr_defect_details']), batch_size):
-            batch = data['ncr_defect_details'][i:i+batch_size]
-            execute_batch(cursor, """
-                INSERT INTO ncr_defect_details (
-                    defect_detail_id, ncr_id, characteristic_name, specification,
-                    actual_value, measurement_method, measuring_equipment,
-                    defect_location, created_at
-                ) VALUES (
-                    %(defect_detail_id)s, %(ncr_id)s, %(characteristic_name)s, %(specification)s,
-                    %(actual_value)s, %(measurement_method)s, %(measuring_equipment)s,
-                    %(defect_location)s, %(created_at)s
-                ) ON CONFLICT (defect_detail_id) DO NOTHING
-            """, batch)
-    
+        try:
+            for i in range(0, len(data['ncr_defect_details']), batch_size):
+                batch = data['ncr_defect_details'][i:i+batch_size]
+                execute_batch(cursor, """
+                    INSERT INTO ncr_defect_details (
+                        defect_detail_id, ncr_id, characteristic_name, specification,
+                        actual_value, measurement_method, measuring_equipment,
+                        defect_location, created_at
+                    ) VALUES (
+                        %(defect_detail_id)s, %(ncr_id)s, %(characteristic_name)s, %(specification)s,
+                        %(actual_value)s, %(measurement_method)s, %(measuring_equipment)s,
+                        %(defect_location)s, %(created_at)s
+                    )
+                """, batch)
+            logger.info(f"✓ Successfully inserted {len(data['ncr_defect_details'])} NCR defect details")
+        except Exception as e:
+            logger.error(f"✗ Error inserting NCR defect details: {e}")
+            raise
     # Insert CAPA headers
     if data['capa_headers']:
         logger.info(f"Inserting {len(data['capa_headers'])} CAPA headers...")
-        for i in range(0, len(data['capa_headers']), batch_size):
-            batch = data['capa_headers'][i:i+batch_size]
-            execute_batch(cursor, """
-                INSERT INTO capa_headers (
-                    capa_id, capa_number, action_type, initiated_from,
-                    problem_description, problem_severity, immediate_actions,
-                    actions_planned, responsible_person, responsible_department,
-                    target_completion_date, capa_status, created_at
-                ) VALUES (
-                    %(capa_id)s, %(capa_number)s, %(action_type)s, %(initiated_from)s,
-                    %(problem_description)s, %(problem_severity)s, %(immediate_actions)s,
-                    %(actions_planned)s, %(responsible_person)s, %(responsible_department)s,
-                    %(target_completion_date)s, %(capa_status)s, %(created_at)s
-                ) ON CONFLICT (capa_number) DO NOTHING
-            """, batch)
+        try:
+            for i in range(0, len(data['capa_headers']), batch_size):
+                batch = data['capa_headers'][i:i+batch_size]
+                execute_batch(cursor, """
+                    INSERT INTO capa_headers (
+                        capa_id, capa_number, action_type, initiated_from,
+                        problem_description, problem_severity, immediate_actions,
+                        actions_planned, responsible_person, responsible_department,
+                        target_completion_date, capa_status, created_at
+                    ) VALUES (
+                        %(capa_id)s, %(capa_number)s, %(action_type)s, %(initiated_from)s,
+                        %(problem_description)s, %(problem_severity)s, %(immediate_actions)s,
+                        %(actions_planned)s, %(responsible_person)s, %(responsible_department)s,
+                        %(target_completion_date)s, %(capa_status)s, %(created_at)s
+                    )
+                """, batch)
+            logger.info(f"✓ Successfully inserted {len(data['capa_headers'])} CAPA headers")
+        except Exception as e:
+            logger.error(f"✗ Error inserting CAPA headers: {e}")
+            raise
     
     # Insert CAPA actions
     if data['capa_actions']:
         logger.info(f"Inserting {len(data['capa_actions'])} CAPA actions...")
-        for i in range(0, len(data['capa_actions']), batch_size):
-            batch = data['capa_actions'][i:i+batch_size]
-            execute_batch(cursor, """
-                INSERT INTO capa_actions (
-                    action_id, capa_id, action_sequence, action_description,
-                    assigned_to, due_date, action_status, created_at
-                ) VALUES (
-                    %(action_id)s, %(capa_id)s, %(action_sequence)s, %(action_description)s,
-                    %(assigned_to)s, %(due_date)s, %(action_status)s, %(created_at)s
-                ) ON CONFLICT (action_id) DO NOTHING
-            """, batch)
+        try:
+            for i in range(0, len(data['capa_actions']), batch_size):
+                batch = data['capa_actions'][i:i+batch_size]
+                execute_batch(cursor, """
+                    INSERT INTO capa_actions (
+                        action_id, capa_id, action_sequence, action_description,
+                        assigned_to, due_date, action_status, created_at
+                    ) VALUES (
+                        %(action_id)s, %(capa_id)s, %(action_sequence)s, %(action_description)s,
+                        %(assigned_to)s, %(due_date)s, %(action_status)s, %(created_at)s
+                    )
+                """, batch)
+            logger.info(f"✓ Successfully inserted {len(data['capa_actions'])} CAPA actions")
+        except Exception as e:
+            logger.error(f"✗ Error inserting CAPA actions: {e}")
+            raise
     
     # Insert quality KPIs
     if data['quality_kpis']:
         logger.info(f"Inserting {len(data['quality_kpis'])} quality KPIs...")
-        for i in range(0, len(data['quality_kpis']), batch_size):
-            batch = data['quality_kpis'][i:i+batch_size]
-            execute_batch(cursor, """
-                INSERT INTO quality_kpis (
-                    kpi_id, kpi_date, internal_defect_ppm, first_time_quality_pct,
-                    customer_complaints, customer_returns_ppm, incoming_rejection_pct,
-                    supplier_defect_ppm, processes_in_control, processes_total,
-                    process_capability_avg, ncr_opened, ncr_closed, ncr_open_count,
-                    capa_overdue, equipment_calibrated_pct, equipment_overdue, created_at
-                ) VALUES (
-                    %(kpi_id)s, %(kpi_date)s, %(internal_defect_ppm)s, %(first_time_quality_pct)s,
-                    %(customer_complaints)s, %(customer_returns_ppm)s, %(incoming_rejection_pct)s,
-                    %(supplier_defect_ppm)s, %(processes_in_control)s, %(processes_total)s,
-                    %(process_capability_avg)s, %(ncr_opened)s, %(ncr_closed)s, %(ncr_open_count)s,
-                    %(capa_overdue)s, %(equipment_calibrated_pct)s, %(equipment_overdue)s, %(created_at)s
-                ) ON CONFLICT (kpi_date) DO NOTHING
-            """, batch)
+        try:
+            for i in range(0, len(data['quality_kpis']), batch_size):
+                batch = data['quality_kpis'][i:i+batch_size]
+                execute_batch(cursor, """
+                    INSERT INTO quality_kpis (
+                        kpi_id, kpi_date, internal_defect_ppm, first_time_quality_pct,
+                        customer_complaints, customer_returns_ppm, incoming_rejection_pct,
+                        supplier_defect_ppm, processes_in_control, processes_total,
+                        process_capability_avg, ncr_opened, ncr_closed, ncr_open_count,
+                        capa_overdue, equipment_calibrated_pct, equipment_overdue, created_at
+                    ) VALUES (
+                        %(kpi_id)s, %(kpi_date)s, %(internal_defect_ppm)s, %(first_time_quality_pct)s,
+                        %(customer_complaints)s, %(customer_returns_ppm)s, %(incoming_rejection_pct)s,
+                        %(supplier_defect_ppm)s, %(processes_in_control)s, %(processes_total)s,
+                        %(process_capability_avg)s, %(ncr_opened)s, %(ncr_closed)s, %(ncr_open_count)s,
+                        %(capa_overdue)s, %(equipment_calibrated_pct)s, %(equipment_overdue)s, %(created_at)s
+                    )
+                """, batch)
+            logger.info(f"✓ Successfully inserted {len(data['quality_kpis'])} quality KPIs")
+        except Exception as e:
+            logger.error(f"✗ Error inserting quality KPIs: {e}")
+            raise
     
     # Insert SPC data points
     if data['spc_data_points']:
         logger.info(f"Inserting {len(data['spc_data_points'])} SPC data points...")
-        for i in range(0, len(data['spc_data_points']), batch_size):
-            batch = data['spc_data_points'][i:i+batch_size]
-            execute_batch(cursor, """
-                INSERT INTO spc_data_points (
-                    data_point_id, chart_id, measurement_timestamp, subgroup_number,
-                    measurement_value, measured_by, out_of_control, violation_type, created_at
-                ) VALUES (
-                    %(data_point_id)s, %(chart_id)s, %(measurement_timestamp)s, %(subgroup_number)s,
-                    %(measurement_value)s, %(measured_by)s, %(out_of_control)s, %(violation_type)s, %(created_at)s
-                ) ON CONFLICT (data_point_id) DO NOTHING
-            """, batch)
+        try:
+            for i in range(0, len(data['spc_data_points']), batch_size):
+                batch = data['spc_data_points'][i:i+batch_size]
+                execute_batch(cursor, """
+                    INSERT INTO spc_data_points (
+                        data_point_id, chart_id, measurement_timestamp, subgroup_number,
+                        measurement_value, measured_by, out_of_control, violation_type, created_at
+                    ) VALUES (
+                        %(data_point_id)s, %(chart_id)s, %(measurement_timestamp)s, %(subgroup_number)s,
+                        %(measurement_value)s, %(measured_by)s, %(out_of_control)s, %(violation_type)s, %(created_at)s
+                    )
+                """, batch)
+            logger.info(f"✓ Successfully inserted {len(data['spc_data_points'])} SPC data points")
+        except Exception as e:
+            logger.error(f"✗ Error inserting SPC data points: {e}")
+            raise
     
     # Insert calibration alerts
     if data['calibration_alerts']:
         logger.info(f"Inserting {len(data['calibration_alerts'])} calibration alerts...")
-        for i in range(0, len(data['calibration_alerts']), batch_size):
-            batch = data['calibration_alerts'][i:i+batch_size]
-            execute_batch(cursor, """
-                INSERT INTO calibration_alerts (
-                    alert_id, equipment_id, alert_type, alert_date,
-                    days_until_due, notification_sent, resolved, created_at
-                ) VALUES (
-                    %(alert_id)s, %(equipment_id)s, %(alert_type)s, %(alert_date)s,
-                    %(days_until_due)s, %(notification_sent)s, %(resolved)s, %(created_at)s
-                ) ON CONFLICT (alert_id) DO NOTHING
-            """, batch)
+        try:
+            for i in range(0, len(data['calibration_alerts']), batch_size):
+                batch = data['calibration_alerts'][i:i+batch_size]
+                execute_batch(cursor, """
+                    INSERT INTO calibration_alerts (
+                        alert_id, equipment_id, alert_type, alert_date,
+                        days_until_due, notification_sent, resolved, created_at
+                    ) VALUES (
+                        %(alert_id)s, %(equipment_id)s, %(alert_type)s, %(alert_date)s,
+                        %(days_until_due)s, %(notification_sent)s, %(resolved)s, %(created_at)s
+                    )
+                """, batch)
+            logger.info(f"✓ Successfully inserted {len(data['calibration_alerts'])} calibration alerts")
+        except Exception as e:
+            logger.error(f"✗ Error inserting calibration alerts: {e}")
+            raise
     
     # Insert audit findings
     if data['audit_findings']:
         logger.info(f"Inserting {len(data['audit_findings'])} audit findings...")
-        for i in range(0, len(data['audit_findings']), batch_size):
-            batch = data['audit_findings'][i:i+batch_size]
-            execute_batch(cursor, """
-                INSERT INTO audit_findings (
-                    finding_id, audit_id, finding_number, finding_type,
-                    finding_category, finding_description, requirement_reference,
-                    risk_level, corrective_action_required, responsible_person,
-                    target_closure_date, finding_status, created_at
-                ) VALUES (
-                    %(finding_id)s, %(audit_id)s, %(finding_number)s, %(finding_type)s,
-                    %(finding_category)s, %(finding_description)s, %(requirement_reference)s,
-                    %(risk_level)s, %(corrective_action_required)s, %(responsible_person)s,
-                    %(target_closure_date)s, %(finding_status)s, %(created_at)s
-                ) ON CONFLICT (finding_id) DO NOTHING
-            """, batch)
+        try:
+            for i in range(0, len(data['audit_findings']), batch_size):
+                batch = data['audit_findings'][i:i+batch_size]
+                execute_batch(cursor, """
+                    INSERT INTO audit_findings (
+                        finding_id, audit_id, finding_number, finding_type,
+                        finding_category, finding_description, requirement_reference,
+                        risk_level, corrective_action_required, responsible_person,
+                        target_closure_date, finding_status, created_at
+                    ) VALUES (
+                        %(finding_id)s, %(audit_id)s, %(finding_number)s, %(finding_type)s,
+                        %(finding_category)s, %(finding_description)s, %(requirement_reference)s,
+                        %(risk_level)s, %(corrective_action_required)s, %(responsible_person)s,
+                        %(target_closure_date)s, %(finding_status)s, %(created_at)s
+                    )
+                """, batch)
+            logger.info(f"✓ Successfully inserted {len(data['audit_findings'])} audit findings")
+        except Exception as e:
+            logger.error(f"✗ Error inserting audit findings: {e}")
+            raise
     
     cursor.close()
     logger.info("✓ All data inserted")
 
-def validate_insertions():
+def validate_insertions(label="CURRENT"):
     """Validate data was inserted correctly"""
-    logger.info("\nValidating insertions...")
+    logger.info(f"\nValidating insertions ({label})...")
     
     cursor = pg_connection.cursor()
     
@@ -565,12 +650,19 @@ def validate_insertions():
     ]
     
     results = {}
+    total = 0
     for table in tables:
-        cursor.execute(f"SELECT COUNT(*) FROM {table}")
-        count = cursor.fetchone()[0]
-        results[table] = count
-        logger.info(f"  {table}: {count} records")
+        try:
+            cursor.execute(f"SELECT COUNT(*) FROM {table}")
+            count = cursor.fetchone()[0]
+            results[table] = count
+            total += count
+            logger.info(f"  {table}: {count:,} records")
+        except Exception as e:
+            logger.error(f"  {table}: ERROR - {e}")
+            results[table] = 0
     
+    logger.info(f"\n  TOTAL: {total:,} records across {len(tables)} tables")
     cursor.close()
     return results
 
@@ -596,7 +688,7 @@ def main():
         
         # Get counts before
         logger.info("\n--- Counts BEFORE ---")
-        counts_before = validate_insertions()
+        counts_before = validate_insertions("BEFORE")
         
         # Load master data
         cursor = pg_connection.cursor()
@@ -619,7 +711,7 @@ def main():
         
         # Validate
         logger.info("\n--- Counts AFTER ---")
-        counts_after = validate_insertions()
+        counts_after = validate_insertions("AFTER")
         
         # Calculate inserted records
         logger.info("\n--- Records INSERTED ---")

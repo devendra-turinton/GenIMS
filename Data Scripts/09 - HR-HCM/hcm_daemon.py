@@ -17,6 +17,16 @@ env_file = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts', 'confi
 if os.path.exists(env_file):
     load_dotenv(env_file)
 
+# Add scripts to path for helper access
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'scripts'))
+
+try:
+    from data_registry import get_helper
+    HELPER_AVAILABLE = True
+except ImportError:
+    HELPER_AVAILABLE = False
+    print("Warning: Helper/registry not available")
+
 try:
     import psycopg2
     from psycopg2.extras import execute_batch
@@ -50,6 +60,32 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger('HCMDaemon')
+
+class TimeCoordinator:
+    """Manages time coordination and validation for HCM operations"""
+    def __init__(self):
+        self.base_time = self.get_validated_base_time()
+    
+    def get_validated_base_time(self):
+        """Always return current datetime for today's data generation"""
+        # ALWAYS use current datetime for today's generation (no historical continuation)
+        current_datetime = datetime.now()
+        base_time = current_datetime.replace(hour=0, minute=0, second=0, microsecond=0)
+        logger.info(f"Using current date for data generation: {base_time}")
+        return base_time
+    
+    def get_current_time(self):
+        """Get the current base time"""
+        return self.base_time
+    
+    def add_time_offset(self, seconds):
+        """Add time offset to base time"""
+        return self.base_time + timedelta(seconds=seconds)
+    
+    def coordination_delay(self, operation_name, delay_seconds=2):
+        """Add coordination delay between operations"""
+        logger.info(f"Time coordination delay for {operation_name}: {delay_seconds}s")
+        time.sleep(delay_seconds)
 
 # Global State
 pg_connection = None
@@ -178,6 +214,23 @@ def load_master_data():
         master_data['existing_enrollments'] = existing_enrollments
         master_data['existing_attendance'] = existing_attendance
         
+        # Load registry validated employee IDs for assignments
+        if HELPER_AVAILABLE:
+            try:
+                helper = get_helper()
+                valid_employee_ids = list(helper.get_valid_employee_ids())
+                if valid_employee_ids:
+                    master_data['valid_employees'] = valid_employee_ids
+                    logger.info(f"Registry validation: {len(valid_employee_ids)} validated employee IDs loaded")
+                else:
+                    logger.warning("No valid employee IDs from registry, using HR employees")
+                    master_data['valid_employees'] = employees
+            except Exception as e:
+                logger.warning(f"Registry validation failed: {e}, using HR employees")
+                master_data['valid_employees'] = employees
+        else:
+            master_data['valid_employees'] = employees
+        
         logger.info(f"Master data loaded: {len(employees)} employees, {len(departments)} departments, {len(shifts)} shifts, {len(leave_types)} leave types, {len(training_schedules)} training schedules")
         logger.info(f"Existing data: {len(existing_enrollments)} enrollments, {len(existing_attendance)} attendance records")
         return True
@@ -186,8 +239,9 @@ def load_master_data():
         return False
 
 def insert_batch_parallel(cursor, insert_sql, data, table_name, batch_size, connection=None):
-    """Insert data in batches"""
+    """Insert data in batches with proper error handling"""
     total_batches = (len(data) + batch_size - 1) // batch_size
+    successful_inserts = 0
     
     for batch_idx in range(total_batches):
         try:
@@ -199,15 +253,24 @@ def insert_batch_parallel(cursor, insert_sql, data, table_name, batch_size, conn
             if connection:
                 connection.commit()
             
+            successful_inserts += len(batch)
             logger.info(f"  Flushed {batch_end:,} / {len(data):,} {table_name}")
         except psycopg2.IntegrityError as e:
-            logger.warning(f"  Batch {batch_idx + 1}/{total_batches} - Integrity error, skipping")
+            logger.warning(f"  Batch {batch_idx + 1}/{total_batches} - Integrity error: {str(e)[:100]}")
+            logger.warning(f"  This may indicate FK constraint violations or duplicate keys")
+            if connection:
+                connection.rollback()
+        except psycopg2.Error as e:
+            logger.error(f"  Batch {batch_idx + 1}/{total_batches} - Database error: {str(e)[:200]}")
             if connection:
                 connection.rollback()
         except Exception as e:
-            logger.error(f"  Batch {batch_idx + 1}/{total_batches} error: {e}")
+            logger.error(f"  Batch {batch_idx + 1}/{total_batches} - Unexpected error: {e}")
             if connection:
                 connection.rollback()
+    
+    logger.info(f"  Successfully inserted {successful_inserts:,}/{len(data):,} {table_name} records")
+    return successful_inserts
 
 def main():
     """Main - Generate all HR data in-memory, then bulk dump"""
@@ -218,6 +281,20 @@ def main():
     logger.info(f"  Database: {PG_HR_DB}")
     logger.info(f"  Batch Size: {BATCH_SIZE}")
     logger.info("="*80)
+    
+    # Initialize time coordinator and helper
+    time_coord = TimeCoordinator()
+    logger.info(f"Time Coordinator initialized: {time_coord.get_current_time()}")
+    
+    if HELPER_AVAILABLE:
+        try:
+            helper = get_helper()
+            # Get total registered IDs for logging
+            total_ids = sum(len(ids) for ids in helper.registry.registered_ids.values()) if hasattr(helper.registry, 'registered_ids') else 0
+            logger.info(f"Registry helper loaded with {total_ids} total registered IDs")
+        except Exception as e:
+            logger.warning(f"Helper initialization failed: {e}")
+            helper = None
     
     start_time = time.time()
     
@@ -251,8 +328,20 @@ def main():
     training_enrollments = []
     safety_incidents = []
     
-    sim_base_time = datetime.strptime(datetime.now().strftime('%Y-%m-%d 00:00:00'), '%Y-%m-%d %H:%M:%S')
-    run_timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    # Use time coordinator for synchronized timestamps
+    sim_base_time = time_coord.get_current_time().replace(hour=0, minute=0, second=0, microsecond=0)
+    # Use current datetime with milliseconds to ensure uniqueness across runs
+    current_time = datetime.now()
+    run_timestamp = current_time.strftime('%Y%m%d%H%M%S') + f"{current_time.microsecond // 1000:03d}"
+    
+    # Validate FK availability
+    if not master_data['employees'] or not master_data['departments'] or not master_data['shifts']:
+        logger.error("Critical: Missing master data for FK references")
+        return 1
+    
+    # Get validated employee IDs for assignment
+    valid_employee_ids = master_data.get('valid_employees', master_data['employees'])
+    logger.info(f"FK Validation: {len(master_data['employees'])} employees, {len(master_data['departments'])} departments, {len(valid_employee_ids)} validated employees")
     
     # Track unique combinations to avoid UNIQUE constraint violations
     # Initialize with existing database data
@@ -261,13 +350,19 @@ def main():
     
     # Generate HR records
     for i in range(TOTAL_RECORDS):
-        timestamp_offset = i * 3600  # 1 hour intervals
-        current_ts = sim_base_time + timedelta(seconds=timestamp_offset)
+        timestamp_offset = i * 300  # 5 minute intervals
+        current_ts = time_coord.add_time_offset(timestamp_offset)
         current_date = current_ts.date()
         
-        employee = random.choice(master_data['employees'])
-        department = random.choice(master_data['departments'])
-        shift = random.choice(master_data['shifts'])
+        # Validated FK selection
+        try:
+            employee = random.choice(master_data['employees'])
+            department = random.choice(master_data['departments'])
+            shift = random.choice(master_data['shifts'])
+            assigned_employee = random.choice(valid_employee_ids)
+        except IndexError:
+            logger.error(f"FK reference error at record {i}")
+            continue
         
         # Attendance Records (1 per record for daily tracking)
         # UNIQUE constraint: (employee_id, attendance_date)
@@ -313,7 +408,7 @@ def main():
                 'total_days': total_days,
                 'is_half_day': random.choice([True, False]) if total_days == 1 else False,
                 'request_status': random.choice(['Pending', 'Approved', 'Rejected', 'Cancelled']),
-                'approved_by': random.choice(master_data['employees']) if random.random() > 0.3 else None,
+                'approved_by': assigned_employee if random.random() > 0.3 else None,
                 'approval_date': current_date + timedelta(days=1) if random.random() > 0.3 else None,
                 'created_at': current_ts
             })
@@ -330,7 +425,7 @@ def main():
                 'review_type': random.choice(['Annual', 'Mid-Year', 'Quarterly', 'Probation']),
                 'review_period_start': review_start,
                 'review_period_end': review_end,
-                'reviewer_id': random.choice(master_data['employees']),
+                'reviewer_id': assigned_employee,
                 'review_date': current_date,
                 'overall_rating': round(random.uniform(2.5, 5.0), 1),
                 'performance_level': random.choice(['Exceeds', 'Meets', 'Below', 'Outstanding']),
@@ -414,10 +509,10 @@ def main():
             ) VALUES (%(attendance_id)s, %(employee_id)s, %(attendance_date)s, %(shift_id)s,
                 %(clock_in_time)s, %(clock_out_time)s, %(scheduled_hours)s, %(actual_hours)s,
                 %(regular_hours)s, %(overtime_hours)s, %(attendance_status)s, %(late_minutes)s,
-                %(created_at)s)
-            ON CONFLICT (attendance_id) DO NOTHING"""
+                %(created_at)s)"""
             logger.info(f"Inserting {len(attendance_records):,} attendance records...")
             insert_batch_parallel(cursor, insert_sql, attendance_records, "attendance_records", BATCH_SIZE, pg_connection)
+            time_coord.coordination_delay("attendance_records")
         
         # Insert leave requests
         if leave_requests:
@@ -426,10 +521,10 @@ def main():
                 total_days, is_half_day, request_status, approved_by, approval_date, created_at
             ) VALUES (%(request_id)s, %(employee_id)s, %(leave_type_id)s, %(request_date)s,
                 %(start_date)s, %(end_date)s, %(total_days)s, %(is_half_day)s, %(request_status)s,
-                %(approved_by)s, %(approval_date)s, %(created_at)s)
-            ON CONFLICT (request_id) DO NOTHING"""
+                %(approved_by)s, %(approval_date)s, %(created_at)s)"""
             logger.info(f"Inserting {len(leave_requests):,} leave requests...")
             insert_batch_parallel(cursor, insert_sql, leave_requests, "leave_requests", BATCH_SIZE, pg_connection)
+            time_coord.coordination_delay("leave_requests")
         
         # Insert performance reviews
         if performance_reviews:
@@ -440,10 +535,10 @@ def main():
             ) VALUES (%(review_id)s, %(employee_id)s, %(review_type)s, %(review_period_start)s,
                 %(review_period_end)s, %(reviewer_id)s, %(review_date)s, %(overall_rating)s,
                 %(performance_level)s, %(technical_competency_rating)s,
-                %(behavioral_competency_rating)s, %(goals_achieved)s, %(created_at)s)
-            ON CONFLICT (review_id) DO NOTHING"""
+                %(behavioral_competency_rating)s, %(goals_achieved)s, %(created_at)s)"""
             logger.info(f"Inserting {len(performance_reviews):,} performance reviews...")
             insert_batch_parallel(cursor, insert_sql, performance_reviews, "performance_reviews", BATCH_SIZE, pg_connection)
+            time_coord.coordination_delay("performance_reviews")
         
         # Insert training enrollments
         if training_enrollments:
@@ -454,10 +549,10 @@ def main():
             ) VALUES (%(enrollment_id)s, %(schedule_id)s, %(employee_id)s, %(enrollment_date)s,
                 %(enrollment_status)s, %(attended)s, %(attendance_date)s, %(attendance_hours)s,
                 %(assessment_score)s, %(passed)s, %(completion_status)s, %(completion_date)s,
-                %(created_at)s)
-            ON CONFLICT (enrollment_id) DO NOTHING"""
+                %(created_at)s)"""
             logger.info(f"Inserting {len(training_enrollments):,} training enrollments...")
             insert_batch_parallel(cursor, insert_sql, training_enrollments, "training_enrollments", BATCH_SIZE, pg_connection)
+            time_coord.coordination_delay("training_enrollments")
         
         # Insert safety incidents
         if safety_incidents:
@@ -467,10 +562,10 @@ def main():
                 body_part_affected, created_at
             ) VALUES (%(incident_id)s, %(incident_number)s, %(employee_id)s, %(incident_date)s,
                 %(incident_time)s, %(department_id)s, %(incident_type)s, %(severity)s,
-                %(description)s, %(injury_type)s, %(body_part_affected)s, %(created_at)s)
-            ON CONFLICT (incident_number) DO NOTHING"""
+                %(description)s, %(injury_type)s, %(body_part_affected)s, %(created_at)s)"""
             logger.info(f"Inserting {len(safety_incidents):,} safety incidents...")
             insert_batch_parallel(cursor, insert_sql, safety_incidents, "safety_incidents", BATCH_SIZE, pg_connection)
+            time_coord.coordination_delay("safety_incidents")
         
         cursor.close()
         

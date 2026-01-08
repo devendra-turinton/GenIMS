@@ -510,26 +510,82 @@ class ServiceDataGenerator:
                     closed_datetime = None
                     resolution_sla_breached = False
                 
-                # All tickets can be escalated - increase escalation rate significantly
+                # FIXED ESCALATION LOGIC - Use escalation rules properly
                 escalation_level = 0
                 escalated_to = None
                 escalated_datetime = None
                 escalation_reason = None
                 
-                if random.random() < 0.60:  # 60% escalation rate (increased from 40%)
-                    escalation_level = random.choice([1, 2, 3])
-                    escalated_to = random.choice(valid_employee_ids)
-                    escalated_datetime = (ticket_date + timedelta(hours=random.randint(1, 4))).strftime('%Y-%m-%d %H:%M:%S')
-                    escalation_reason = random.choice(['Complexity', 'Customer Insistence', 'SLA Risk', 'Technical Expertise Required', 'Vendor Contact Required'])
-                else:
-                    # Even non-escalated tickets get escalation metadata with lower values
-                    escalated_to = random.choice(valid_employee_ids) if random.random() < 0.3 else random.choice(valid_employee_ids)
-                    escalated_datetime = (ticket_date + timedelta(hours=random.randint(2, 6))).strftime('%Y-%m-%d %H:%M:%S')
-                    escalation_reason = random.choice(['Routine Reassignment', 'Load Balancing'])
+                # Determine escalation based on priority and SLA breaches
+                should_escalate = False
+                escalation_trigger = None
                 
-                # Always generate handle time and KB articles
-                handle_time = random.randint(15, 480)
-                kb_article = f"KB-{random.randint(100000, 999999)}" if random.random() < 0.85 else None
+                # Priority-based escalation
+                if priority == 'critical':
+                    should_escalate = random.random() < 0.85  # 85% for critical
+                    escalation_trigger = 'critical_priority'
+                elif priority == 'urgent':
+                    should_escalate = random.random() < 0.70  # 70% for urgent  
+                    escalation_trigger = 'urgent_priority'
+                elif priority == 'high':
+                    should_escalate = random.random() < 0.50  # 50% for high
+                    escalation_trigger = 'high_priority'
+                elif response_sla_breached or resolution_sla_breached:
+                    should_escalate = random.random() < 0.90  # 90% for SLA breach
+                    escalation_trigger = 'sla_breach'
+                else:
+                    should_escalate = random.random() < 0.25  # 25% for normal cases
+                    escalation_trigger = 'wait_time'
+                
+                if should_escalate:
+                    # Set escalation level based on trigger
+                    if escalation_trigger in ['critical_priority', 'sla_breach']:
+                        escalation_level = random.choice([2, 3])  # Skip level 1 for critical
+                    elif escalation_trigger == 'urgent_priority':
+                        escalation_level = random.choice([1, 2])
+                    else:
+                        escalation_level = 1
+                    
+                    escalated_to = random.choice(valid_employee_ids)
+                    escalation_hours = random.randint(1, 3) if escalation_trigger == 'critical_priority' else random.randint(2, 6)
+                    escalated_datetime = (ticket_date + timedelta(hours=escalation_hours)).strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    # Proper escalation reasons based on trigger
+                    if escalation_trigger == 'critical_priority':
+                        escalation_reason = random.choice(['Critical Business Impact', 'System Down', 'Data Loss Risk'])
+                    elif escalation_trigger == 'sla_breach':
+                        escalation_reason = random.choice(['SLA Response Breach', 'SLA Resolution Breach', 'Customer Escalation'])
+                    elif escalation_trigger == 'urgent_priority':
+                        escalation_reason = random.choice(['High Priority Issue', 'Customer VIP', 'Technical Complexity'])
+                    else:
+                        escalation_reason = random.choice(['Long Wait Time', 'Customer Request', 'Complexity Analysis'])
+                else:
+                    # Non-escalated tickets should have minimal escalation metadata
+                    escalation_level = 0
+                    escalated_to = None
+                    escalated_datetime = None
+                    escalation_reason = None
+                
+                # IMPROVED KB ARTICLE LINKAGE - Based on category and resolution
+                kb_article = None
+                if resolved_datetime:  # Only resolved tickets can reference KB articles
+                    # Higher chance for technical tickets to use KB
+                    if category == 'technical':
+                        kb_article = f"KB-{random.randint(100000, 999999)}" if random.random() < 0.95 else None
+                    elif category in ['installation', 'training']:
+                        kb_article = f"KB-{random.randint(100000, 999999)}" if random.random() < 0.85 else None
+                    else:
+                        kb_article = f"KB-{random.randint(100000, 999999)}" if random.random() < 0.60 else None
+                else:
+                    # Open tickets might reference KB during troubleshooting
+                    kb_article = f"KB-{random.randint(100000, 999999)}" if random.random() < 0.30 else None
+                
+                # Handle time based on complexity and resolution
+                if resolved_datetime:
+                    base_time = 15 if priority == 'low' else 30 if priority == 'medium' else 60 if priority == 'high' else 90
+                    handle_time = random.randint(base_time, base_time * 8)
+                else:
+                    handle_time = random.randint(5, 60)  # Shorter for unresolved
                 
                 # Satisfaction rating for all resolved records - significantly increased
                 csat_rating = None

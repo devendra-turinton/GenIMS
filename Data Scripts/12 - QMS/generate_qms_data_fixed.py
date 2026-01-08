@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-GenIMS QMS Data Generator - Complete Fixed version
+GenIMS QMS Data Generator - Enterprise-grade
 Generates data that matches the actual PostgreSQL schema with ALL required fields
 """
 
 import json
 import random
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 import uuid
@@ -14,6 +15,37 @@ import sys
 # Add scripts to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 from generator_helper import get_helper
+
+
+class TimeCoordinator:
+    """Manages time coordination and current-date enforcement"""
+    def __init__(self):
+        # Always use current date for data generation
+        current_time = datetime.now()
+        self.base_time = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+    def get_current_time(self):
+        """Get current date enforced time"""
+        return self.base_time
+    
+    def get_current_date(self):
+        """Get current date"""
+        return self.base_time.date()
+        
+    def get_timestamp_with_offset(self, offset_seconds):
+        """Get timestamp with offset but still on current date"""
+        return self.base_time + timedelta(seconds=offset_seconds)
+        
+    def add_coordination_delay(self, operation_name):
+        """Add time coordination delay between operations"""
+        delay = random.uniform(2.0, 3.5)
+        time.sleep(delay)
+        
+    def generate_unique_timestamp(self, base_offset=0):
+        """Generate unique timestamp with millisecond precision"""
+        current_time = self.base_time + timedelta(seconds=base_offset)
+        return current_time.strftime('%Y%m%d%H%M%S') + f"{current_time.microsecond // 1000:03d}"
+
 
 # Load master data for references
 try:
@@ -29,6 +61,10 @@ class QMSDataGenerator:
         # Load helper for FK validation
         self.helper = get_helper()
         self.registry = self.helper.registry
+        
+        # Initialize TimeCoordinator for consistent enterprise time
+        self.time_coordinator = TimeCoordinator()
+        self.enterprise_date = self.time_coordinator.get_current_date()
         
         self.products = master_data.get('products', [])
         self.factories = master_data.get('factories', [])
@@ -53,6 +89,7 @@ class QMSDataGenerator:
             pass
         
         self.data = {
+            'customer_complaints': [],
             'quality_audits': [],
             'audit_findings': [],
             'quality_documents': [],
@@ -81,6 +118,7 @@ class QMSDataGenerator:
         start_date = datetime.now() - timedelta(days=days)
         
         self.generate_measuring_equipment()
+        self.generate_customer_complaints(start_date, days)
         self.generate_quality_audits(start_date, days)
         self.generate_audit_findings()
         self.generate_ncr_headers(start_date, days)
@@ -103,6 +141,59 @@ class QMSDataGenerator:
         
         return self.data
     
+    def generate_customer_complaints(self, start_date, days):
+        """Generate customer complaints"""
+        print("Generating customer complaints...")
+        current_date = start_date
+        complaint_counter = 1
+        
+        # Load customers from CRM if available
+        customers = []
+        try:
+            crm_file = Path(__file__).parent.parent / "07 - CRM" / "genims_crm_data.json"
+            if crm_file.exists():
+                with open(crm_file, 'r') as f:
+                    crm_data = json.load(f)
+                    customers = crm_data.get('customers', [])
+        except:
+            customers = []
+        
+        # Fallback customer IDs
+        if not customers:
+            customers = [{'customer_id': f'CUST-{i:06d}'} for i in range(1, 11)]
+        
+        customer_ids = [c.get('customer_id', f'CUST-{i:06d}') for i, c in enumerate(customers[:50], 1)]
+        product_ids = [p.get('product_id', f'PROD-{i:06d}') for i, p in enumerate(self.products[:50], 1)] if self.products else [f'PROD-{i:06d}' for i in range(1, 11)]
+        
+        for _ in range(days // 15):  # ~2 complaints every 15 days
+            current_date += timedelta(days=random.randint(5, 15))
+            
+            complaint = {
+                'complaint_id': f"COMP-{complaint_counter:06d}",
+                'complaint_number': f"COMP-{self.enterprise_date.strftime('%Y%m%d')}-{complaint_counter:04d}",
+                'customer_id': random.choice(customer_ids) if customer_ids else 'CUST-000001',
+                'product_id': random.choice(product_ids) if product_ids else 'PROD-000001',
+                'complaint_date': current_date.strftime('%Y-%m-%d'),
+                'complaint_description': random.choice([
+                    'Product does not meet specifications',
+                    'Defective delivery quality',
+                    'Missing components in shipment',
+                    'Dimensional tolerances exceeded',
+                    'Surface finish not acceptable'
+                ]),
+                'complaint_type': random.choice(['quality', 'delivery', 'documentation', 'service']),
+                'severity': random.choice(['critical', 'major', 'minor']),
+                'safety_issue': random.choice([True, False]),
+                'quantity_affected': random.randint(10, 500),
+                'immediate_action': random.choice(['product_recall', 'supplier_corrective_action', 'redesign', 'none']),
+                'complaint_status': random.choice(['open', 'in_review', 'resolved', 'closed']),
+                'created_at': f"{current_date.strftime('%Y-%m-%d')} {random.randint(0, 23):02d}:{random.randint(0, 59):02d}:{random.randint(0, 59):02d}"
+            }
+            self.data['customer_complaints'].append(complaint)
+            complaint_counter += 1
+        
+        print(f"Generated {len(self.data['customer_complaints'])} customer complaints")
+    
     def generate_quality_audits(self, start_date, days):
         """Generate quality audit records"""
         print("Generating quality audits...")
@@ -124,7 +215,7 @@ class QMSDataGenerator:
                     'actual_end_date': (current_date + timedelta(days=1)).strftime('%Y-%m-%d'),
                     'audit_duration_hours': round(random.uniform(4, 16), 1),
                     'lead_auditor': random.choice([e.get('employee_id', 'EMP-000001') for e in self.employees] + ['EMP-000001']),
-                    'audit_team': [e.get('employee_id', 'EMP-000001') for e in random.sample(self.employees if len(self.employees) > 2 else [{'employee_id': 'EMP-000001'}, {'employee_id': 'EMP-000002'}], min(3, len(self.employees) or 2))],  # Array format for PostgreSQL
+                    'audit_team': [e.get('employee_id', 'EMP-000001') for e in random.sample(self.employees if len(self.employees) >= 3 else self.employees + [{'employee_id': 'EMP-000002'}, {'employee_id': 'EMP-000003'}], min(3, len(self.employees) + 2))][:3],  # Safe sample with bounds
                     'audit_location': random.choice([f.get('factory_id', 'FAC-000001') for f in self.factories] + ['FAC-000001']),
                     'audit_score': round(random.uniform(60, 100), 2),
                     'audit_rating': random.choice(['excellent', 'satisfactory', 'needs_improvement']),
@@ -498,37 +589,45 @@ class QMSDataGenerator:
         print(f"Generated {len(self.data['control_plan_characteristics'])} control plan characteristics")
     
     def generate_supplier_quality_metrics(self):
-        """Generate supplier quality metrics"""
+        """Generate supplier quality metrics for historical periods (3 months)"""
         print("Generating supplier quality metrics...")
         
-        for i in range(1, 20):
-            metric = {
-                'metric_id': f"SUPM-{i:05d}",
-                'supplier_id': f"SUP-{i:05d}",
-                'metric_period': datetime.now().strftime('%Y-%m'),
-                'total_receipts': random.randint(10, 100),
-                'receipts_inspected': random.randint(5, 100),
-                'receipts_accepted': random.randint(4, 95),
-                'receipts_rejected': random.randint(0, 10),
-                'total_quantity_received': round(random.uniform(1000, 100000), 2),
-                'quantity_accepted': round(random.uniform(900, 95000), 2),
-                'quantity_rejected': round(random.uniform(0, 10000), 2),
-                'total_defects': random.randint(0, 100),
-                'defect_ppm': random.randint(0, 5000),
-                'critical_defects': random.randint(0, 5),
-                'major_defects': random.randint(0, 30),
-                'minor_defects': random.randint(0, 50),
-                'acceptance_rate_pct': round(random.uniform(85, 99.9), 2),
-                'quality_score': round(random.uniform(80, 100), 2),
-                'ncr_count': random.randint(0, 5),
-                'capa_count': random.randint(0, 3),
-                'capa_effectiveness_pct': round(random.uniform(80, 100), 2),
-                'rejection_cost': round(random.uniform(0, 50000), 2),
-                'rework_cost': round(random.uniform(0, 30000), 2),
-                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            }
-            self.data['supplier_quality_metrics'].append(metric)
+        # Generate metrics for last 3 months to ensure historical data
+        current_date = self.enterprise_date
+        month_offset = 3
+        
+        for month_back in range(month_offset):
+            metric_date = current_date - timedelta(days=30 * month_back)
+            metric_period = metric_date.strftime('%Y-%m')
+            
+            for i in range(1, 20):
+                metric = {
+                    'metric_id': f"SUPM-{metric_period.replace('-', '')}-{i:03d}",
+                    'supplier_id': f"SUP-{i:05d}",
+                    'metric_period': metric_period,  # UNIQUE constraint key
+                    'total_receipts': random.randint(10, 100),
+                    'receipts_inspected': random.randint(5, 100),
+                    'receipts_accepted': random.randint(4, 95),
+                    'receipts_rejected': random.randint(0, 10),
+                    'total_quantity_received': round(random.uniform(1000, 100000), 2),
+                    'quantity_accepted': round(random.uniform(900, 95000), 2),
+                    'quantity_rejected': round(random.uniform(0, 10000), 2),
+                    'total_defects': random.randint(0, 100),
+                    'defect_ppm': random.randint(0, 5000),
+                    'critical_defects': random.randint(0, 5),
+                    'major_defects': random.randint(0, 30),
+                    'minor_defects': random.randint(0, 50),
+                    'acceptance_rate_pct': round(random.uniform(85, 99.9), 2),
+                    'quality_score': round(random.uniform(80, 100), 2),
+                    'ncr_count': random.randint(0, 5),
+                    'capa_count': random.randint(0, 3),
+                    'capa_effectiveness_pct': round(random.uniform(80, 100), 2),
+                    'rejection_cost': round(random.uniform(0, 50000), 2),
+                    'rework_cost': round(random.uniform(0, 30000), 2),
+                    'created_at': metric_date.strftime('%Y-%m-%d %H:%M:%S'),
+                    'updated_at': metric_date.strftime('%Y-%m-%d %H:%M:%S')
+                }
+                self.data['supplier_quality_metrics'].append(metric)
         
         print(f"Generated {len(self.data['supplier_quality_metrics'])} supplier quality metrics")
     
@@ -693,9 +792,9 @@ class QMSDataGenerator:
                 'ppap_level': random.choice([1, 2, 3]),
                 'ppap_status': random.choice(['in_preparation', 'submitted', 'approved']),
                 'submission_date': current_date.strftime('%Y-%m-%d'),
-                'approval_date': (current_date + timedelta(days=random.randint(5, 30))).strftime('%Y-%m-%d'),  # Now always set
-                'approval_expiry_date': (current_date + timedelta(days=random.randint(180, 730))).strftime('%Y-%m-%d'),
-                'approved_by': random.choice([e.get('employee_id', 'EMP-000001') for e in self.employees if e.get('role') in ['manager', 'supervisor']] + ['EMP-000001']),  # Now always set
+                'approval_date': (current_date + timedelta(days=random.randint(5, 30))).strftime('%Y-%m-%d') if random.random() < 0.7 else None,  # Only if likely to be approved
+                'approval_expiry_date': (current_date + timedelta(days=random.randint(180, 730))).strftime('%Y-%m-%d') if random.random() < 0.7 else None,
+                'approved_by': random.choice([e.get('employee_id', 'EMP-000001') for e in self.employees if e.get('role') in ['manager', 'supervisor']] + ['EMP-000001']) if random.random() < 0.7 else None,
                 'submission_reason': random.choice(['Initial Release', 'Engineering Change', 'Supplier Change', 'Specification Change']),
                 'design_records': random.choice([True, False]),
                 'dimensional_results': random.choice([True, False]),

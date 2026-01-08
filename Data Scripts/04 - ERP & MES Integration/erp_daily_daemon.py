@@ -78,6 +78,7 @@ logger = logging.getLogger('ERPDailyDaemon')
 running = True
 pg_connection = None
 master_data = {}
+sim_base_time = datetime.now()  # Coordinated timestamp for consistent data generation
 counters = {
     'material': 1,
     'supplier': 1,
@@ -121,6 +122,69 @@ signal.signal(signal.SIGTERM, signal_handler)
 # ============================================================================
 # DATABASE FUNCTIONS
 # ============================================================================
+
+def _get_max_timestamp():
+    """Get maximum timestamp from ERP transactions and prevent future dates"""
+    global sim_base_time
+    try:
+        if not pg_connection:
+            logger.warning("No database connection available for timestamp check")
+            sim_base_time = datetime.now().replace(hour=RUN_TIME_HOUR, minute=0, second=0, microsecond=0)
+            return
+        
+        cursor = pg_connection.cursor()
+        
+        # Get max from key ERP tables
+        cursor.execute("""
+            SELECT MAX(greatest_timestamp) FROM (
+                SELECT MAX(created_at::timestamp) as greatest_timestamp FROM sales_orders
+                UNION ALL
+                SELECT MAX(created_at::timestamp) FROM purchase_orders  
+                UNION ALL
+                SELECT MAX(created_at::timestamp) FROM goods_receipts
+                UNION ALL
+                SELECT MAX(created_at::timestamp) FROM production_orders
+                UNION ALL
+                SELECT MAX(created_at::timestamp) FROM inventory_transactions
+            ) combined_timestamps
+        """)
+        
+        max_timestamp_tuple = cursor.fetchone()
+        cursor.close()
+        
+        if max_timestamp_tuple and max_timestamp_tuple[0]:
+            max_timestamp = max_timestamp_tuple[0]
+            logger.info(f"Found max ERP timestamp: {max_timestamp}")
+            
+            if isinstance(max_timestamp, str):
+                max_ts = datetime.strptime(max_timestamp, '%Y-%m-%d %H:%M:%S')
+            else:
+                max_ts = max_timestamp
+            
+            # CRITICAL: Never use future dates
+            current_date = datetime.now()
+            if max_ts > current_date:
+                logger.warning(f"Found future timestamp {max_ts}, using current date instead")
+                max_ts = current_date
+            
+            # Set to next business day at 2 AM
+            next_day = max_ts + timedelta(days=1)
+            sim_base_time = next_day.replace(hour=RUN_TIME_HOUR, minute=0, second=0, microsecond=0)
+            
+            # Double-check: if next day is still future, use current time
+            if sim_base_time > current_date:
+                logger.warning(f"Next day {sim_base_time} is in future, using current time instead")
+                sim_base_time = current_date.replace(hour=RUN_TIME_HOUR, minute=0, second=0, microsecond=0)
+        else:
+            logger.info("No existing ERP timestamps found, using current date")
+            sim_base_time = datetime.now().replace(hour=RUN_TIME_HOUR, minute=0, second=0, microsecond=0)
+        
+        logger.info(f"ERP simulation will start from: {sim_base_time}")
+        
+    except Exception as e:
+        logger.error(f"Error getting max timestamp: {e}")
+        sim_base_time = datetime.now().replace(hour=RUN_TIME_HOUR, minute=0, second=0, microsecond=0)
+
 
 def initialize_database():
     """Initialize PostgreSQL connection"""
@@ -207,6 +271,9 @@ def load_master_data():
         # Initialize counters
         _initialize_counters()
         
+        # Initialize coordinated timestamp
+        _get_max_timestamp()
+        
         return True
     except Exception as e:
         logger.error(f"Failed to load master data: {e}")
@@ -277,18 +344,36 @@ def process_new_sales_orders():
         
         for _ in range(num_orders):
             customer = random.choice(master_data['customers'])
+            customer_id = customer['customer_id']
             order_date = datetime.now()
             
+            # Validate customer exists before creating sales order
+            cursor.execute("SELECT customer_id FROM customers WHERE customer_id = %s", (customer_id,))
+            if not cursor.fetchone():
+                logger.warning(f"Customer {customer_id} does not exist, skipping sales order creation")
+                continue
+                
             # Create sales order header
             so_id = generate_id('SO', 'sales_order')
-            so_number = f"SO-{order_date.strftime('%Y%m%d')}-{counters['sales_order']-1:04d}"
+            
+            # Get next available sequence number for today's date pattern
+            today_str = order_date.strftime('%Y%m%d')
+            cursor.execute("""
+                SELECT COALESCE(MAX(CAST(SUBSTRING(sales_order_number FROM '[0-9]+$') AS INTEGER)), -1)
+                FROM sales_orders
+                WHERE sales_order_number LIKE %s
+            """, (f"SO-{today_str}-%",))
+            max_seq = cursor.fetchone()[0]
+            next_seq = max_seq + 1
+            
+            so_number = f"SO-{today_str}-{next_seq:04d}"
             
             delivery_date = order_date + timedelta(days=random.randint(7, 30))
             
             so_data = {
                 'sales_order_id': so_id,
                 'sales_order_number': so_number,
-                'customer_id': customer['customer_id'],
+                'customer_id': customer_id,
                 'order_date': order_date.strftime('%Y-%m-%d'),
                 'order_type': 'standard',
                 'currency': 'INR',
@@ -313,7 +398,14 @@ def process_new_sales_orders():
             
             for line_num in range(1, num_lines + 1):
                 material = random.choice(finished_goods)
-                quantity = random.randint(10, 100)
+                
+                # Validate material exists in database
+                cursor.execute("SELECT material_id FROM materials WHERE material_id = %s", (material['material_id'],))
+                if not cursor.fetchone():
+                    logger.warning(f"Material {material['material_id']} does not exist in database, skipping line")
+                    continue
+                    
+                quantity = round(random.uniform(10.0, 100.0), 4)
                 unit_price = material['standard_cost'] * random.uniform(1.2, 1.5)
                 net_price = quantity * unit_price
                 
@@ -382,7 +474,17 @@ def run_mrp():
         
         # Create MRP run
         mrp_run_id = generate_id('MRP', 'mrp_run')
-        run_number = f"MRP-{datetime.now().strftime('%Y%m%d')}"
+        
+        # Get next available sequence number for today's date pattern
+        cursor.execute("""
+            SELECT COALESCE(MAX(CAST(SUBSTRING(run_number FROM '[0-9]+$') AS INTEGER)), 0)
+            FROM mrp_runs
+            WHERE run_number LIKE %s
+        """, (f"MRP-{datetime.now().strftime('%Y%m%d')}-%",))
+        max_seq = cursor.fetchone()[0]
+        next_seq = max_seq + 1
+        
+        run_number = f"MRP-{datetime.now().strftime('%Y%m%d')}-{next_seq:02d}"
         
         cursor.execute("""
             INSERT INTO mrp_runs (
@@ -493,7 +595,17 @@ def run_mrp():
 def _create_purchase_requisition(material_id: str, quantity: float, required_date, cursor):
     """Create purchase requisition for material"""
     pr_id = generate_id('PR', 'purchase_req')
-    pr_number = f"PR-{datetime.now().strftime('%Y%m%d')}-{counters['purchase_req']-1:04d}"
+    # Get next available sequence number for today's date pattern
+    today_str = datetime.now().strftime('%Y%m%d')
+    cursor.execute("""
+        SELECT COALESCE(MAX(CAST(SUBSTRING(requisition_number FROM '[0-9]+$') AS INTEGER)), -1)
+        FROM purchase_requisitions
+        WHERE requisition_number LIKE %s
+    """, (f"PR-{today_str}-%",))
+    max_seq = cursor.fetchone()[0]
+    next_seq = max_seq + 1
+    
+    pr_number = f"PR-{today_str}-{next_seq:04d}"
     
     cursor.execute("""
         INSERT INTO purchase_requisitions (
@@ -517,7 +629,10 @@ def _create_purchase_requisition(material_id: str, quantity: float, required_dat
 def _create_production_order_from_mrp(demand: dict, quantity: float, required_date, cursor):
     """Create production order from MRP"""
     prod_order_id = generate_id('PROD', 'prod_order')
-    prod_number = f"PROD-{counters['prod_order']-1:06d}"
+    
+    # Use simple sequential numbering based on current counter
+    prod_number = f"PROD-{counters['prod_order']:06d}"
+    counters['prod_order'] += 1
     
     start_date = required_date - timedelta(days=demand['lead_time_days'])
     
@@ -574,7 +689,17 @@ def process_purchase_orders():
             
             # Create PO
             po_id = generate_id('PO', 'purchase_order')
-            po_number = f"PO-{datetime.now().strftime('%Y%m%d')}-{counters['purchase_order']-1:04d}"
+            # Get next available sequence number for today's date pattern
+            today_str = datetime.now().strftime('%Y%m%d')
+            cursor.execute("""
+                SELECT COALESCE(MAX(CAST(SUBSTRING(po_number FROM '[0-9]+$') AS INTEGER)), -1)
+                FROM purchase_orders
+                WHERE po_number LIKE %s
+            """, (f"PO-{today_str}-%",))
+            max_seq = cursor.fetchone()[0]
+            next_seq = max_seq + 1
+            
+            po_number = f"PO-{today_str}-{next_seq:04d}"
             
             cursor.execute("""
                 INSERT INTO purchase_orders (
@@ -670,7 +795,17 @@ def process_goods_receipts():
             
             # Create goods receipt
             gr_id = generate_id('GR', 'goods_receipt')
-            gr_number = f"GR-{datetime.now().strftime('%Y%m%d')}-{counters['goods_receipt']-1:05d}"
+            # Get next available sequence number for today's date pattern
+            today_str = datetime.now().strftime('%Y%m%d')
+            cursor.execute("""
+                SELECT COALESCE(MAX(CAST(SUBSTRING(gr_number FROM '[0-9]+$') AS INTEGER)), -1)
+                FROM goods_receipts
+                WHERE gr_number LIKE %s
+            """, (f"GR-{today_str}-%",))
+            max_seq = cursor.fetchone()[0]
+            next_seq = max_seq + 1
+            
+            gr_number = f"GR-{today_str}-{next_seq:05d}"
             
             batch_number = f"BATCH-{datetime.now().strftime('%Y%m%d')}-{random.randint(1000, 9999)}"
             
@@ -834,7 +969,6 @@ def _sync_production_order_to_mes(prod_order: dict, cursor):
                 line_id, planned_quantity, status, erp_order_id,
                 planned_start_date, planned_end_date
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (work_order_id) DO NOTHING
         """, (wo_id, prod_order['production_order_number'],
               prod_order.get('product_id'), factory_id, line_id,
               prod_order['order_quantity'], 'scheduled',
@@ -987,7 +1121,18 @@ def _post_inventory_transaction(trans_type: str, movement_type: str,
                                cursor=None):
     """Post inventory transaction"""
     trans_id = generate_id('INVT', 'inv_transaction')
-    mat_doc = f"MAT-{datetime.now().strftime('%Y%m%d')}-{counters['inv_transaction']:05d}"
+    
+    # Get next available sequence number for today's date pattern
+    today_str = datetime.now().strftime('%Y%m%d')
+    cursor.execute("""
+        SELECT COALESCE(MAX(CAST(SUBSTRING(material_document FROM '[0-9]+$') AS INTEGER)), -1)
+        FROM inventory_transactions
+        WHERE material_document LIKE %s
+    """, (f"MAT-{today_str}-%",))
+    max_seq = cursor.fetchone()[0]
+    next_seq = max_seq + 1
+    
+    mat_doc = f"MAT-{today_str}-{next_seq:05d}"
     
     cursor.execute("""
         INSERT INTO inventory_transactions (
@@ -1050,7 +1195,18 @@ def _post_to_gl(debit_credit: str, gl_account: str, amount: float,
                description: str, cursor):
     """Post to general ledger"""
     trans_id = generate_id('GL', 'gl_transaction')
-    doc_number = f"GL-{datetime.now().strftime('%Y%m%d')}-{counters['gl_transaction']:05d}"
+    
+    # Get next available sequence number for today's date pattern
+    today_str = datetime.now().strftime('%Y%m%d')
+    cursor.execute("""
+        SELECT COALESCE(MAX(CAST(SUBSTRING(document_number FROM '[0-9]+$') AS INTEGER)), -1)
+        FROM general_ledger
+        WHERE document_number LIKE %s
+    """, (f"GL-{today_str}-%",))
+    max_seq = cursor.fetchone()[0]
+    next_seq = max_seq + 1
+    
+    doc_number = f"GL-{today_str}-{next_seq:05d}"
     
     debit_amt = amount if debit_credit == 'DR' else 0
     credit_amt = amount if debit_credit == 'CR' else 0
@@ -1193,12 +1349,6 @@ def main():
     logger.info("GenIMS ERP Daily Business Cycle Daemon - ULTRA FAST MODE")
     logger.info("="*80)
     
-def main():
-    """Main daemon loop - ULTRA FAST MODE (In-Memory Generation)"""
-    logger.info("="*80)
-    logger.info("GenIMS ERP Daily Business Cycle Daemon - ULTRA FAST MODE")
-    logger.info("="*80)
-    
     # Initialize
     if not initialize_database():
         return 1
@@ -1215,6 +1365,9 @@ def main():
     counts_before = get_all_table_counts()
     for table, count in counts_before.items():
         if count is not None:
+            logger.info(f"  {table:.<40} {count:>10,} records")
+        else:
+            logger.info(f"  {table:.<40} [Count unavailable]")
             logger.info(f"  {table:.<40} {count:>10,} records")
     logger.info("="*80)
     
@@ -1248,9 +1401,22 @@ def main():
     for i in range(num_so):
         customer = random.choice(master_data['customers'])
         so_id = f"SO-{(counters['sales_order'] + i):06d}"
-        so_number = f"SO-{datetime.now().strftime('%Y%m%d')}-{i:04d}"
         
-        delivery_date = (datetime.now() + timedelta(days=random.randint(5, 30))).date()
+        # Get next available sequence number for today's date pattern (using global connection)
+        cursor = pg_connection.cursor()
+        today_str = datetime.now().strftime('%Y%m%d')
+        cursor.execute("""
+            SELECT COALESCE(MAX(CAST(SUBSTRING(sales_order_number FROM '[0-9]+$') AS INTEGER)), -1)
+            FROM sales_orders
+            WHERE sales_order_number LIKE %s
+        """, (f"SO-{today_str}-%",))
+        max_seq = cursor.fetchone()[0]
+        next_seq = max_seq + 1 + i  # Add i to avoid conflicts within this batch
+        cursor.close()
+        
+        so_number = f"SO-{today_str}-{next_seq:04d}"
+        
+        delivery_date = (sim_base_time + timedelta(days=random.randint(5, 30))).date()
         
         so_data = {
             'sales_order_id': so_id,
@@ -1260,14 +1426,14 @@ def main():
             'sales_organization': 'S001',
             'distribution_channel': 'DC01',
             'division': 'DIV01',
-            'order_date': datetime.now().date(),
+            'order_date': sim_base_time.date(),
             'requested_delivery_date': delivery_date,
             'order_status': 'open',
             'total_net_value': 0,
             'total_value': 0,
             'currency': 'INR',
             'created_by': 'SYSTEM',
-            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            'created_at': sim_base_time.strftime('%Y-%m-%d %H:%M:%S')
         }
         
         sales_orders_list.append(so_data)
@@ -1323,7 +1489,19 @@ def main():
         quantity = random.randint(50, 500)
         
         pr_id = f"PR-{(counters['purchase_req'] + i):06d}"
-        pr_number = f"PR-{datetime.now().strftime('%Y%m%d')}-{i:04d}"
+        # Get next available sequence number for today's date pattern
+        cursor = pg_connection.cursor()
+        today_str = datetime.now().strftime('%Y%m%d')
+        cursor.execute("""
+            SELECT COALESCE(MAX(CAST(SUBSTRING(requisition_number FROM '[0-9]+$') AS INTEGER)), -1)
+            FROM purchase_requisitions
+            WHERE requisition_number LIKE %s
+        """, (f"PR-{today_str}-%",))
+        max_seq = cursor.fetchone()[0]
+        next_seq = max_seq + 1 + i
+        cursor.close()
+        
+        pr_number = f"PR-{today_str}-{next_seq:04d}"
         
         pr_data = {
             'requisition_id': pr_id,
@@ -1360,7 +1538,19 @@ def main():
         # Create PO from PR
         supplier = random.choice(master_data['suppliers']) if master_data.get('suppliers') else {'supplier_id': 'SUP-001', 'supplier_name': 'Default Supplier'}
         po_id = f"PO-{(counters['purchase_order'] + i):06d}"
-        po_number = f"PO-{datetime.now().strftime('%Y%m%d')}-{i:04d}"
+        # Get next available sequence number for today's date pattern
+        cursor = pg_connection.cursor()
+        today_str = datetime.now().strftime('%Y%m%d')
+        cursor.execute("""
+            SELECT COALESCE(MAX(CAST(SUBSTRING(po_number FROM '[0-9]+$') AS INTEGER)), -1)
+            FROM purchase_orders
+            WHERE po_number LIKE %s
+        """, (f"PO-{today_str}-%",))
+        max_seq = cursor.fetchone()[0]
+        next_seq = max_seq + 1 + i
+        cursor.close()
+        
+        po_number = f"PO-{today_str}-{next_seq:04d}"
         
         unit_price = float(material.get('standard_cost', 50)) * random.uniform(0.9, 1.1)
         net_price = quantity * unit_price
@@ -1411,7 +1601,19 @@ def main():
         receive_qty = pol['order_quantity'] * random.uniform(0.5, 1.0)
         
         gr_id = f"GR-{(counters['goods_receipt'] + i):06d}"
-        gr_number = f"GR-{datetime.now().strftime('%Y%m%d')}-{i:05d}"
+        # Get next available sequence number for today's date pattern
+        cursor = pg_connection.cursor()
+        today_str = datetime.now().strftime('%Y%m%d')
+        cursor.execute("""
+            SELECT COALESCE(MAX(CAST(SUBSTRING(gr_number FROM '[0-9]+$') AS INTEGER)), -1)
+            FROM goods_receipts
+            WHERE gr_number LIKE %s
+        """, (f"GR-{today_str}-%",))
+        max_seq = cursor.fetchone()[0]
+        next_seq = max_seq + 1 + i
+        cursor.close()
+        
+        gr_number = f"GR-{today_str}-{next_seq:05d}"
         batch_number = f"BATCH-{datetime.now().strftime('%Y%m%d')}-{random.randint(1000, 9999)}"
         
         gr_data = {
@@ -1501,9 +1703,22 @@ def main():
     
     # Generate MRP run
     mrp_run_id = f"MRP-{(counters['mrp_run']):06d}"
+    
+    # Get next available sequence number for today's date pattern
+    cursor = pg_connection.cursor()
+    today_str = datetime.now().strftime('%Y%m%d')
+    cursor.execute("""
+        SELECT COALESCE(MAX(CAST(SUBSTRING(run_number FROM '[0-9]+$') AS INTEGER)), 0)
+        FROM mrp_runs
+        WHERE run_number LIKE %s
+    """, (f"MRP-{today_str}-%",))
+    max_seq = cursor.fetchone()[0]
+    next_seq = max_seq + 1
+    cursor.close()
+    
     mrp_data = {
         'mrp_run_id': mrp_run_id,
-        'run_number': f"MRP-{datetime.now().strftime('%Y%m%d')}",
+        'run_number': f"MRP-{today_str}-{next_seq:02d}",
         'planning_date': datetime.now().date(),
         'planning_horizon_days': MRP_PLANNING_HORIZON_DAYS,
         'planning_mode': 'net_change',
@@ -1590,7 +1805,6 @@ def main():
                         %(requested_delivery_date)s, %(order_status)s, %(currency)s, %(total_net_value)s,
                         %(total_value)s, %(created_by)s, %(created_at)s
                     )
-                    ON CONFLICT (sales_order_number) DO NOTHING
                 """
                 
                 logger.info(f"Inserting {len(sales_orders_list):,} sales orders...")
@@ -1612,7 +1826,6 @@ def main():
                         %(unit_price)s, %(net_price)s, %(requested_delivery_date)s, %(line_status)s,
                         %(make_to_order)s, %(created_at)s
                     )
-                    ON CONFLICT (sales_order_line_id) DO NOTHING
                 """
                 
                 logger.info(f"Inserting {len(sales_order_lines_list):,} sales order lines...")
@@ -1632,7 +1845,6 @@ def main():
                         %(required_date)s, %(requester_id)s, %(cost_center_id)s, %(plant_id)s, %(priority)s,
                         %(approval_status)s, %(overall_status)s, %(source_type)s, %(source_document)s, %(created_at)s
                     )
-                    ON CONFLICT (requisition_number) DO NOTHING
                 """
                 
                 logger.info(f"Inserting {len(purchase_requisitions_list):,} purchase requisitions...")
@@ -1650,7 +1862,6 @@ def main():
                         %(purchase_order_id)s, %(po_number)s, %(supplier_id)s, %(po_date)s, %(po_type)s,
                         %(currency)s, %(po_status)s, %(total_value)s, %(created_at)s
                     )
-                    ON CONFLICT (po_number) DO NOTHING
                 """
                 
                 logger.info(f"Inserting {len(purchase_orders_list):,} purchase orders...")
@@ -1670,7 +1881,6 @@ def main():
                         %(order_quantity)s, %(unit_of_measure)s, %(unit_price)s, %(net_price)s, %(delivery_date)s,
                         %(line_status)s, %(requisition_id)s, %(requisition_line)s, %(created_at)s
                     )
-                    ON CONFLICT (po_line_id) DO NOTHING
                 """
                 
                 logger.info(f"Inserting {len(purchase_order_lines_list):,} PO lines...")
@@ -1692,7 +1902,6 @@ def main():
                         %(plant_id)s, %(storage_location)s, %(batch_number)s, %(quality_status)s, %(unit_price)s,
                         %(total_value)s, %(gr_status)s, %(created_at)s
                     )
-                    ON CONFLICT (gr_number) DO NOTHING
                 """
                 
                 logger.info(f"Inserting {len(goods_receipts_list):,} goods receipts...")
@@ -1714,7 +1923,6 @@ def main():
                         %(run_status)s, %(started_at)s, %(completed_at)s, %(materials_planned)s,
                         %(purchase_reqs_created)s, %(production_orders_created)s, %(created_at)s
                     )
-                    ON CONFLICT (run_number) DO NOTHING
                 """
                 
                 logger.info(f"Inserting {len(mrp_runs_list):,} MRP runs...")
@@ -1734,7 +1942,6 @@ def main():
                         %(sales_order_id)s, %(order_type)s, %(order_quantity)s, %(basic_start_date)s,
                         %(basic_end_date)s, %(system_status)s, %(priority)s, %(created_at)s
                     )
-                    ON CONFLICT (production_order_number) DO NOTHING
                 """
                 
                 logger.info(f"Inserting {len(production_orders_list):,} production orders...")
@@ -1756,7 +1963,6 @@ def main():
                         %(storage_location)s, %(quantity)s, %(unit_of_measure)s, %(amount)s, %(purchase_order_id)s,
                         %(goods_receipt_id)s, %(created_by)s, %(created_at)s
                     )
-                    ON CONFLICT (transaction_id) DO NOTHING
                 """
                 
                 logger.info(f"Inserting {len(inventory_transactions_list):,} inventory transactions...")
@@ -1776,7 +1982,6 @@ def main():
                         %(document_date)s, %(gl_account)s, %(company_code)s, %(debit_amount)s, %(credit_amount)s,
                         %(currency)s, %(text)s, %(created_at)s
                     )
-                    ON CONFLICT (gl_transaction_id) DO NOTHING
                 """
                 
                 logger.info(f"Inserting {len(general_ledger_list):,} GL transactions...")

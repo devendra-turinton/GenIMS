@@ -24,6 +24,33 @@ try:
 except ImportError:
     POSTGRES_AVAILABLE = False
 
+# Add scripts to path for helper functions
+script_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'scripts')
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
+
+try:
+    from generator_helper import get_helper
+    HELPER_AVAILABLE = True
+except ImportError:
+    HELPER_AVAILABLE = False
+
+# Simple Time Coordinator Class
+class TimeCoordinator:
+    def __init__(self):
+        self.base_time = self.get_validated_base_time()
+    
+    def get_validated_base_time(self):
+        """Always return current datetime for today's data generation"""
+        # ALWAYS use current datetime for today's generation (no historical continuation)
+        current_datetime = datetime.now()
+        base_time = current_datetime.replace(hour=0, minute=0, second=0, microsecond=0)
+        logger.info(f"Using current date for data generation: {base_time}")
+        return base_time
+    
+    def get_current_time(self):
+        return self.base_time
+
 # Configuration
 PG_HOST = os.getenv('POSTGRES_HOST', 'localhost')
 PG_PORT = int(os.getenv('POSTGRES_PORT', '5432'))
@@ -165,8 +192,9 @@ def load_master_data():
         return False
 
 def insert_batch_parallel(cursor, insert_sql, data, table_name, batch_size, connection=None):
-    """Insert data in batches"""
+    """Insert data in batches with improved error handling"""
     total_batches = (len(data) + batch_size - 1) // batch_size
+    successful_inserts = 0
     
     for batch_idx in range(total_batches):
         try:
@@ -178,15 +206,24 @@ def insert_batch_parallel(cursor, insert_sql, data, table_name, batch_size, conn
             if connection:
                 connection.commit()
             
+            successful_inserts += len(batch)
             logger.info(f"  Flushed {batch_end:,} / {len(data):,} {table_name}")
         except psycopg2.IntegrityError as e:
-            logger.warning(f"  Batch {batch_idx + 1}/{total_batches} - Integrity error, skipping")
+            logger.warning(f"  Batch {batch_idx + 1}/{total_batches} - Integrity error: {str(e)[:100]}")
+            logger.warning(f"  This may indicate FK constraint violations or duplicate keys")
+            if connection:
+                connection.rollback()
+        except psycopg2.Error as e:
+            logger.error(f"  Batch {batch_idx + 1}/{total_batches} - Database error: {str(e)[:200]}")
             if connection:
                 connection.rollback()
         except Exception as e:
-            logger.error(f"  Batch {batch_idx + 1}/{total_batches} error: {e}")
+            logger.error(f"  Batch {batch_idx + 1}/{total_batches} - Unexpected error: {e}")
             if connection:
                 connection.rollback()
+    
+    logger.info(f"  Successfully inserted {successful_inserts:,}/{len(data):,} {table_name} records")
+    return successful_inserts
 
 def main():
     """Main - Generate all CRM data in-memory, then bulk dump"""
@@ -197,6 +234,23 @@ def main():
     logger.info(f"  Database: {PG_CRM_DB}")
     logger.info(f"  Batch Size: {BATCH_SIZE}")
     logger.info("="*80)
+    
+    # Initialize time coordinator and helper
+    time_coord = TimeCoordinator()
+    logger.info(f"Time Coordinator initialized: {time_coord.get_current_time()}")
+    
+    if HELPER_AVAILABLE:
+        try:
+            helper = get_helper()
+            # Get total registered IDs for logging
+            total_ids = sum(len(ids) for ids in helper.registry.registered_ids.values()) if hasattr(helper.registry, 'registered_ids') else 0
+            logger.info(f"Registry helper loaded with {total_ids} total registered IDs")
+        except Exception as e:
+            logger.warning(f"Helper initialization failed: {e}")
+            helper = None
+    else:
+        logger.warning("Helper not available, FK validation disabled")
+        helper = None
     
     start_time = time.time()
     
@@ -230,35 +284,73 @@ def main():
     cases = []
     interactions = []
     
-    sim_base_time = datetime.strptime(datetime.now().strftime('%Y-%m-%d 00:00:00'), '%Y-%m-%d %H:%M:%S')
-    run_timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    # Use time coordinator for synchronized timestamps
+    sim_base_time = time_coord.get_current_time().replace(hour=0, minute=0, second=0, microsecond=0)
+    # Use current datetime with milliseconds to ensure uniqueness across runs
+    current_time = datetime.now()
+    run_timestamp = current_time.strftime('%Y%m%d%H%M%S') + f"{current_time.microsecond // 1000:03d}"
+    
+    # Validate FK availability
+    if not master_data['accounts'] or not master_data['contacts'] or not master_data['sales_reps']:
+        logger.error("Critical: Missing master data for FK references")
+        return 1
+    
+    # Get validated employee IDs for assignment
+    if helper:
+        try:
+            valid_employee_ids = list(helper.get_valid_employee_ids())
+            if not valid_employee_ids:
+                logger.warning("No valid employee IDs found, using sales reps as fallback")
+                valid_employee_ids = master_data['sales_reps']
+        except Exception as e:
+            logger.warning(f"Employee ID validation failed: {e}, using sales reps")
+            valid_employee_ids = master_data['sales_reps']
+    else:
+        logger.info("Using sales reps for employee assignments (no helper)")
+        valid_employee_ids = master_data['sales_reps']
+    
+    logger.info(f"FK Validation: {len(master_data['accounts'])} accounts, {len(master_data['contacts'])} contacts, {len(valid_employee_ids)} employees")
     
     # Generate CRM records (multiple per hour)
     for i in range(TOTAL_RECORDS):
         timestamp_offset = i * 300  # 5 minute intervals
         current_ts = sim_base_time + timedelta(seconds=timestamp_offset)
         
-        account = random.choice(master_data['accounts'])
-        contact = random.choice(master_data['contacts'])
-        sales_rep = random.choice(master_data['sales_reps'])
+        # Validated FK selection
+        try:
+            account = random.choice(master_data['accounts'])
+            contact = random.choice(master_data['contacts'])
+            sales_rep = random.choice(master_data['sales_reps'])
+            assigned_employee = random.choice(valid_employee_ids)
+        except IndexError:
+            logger.error(f"FK reference error at record {i}")
+            continue
         
         # Opportunities (1 per 100 records)
         if i % 100 == 0:
             opp_id = f"OPP-{(counters['opportunity'] + i // 100):06d}"
+            stage = random.choice(['prospecting', 'qualification', 'proposal', 'negotiation', 'closed_won'])
+            
+            # Calculate probability based on stage
+            stage_probability = {
+                'prospecting': 10, 'qualification': 20, 'proposal': 60,
+                'negotiation': 80, 'closed_won': 100
+            }
+            
             opportunities.append({
                 'opportunity_id': opp_id,
                 'opportunity_number': f"OPP-{run_timestamp}-{i // 100:04d}",
                 'account_id': account,
                 'opportunity_name': f"Opportunity-{i // 100}",
-                'opportunity_type': random.choice(['New Business', 'Expansion', 'Renewal', 'Add-on']),
-                'stage': random.choice(['Prospecting', 'Qualification', 'Proposal', 'Negotiation', 'Closed Won']),
+                'opportunity_type': random.choice(['new_business', 'expansion', 'renewal', 'upsell']),
+                'stage': stage,
                 'close_date': (current_ts + timedelta(days=random.randint(1, 7))).date(),
                 'expected_close_date': (current_ts + timedelta(days=random.randint(7, 90))).date(),
-                'probability_pct': random.randint(10, 100),
+                'probability_pct': stage_probability.get(stage, 10),
                 'amount': round(random.uniform(10000, 500000), 2),
                 'opportunity_owner': sales_rep,
-                'is_closed': random.choice([True, False]),
-                'created_at': current_ts
+                'is_closed': stage == 'closed_won',
+                'created_at': time_coord.get_current_time()
             })
         
         # Activities (1 per 50 records)
@@ -269,12 +361,12 @@ def main():
                 'activity_number': f"ACT-{run_timestamp}-{i // 50:04d}",
                 'account_id': account,
                 'contact_id': contact,
-                'activity_type': random.choice(['Call', 'Meeting', 'Email', 'Task', 'Note']),
-                'activity_status': random.choice(['Completed', 'Scheduled', 'Cancelled']),
-                'activity_date': current_ts,
+                'activity_type': random.choice(['call', 'meeting', 'email', 'demo', 'site_visit']),
+                'activity_status': random.choice(['completed', 'scheduled', 'cancelled']),
+                'activity_date': time_coord.get_current_time(),
                 'subject': f"Activity for {account}",
-                'assigned_to': sales_rep,
-                'created_at': current_ts
+                'assigned_to': assigned_employee,
+                'created_at': time_coord.get_current_time()
             })
         
         # Tasks (1 per 75 records)
@@ -284,30 +376,31 @@ def main():
                 'task_id': task_id,
                 'task_number': f"TASK-{run_timestamp}-{i // 75:04d}",
                 'subject': f"Task-{i // 75}",
-                'task_type': random.choice(['Follow-up', 'Proposal', 'Quote', 'Demo', 'Review']),
-                'task_priority': random.choice(['Low', 'Medium', 'High']),
-                'priority': random.choice(['Low', 'Medium', 'High']),
-                'task_status': random.choice(['Open', 'In Progress', 'Completed']),
-                'due_date': (current_ts + timedelta(days=random.randint(1, 30))).date(),
-                'assigned_to': sales_rep,
-                'created_at': current_ts
+                'task_type': random.choice(['follow_up', 'proposal', 'quote', 'demo', 'review']),
+                'priority': random.choice(['low', 'medium', 'high']),
+                'task_status': random.choice(['open', 'in_progress', 'completed']),
+                'due_date': (time_coord.get_current_time() + timedelta(days=random.randint(1, 30))).date(),
+                'assigned_to': assigned_employee,
+                'created_at': time_coord.get_current_time()
             })
         
         # Cases (1 per 200 records)
         if i % 200 == 0:
             case_id = f"CASE-{(counters['case'] + i // 200):06d}"
+            case_priority = random.choice(['low', 'medium', 'high', 'critical'])
+            
             cases.append({
                 'case_id': case_id,
                 'case_number': f"CASE-{run_timestamp}-{i // 200:04d}",
                 'account_id': account,
                 'contact_id': contact,
-                'case_type': random.choice(['Bug', 'Feature Request', 'Service Issue', 'Billing']),
-                'priority': random.choice(['Low', 'Medium', 'High', 'Critical']),
-                'case_status': random.choice(['New', 'In Progress', 'Waiting for Customer', 'Resolved', 'Closed']),
+                'case_type': random.choice(['question', 'problem', 'feature_request', 'complaint']),
+                'priority': case_priority,
+                'case_status': random.choice(['new', 'in_progress', 'pending_customer', 'resolved', 'closed']),
                 'subject': f"Case {i // 200}",
                 'description': f"Issue reported for {account}",
-                'assigned_to': sales_rep,
-                'created_at': current_ts
+                'assigned_to': assigned_employee,
+                'created_at': time_coord.get_current_time()
             })
         
         # Customer Interactions (1 per 20 records)
@@ -317,13 +410,13 @@ def main():
                 'interaction_id': inter_id,
                 'account_id': account,
                 'contact_id': contact,
-                'interaction_type': random.choice(['Phone', 'Email', 'Chat', 'In-person', 'Video']),
-                'interaction_date': current_ts,
+                'interaction_type': random.choice(['phone', 'email', 'chat', 'in_person', 'video']),
+                'interaction_date': time_coord.get_current_time(),
                 'duration_minutes': random.randint(5, 120),
                 'subject': f"Interaction {i // 20}",
                 'description': f"Interaction with {contact}",
-                'direction': random.choice(['Inbound', 'Outbound']),
-                'created_at': current_ts
+                'direction': random.choice(['inbound', 'outbound']),
+                'created_at': time_coord.get_current_time()
             })
         
         if (i + 1) % 1000 == 0:
@@ -353,8 +446,7 @@ def main():
             ) VALUES (%(opportunity_id)s, %(opportunity_number)s, %(account_id)s,
                 %(opportunity_name)s, %(opportunity_type)s, %(stage)s,
                 %(close_date)s, %(expected_close_date)s, %(probability_pct)s, %(amount)s,
-                %(opportunity_owner)s, %(is_closed)s, %(created_at)s)
-            ON CONFLICT (opportunity_number) DO NOTHING"""
+                %(opportunity_owner)s, %(is_closed)s, %(created_at)s)"""
             logger.info(f"Inserting {len(opportunities):,} opportunities...")
             insert_batch_parallel(cursor, insert_sql, opportunities, "opportunities", BATCH_SIZE, pg_connection)
         
@@ -365,8 +457,7 @@ def main():
                 activity_status, activity_date, subject, assigned_to, created_at
             ) VALUES (%(activity_id)s, %(activity_number)s, %(account_id)s, %(contact_id)s,
                 %(activity_type)s, %(activity_status)s, %(activity_date)s,
-                %(subject)s, %(assigned_to)s, %(created_at)s)
-            ON CONFLICT (activity_number) DO NOTHING"""
+                %(subject)s, %(assigned_to)s, %(created_at)s)"""
             logger.info(f"Inserting {len(activities):,} activities...")
             insert_batch_parallel(cursor, insert_sql, activities, "activities", BATCH_SIZE, pg_connection)
         
@@ -377,8 +468,7 @@ def main():
                 task_status, due_date, assigned_to, created_at
             ) VALUES (%(task_id)s, %(task_number)s, %(subject)s, %(task_type)s,
                 %(priority)s, %(task_status)s, %(due_date)s,
-                %(assigned_to)s, %(created_at)s)
-            ON CONFLICT (task_number) DO NOTHING"""
+                %(assigned_to)s, %(created_at)s)"""
             logger.info(f"Inserting {len(tasks):,} tasks...")
             insert_batch_parallel(cursor, insert_sql, tasks, "tasks", BATCH_SIZE, pg_connection)
         
@@ -389,8 +479,7 @@ def main():
                 case_status, subject, description, assigned_to, created_at
             ) VALUES (%(case_id)s, %(case_number)s, %(account_id)s, %(contact_id)s,
                 %(case_type)s, %(priority)s, %(case_status)s, %(subject)s, %(description)s,
-                %(assigned_to)s, %(created_at)s)
-            ON CONFLICT (case_number) DO NOTHING"""
+                %(assigned_to)s, %(created_at)s)"""
             logger.info(f"Inserting {len(cases):,} cases...")
             insert_batch_parallel(cursor, insert_sql, cases, "cases", BATCH_SIZE, pg_connection)
         
@@ -401,8 +490,7 @@ def main():
                 interaction_date, duration_minutes, subject, description, direction, created_at
             ) VALUES (%(interaction_id)s, %(account_id)s,
                 %(contact_id)s, %(interaction_type)s, %(interaction_date)s,
-                %(duration_minutes)s, %(subject)s, %(description)s, %(direction)s, %(created_at)s)
-            ON CONFLICT DO NOTHING"""
+                %(duration_minutes)s, %(subject)s, %(description)s, %(direction)s, %(created_at)s)"""
             logger.info(f"Inserting {len(interactions):,} customer interactions...")
             insert_batch_parallel(cursor, insert_sql, interactions, "customer interactions", BATCH_SIZE, pg_connection)
         

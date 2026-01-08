@@ -399,6 +399,84 @@ def get_scada_data_count():
         return None
 
 
+def get_max_scada_timestamp():
+    """Get the maximum timestamp from scada_machine_data and start next day for clean append"""
+    try:
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_DATABASE,
+            user=PG_USER,
+            password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE,
+            connect_timeout=10
+        )
+        cursor = conn.cursor()
+        cursor.execute("SELECT MAX(timestamp) FROM scada_machine_data;")
+        result = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if result and result[0]:
+            max_ts = result[0]
+            logger.info(f"Found max timestamp in scada_machine_data: {max_ts}")
+            
+            # CRITICAL FIX: Never use future dates - cap at current date
+            current_datetime = datetime.now()
+            if max_ts > current_datetime:
+                logger.warning(f"Found future timestamp {max_ts}, using current time {current_datetime} instead")
+                max_ts = current_datetime
+            
+            # Start NEXT day at midnight to avoid any overlaps with past data
+            next_day = (max_ts + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            
+            # Double-check: if next day is still future, use current time
+            if next_day > current_datetime:
+                logger.warning(f"Next day {next_day} is in future, using current time instead")
+                next_day = current_datetime.replace(minute=0, second=0, microsecond=0)
+                
+            logger.info(f"Will generate data starting from: {next_day}")
+            return next_day
+        else:
+            logger.info("No existing timestamps found, starting from current time")
+            # Start from current time, not future
+            current_time = datetime.now().replace(minute=0, second=0, microsecond=0)
+            return current_time
+    except Exception as e:
+        logger.warning(f"Could not get max scada_machine_data timestamp: {e}, using current time")
+        current_time = datetime.now().replace(minute=0, second=0, microsecond=0)
+        return current_time
+
+
+def reset_scada_machine_data_sequence():
+    """Reset scada_machine_data_scada_id_seq to prevent duplicate key errors on next insert"""
+    try:
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_DATABASE,
+            user=PG_USER,
+            password=PG_PASSWORD,
+            sslmode=PG_SSL_MODE,
+            connect_timeout=10
+        )
+        cursor = conn.cursor()
+        
+        # Get max ID currently in table
+        cursor.execute("SELECT MAX(scada_id) FROM scada_machine_data;")
+        max_id = cursor.fetchone()[0]
+        
+        if max_id is not None:
+            # Reset sequence to next available value
+            cursor.execute(f"SELECT setval('scada_machine_data_scada_id_seq', {max_id + 1})")
+            logger.info(f"✓ Reset scada_machine_data sequence to {max_id + 1}")
+        
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Could not reset scada_machine_data sequence: {e}")
+
+
 def main():
     """Main - Generate all data in-memory, then bulk dump"""
     logger.info("="*80)
@@ -423,10 +501,9 @@ def main():
     simulators = [MachineSimulator(machine, employees, shifts) for machine in machines]
     logger.info(f"Created {len(simulators):,} machine simulators")
     
-    # Parse simulation times - use current date when daemon runs
-    start_date_str = datetime.now().strftime('%Y-%m-%d')
-    start_time_str = os.getenv('SIMULATION_START_TIME', '00:00:00')
-    sim_base_time = datetime.strptime(f"{start_date_str} {start_time_str}", '%Y-%m-%d %H:%M:%S')
+    # Query database for max timestamp to ensure no overlaps (true APPEND mode)
+    sim_base_time = get_max_scada_timestamp()
+    logger.info(f"Using base timestamp: {sim_base_time}")
     
     # Inject faults (3% of machines)
     num_faults = int(len(simulators) * 0.03)
@@ -520,7 +597,6 @@ def main():
                     %(uptime_seconds_shift)s, %(active_alarms)s, %(alarm_codes)s, %(warning_codes)s,
                     %(shift_id)s, %(operator_id)s, %(data_source)s, %(data_quality)s, %(created_at)s
                 )
-                ON CONFLICT (scada_id) DO NOTHING
             """
             
             logger.info(f"Inserting {len(all_records):,} records in batches of {BATCH_SIZE:,}...")
@@ -546,6 +622,9 @@ def main():
             conn.close()
             
             logger.info(f"✓ Inserted {inserted_count:,} records successfully")
+            
+            # Reset sequence to prevent duplicate key errors on next run
+            reset_scada_machine_data_sequence()
             
         except Exception as e:
             logger.error(f"PostgreSQL error: {e}")

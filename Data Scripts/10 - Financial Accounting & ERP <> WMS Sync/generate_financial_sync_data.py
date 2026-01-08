@@ -9,11 +9,37 @@ import json
 from datetime import datetime, timedelta
 from typing import List, Dict
 from pathlib import Path
+import sys
+
+# Add scripts to path for helper access
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
+
+try:
+    from generator_helper import get_helper
+    HELPER_AVAILABLE = True
+except ImportError:
+    HELPER_AVAILABLE = False
+    print("Warning: Registry helper not available")
 
 class FinancialSyncDataGenerator:
     def __init__(self):
-        """Initialize data generator"""
+        """Initialize data generator with registry helper"""
         print("Initializing Financial & Sync Data Generator...")
+        
+        # Load registry helper for FK validation
+        if HELPER_AVAILABLE:
+            try:
+                self.helper = get_helper()
+                self.registry = self.helper.registry
+                print(f"Registry helper loaded with {len(self.helper.registry.registered_ids)} ID types")
+            except Exception as e:
+                print(f"Warning: Registry helper initialization failed: {e}")
+                self.helper = None
+                self.registry = None
+        else:
+            print("Warning: Registry helper not available")
+            self.helper = None
+            self.registry = None
         
         # Data structures
         self.coa_accounts = []
@@ -372,18 +398,25 @@ class FinancialSyncDataGenerator:
         """Generate ERP-WMS sync mappings"""
         print("Generating inventory sync mappings...")
         
-        # Sample mappings (would be based on actual factories/warehouses)
-        mappings = [
-            {'erp_location': 'FACTORY-001', 'wms_warehouse': 'WH-001'},
-            {'erp_location': 'FACTORY-002', 'wms_warehouse': 'WH-002'}
-        ]
+        # Get validated factory IDs if registry available
+        if hasattr(self, 'helper') and self.helper and hasattr(self.helper, 'get_valid_factory_ids'):
+            try:
+                valid_factory_ids = list(self.helper.get_valid_factory_ids())
+                if not valid_factory_ids:
+                    valid_factory_ids = ['FAC-000001', 'FAC-000002']
+            except Exception as e:
+                print(f"Warning: Factory validation failed: {e}")
+                valid_factory_ids = ['FAC-000001', 'FAC-000002']
+        else:
+            valid_factory_ids = ['FAC-000001', 'FAC-000002']
         
-        for mapping in mappings:
+        # Create sync mappings for each factory
+        for idx, factory_id in enumerate(valid_factory_ids):
             m = {
                 'mapping_id': self.generate_id('MAP', 'mapping'),
-                'erp_location_id': mapping['erp_location'],
+                'erp_location_id': factory_id,
                 'erp_location_type': 'factory',
-                'wms_warehouse_id': mapping['wms_warehouse'],
+                'wms_warehouse_id': f"WMS-{idx+1:03d}",
                 'is_active': True,
                 'sync_enabled': True,
                 'sync_mode': 'real_time',

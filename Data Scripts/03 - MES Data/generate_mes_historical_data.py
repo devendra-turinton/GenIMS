@@ -262,12 +262,19 @@ class MESDataGenerator:
                     # Actual quantities
                     produced_qty = int(planned_qty * random.uniform(0.95, 1.05))
                     
-                    # Quality
+                    # Quality - ensure quantities sum correctly
                     fpy = random.uniform(*FIRST_PASS_YIELD_RANGE) / 100
                     good_qty = int(produced_qty * fpy)
-                    rejected_qty = int((produced_qty - good_qty) * 0.7)
-                    scrapped_qty = int((produced_qty - good_qty) * 0.2)
-                    rework_qty = produced_qty - good_qty - rejected_qty - scrapped_qty
+                    bad_qty = produced_qty - good_qty
+                    
+                    # Distribute bad qty: 70% rejected, 20% scrapped, rest rework
+                    rejected_qty = int(bad_qty * 0.7)
+                    scrapped_qty = int(bad_qty * 0.2)
+                    rework_qty = bad_qty - rejected_qty - scrapped_qty
+                    
+                    # Validate sum
+                    if good_qty + rejected_qty + scrapped_qty + rework_qty != produced_qty:
+                        rework_qty = produced_qty - good_qty - rejected_qty - scrapped_qty
                     
                     yield_pct = (good_qty / produced_qty * 100) if produced_qty > 0 else 0
                     fpyield_pct = fpy * 100
@@ -479,8 +486,9 @@ class MESDataGenerator:
                 'planned_end_time': planned_end_op,
                 'actual_start_time': op_start.strftime('%Y-%m-%d %H:%M:%S') if op_start else None,
                 'actual_end_time': op_end.strftime('%Y-%m-%d %H:%M:%S') if op_end else None,
-                'completed_quantity': work_order['produced_quantity'] if work_order['status'] == 'completed' else 0,
-                'rejected_quantity': work_order['rejected_quantity'] if work_order['status'] == 'completed' else 0,
+                # Distribute quantities across operations proportionally
+                'completed_quantity': int(work_order['produced_quantity'] / num_operations) if work_order['status'] == 'completed' else 0,
+                'rejected_quantity': int(work_order['rejected_quantity'] / num_operations) if work_order['status'] == 'completed' else 0,
                 'actual_duration_minutes': op_duration,
                 'actual_setup_time_minutes': random.randint(10, 30) if op_start else None,
                 'status': 'completed' if work_order['status'] == 'completed' else 'in_progress',
@@ -515,7 +523,7 @@ class MESDataGenerator:
         if random.random() < 0.3:
             materials.append(random.choice(CONSUMABLES))
         
-        for material_code in materials[:num_materials]:
+        for mat_idx, material_code in enumerate(materials[:num_materials]):
             # Determine material type
             if material_code in RAW_MATERIALS:
                 mat_type = 'raw_material'
@@ -544,6 +552,10 @@ class MESDataGenerator:
             supplier_id = f"SUP-{random.randint(1001, 2000)}" if mat_type == 'raw_material' else None
             issued_by_emp = random.choice([e['employee_id'] for e in self.employees] if self.employees else ['EMP-000001'])
             
+            # Unit cost and total cost must match
+            unit_cost = round(random.uniform(1, 50), 4)
+            total_cost = round(quantity * unit_cost, 2)
+            
             # Parent lot number - link to previous raw material lots for traceability (components 70%, raw materials 45%)
             parent_lot = None
             if mat_type == 'component':
@@ -555,12 +567,21 @@ class MESDataGenerator:
                 # Some raw materials have suppliers as parent (traceability)
                 parent_lot = f"PARENT-LOT-{random.randint(10000, 99999)}"
             
+            # Get operations for this WO (use first for raw materials, distributed for components)
+            ops_for_wo = [op for op in self.work_order_operations if op['work_order_id'] == work_order['work_order_id']]
+            if ops_for_wo:
+                # Raw materials for setup (operation 1), components/consumables distributed
+                assigned_op = ops_for_wo[0] if mat_type == 'raw_material' else ops_for_wo[min(mat_idx % len(ops_for_wo), len(ops_for_wo)-1)]
+                assigned_op_id = assigned_op['operation_id']
+            else:
+                assigned_op_id = None
+            
             transaction = {
                 'transaction_id': self.generate_id('MT', 'material_transactions'),
                 'transaction_type': 'issue',
                 'transaction_date': trans_date.strftime('%Y-%m-%d %H:%M:%S'),
                 'work_order_id': work_order['work_order_id'],
-                'operation_id': random.choice([op['operation_id'] for op in self.work_order_operations if op['work_order_id'] == work_order['work_order_id']]),
+                'operation_id': assigned_op_id,
                 'material_code': material_code,
                 'material_name': mat_name,
                 'material_description': f"{mat_name} - {mat_type.replace('_', ' ').title()}",
@@ -582,8 +603,8 @@ class MESDataGenerator:
                 'factory_id': work_order['factory_id'],
                 'issued_at': trans_date.strftime('%Y-%m-%d %H:%M:%S'),
                 'issued_by': issued_by_emp,
-                'unit_cost': round(random.uniform(1, 50), 4),
-                'total_cost': round(quantity * random.uniform(1, 50), 2),
+                'unit_cost': unit_cost,
+                'total_cost': total_cost,
                 'quality_status': 'approved',
                 'inspection_required': mat_type in ['raw_material', 'component'],
                 'certificate_of_analysis': f"COA-{random.randint(10000, 99999)}" if mat_type in ['raw_material', 'component'] else None,
@@ -621,22 +642,28 @@ class MESDataGenerator:
             else:
                 continue
             
-            # Results
-            inspection_passed = random.random() < INSPECTION_PASS_RATE
+            # Results - link to work order quality data
+            rejected_total = work_order.get('rejected_quantity', 0)
+            
+            # Inspection pass rate should align with FPY
+            fpy_from_wo = 1.0 - (rejected_total / work_order.get('produced_quantity', 1)) if work_order.get('produced_quantity', 0) > 0 else 1.0
+            inspection_passed = random.random() < max(0.5, fpy_from_wo)  # Min 50% to avoid always failing
             
             if inspection_passed:
                 result = 'pass'
                 disposition = 'accept'
-                defects = 0
+                # Defects should be low if inspection passes
+                defects = max(0, random.randint(-1, 1))  # 0-1 defects
                 critical = 0
                 major = 0
-                minor = 0
+                minor = defects
             else:
                 result = random.choice(['fail', 'conditional_pass', 'rework_required'])
                 disposition = random.choice(['reject', 'rework', 'use_as_is'])
-                defects = random.randint(1, 5)
-                critical = random.randint(0, 1)
-                major = random.randint(0, 2)
+                # Defects should correlate with rejected quantity
+                defects = max(1, int(rejected_total / 10) if rejected_total > 0 else random.randint(1, 3))
+                critical = min(1, max(0, defects // 5))
+                major = min(2, max(0, (defects - critical) // 3))
                 minor = defects - critical - major
             
             sample_inspected = random.randint(5, 20)
@@ -776,10 +803,18 @@ class MESDataGenerator:
             
             hours_worked = round(duration / 60, 2)
             hourly_rt = round(random.uniform(15, 35), 2)
-            labor_cost = round(hours_worked * hourly_rt, 2)
+            labor_cost_per_operator = round(hours_worked * hourly_rt, 2)
             
             # Populate based on work order completion status
             is_completed = work_order['status'] in ['completed', 'closed']
+            
+            # Assign to sequential operations, not random
+            ops_for_wo = [op for op in self.work_order_operations if op['work_order_id'] == work_order['work_order_id']]
+            assigned_op_id = None
+            if ops_for_wo:
+                # Distribute operators across operations
+                op_index = min(selected_operators.index(operator), len(ops_for_wo) - 1)
+                assigned_op_id = ops_for_wo[op_index]['operation_id']
             
             labor = {
                 'labor_transaction_id': self.generate_id('LT', 'labor_transactions'),
@@ -787,7 +822,7 @@ class MESDataGenerator:
                 'employee_id': operator['employee_id'],
                 'shift_id': shift['shift_id'],
                 'work_order_id': work_order['work_order_id'],
-                'operation_id': random.choice(operations)['operation_id'] if operations else None,
+                'operation_id': assigned_op_id,
                 'line_id': work_order['line_id'],
                 'factory_id': work_order['factory_id'],
                 'clock_in_time': clock_in.strftime('%Y-%m-%d %H:%M:%S'),
@@ -804,8 +839,7 @@ class MESDataGenerator:
                 'labor_type': 'direct',
                 'efficiency_percentage': round(random.uniform(85, 110), 2),
                 'hourly_rate': hourly_rt,
-                'labor_cost': labor_cost,
-                'total_labor_cost': labor_cost * num_operators,
+                'labor_cost': labor_cost_per_operator,
                 'overtime_hours': 0,
                 'overtime_cost': 0,
                 'approved': is_completed,

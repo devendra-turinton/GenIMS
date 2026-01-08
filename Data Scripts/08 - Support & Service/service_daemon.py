@@ -131,9 +131,51 @@ def initialize_id_counters():
         logger.error(f"Failed to initialize ID counters: {e}")
         return False
 
+def get_max_service_timestamp():
+    """Always return current datetime for today's data generation"""
+    # ALWAYS use current datetime for today's generation (no historical continuation)
+    current_datetime = datetime.now()
+    base_time = current_datetime.replace(hour=0, minute=0, second=0, microsecond=0)
+    logger.info(f"Using current date for data generation: {base_time}")
+    return base_time
+
 def load_master_data():
     global master_data
     try:
+        # REGISTRY INTEGRATION - Use validated FKs like CMMS/CRM
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'scripts'))
+        from generator_helper import get_helper
+        
+        helper = get_helper()
+        registry = helper.registry
+        
+        # Get validated FK references from registry
+        valid_customer_ids = list(helper.get_valid_customer_ids())
+        valid_employee_ids = list(helper.get_valid_employee_ids())
+        
+        # Load CRM data directly from CRM database for account/contact FKs
+        try:
+            crm_conn = psycopg2.connect(
+                host=PG_HOST, port=PG_PORT, database='genims_crm_db',
+                user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE, connect_timeout=30
+            )
+            cursor = crm_conn.cursor()
+            
+            cursor.execute("SELECT account_id FROM accounts LIMIT 100")
+            accounts_from_crm = [row[0] for row in cursor.fetchall()]
+            
+            cursor.execute("SELECT contact_id FROM contacts LIMIT 100")
+            contacts_from_crm = [row[0] for row in cursor.fetchall()]
+            
+            cursor.close()
+            crm_conn.close()
+            
+        except Exception as e:
+            logger.warning(f"Could not load CRM data: {e}")
+            accounts_from_crm = []
+            contacts_from_crm = []
+        
+        # Load service-specific data from service DB
         conn = psycopg2.connect(
             host=PG_HOST, port=PG_PORT, database=PG_SERVICE_DB,
             user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE, connect_timeout=30
@@ -152,27 +194,39 @@ def load_master_data():
         cursor.execute("SELECT queue_id FROM service_queues LIMIT 10")
         service_queues = [row[0] for row in cursor.fetchall()]
         
-        # Load accounts (from service related data)
-        cursor.execute("SELECT DISTINCT account_id FROM service_tickets LIMIT 50")
-        accounts = [row[0] for row in cursor.fetchall()]
-        
-        # Load contacts
-        cursor.execute("SELECT DISTINCT contact_id FROM service_tickets WHERE contact_id IS NOT NULL LIMIT 50")
-        contacts = [row[0] for row in cursor.fetchall()]
+        # Load SLA definitions
+        cursor.execute("SELECT sla_id FROM sla_definitions LIMIT 10")
+        sla_definitions = [row[0] for row in cursor.fetchall()]
         
         cursor.close()
         conn.close()
         
-        master_data['service_agents'] = service_agents or ['SA-000001', 'SA-000002']
-        master_data['service_teams'] = service_teams or ['ST-000001']
-        master_data['service_queues'] = service_queues or ['SQ-000001']
-        master_data['accounts'] = accounts or ['ACC-000001']
-        master_data['contacts'] = contacts or ['CONT-000001']
+        # Use registry-validated FKs for cross-database references
+        master_data['service_agents'] = service_agents or ['AGT-000001', 'AGT-000002']
+        master_data['service_teams'] = service_teams or ['STM-000001']
+        master_data['service_queues'] = service_queues or ['QUE-000001']
+        master_data['sla_definitions'] = sla_definitions or ['SLA-000001']
         
-        logger.info(f"Master data loaded: {len(service_agents)} agents, {len(service_teams)} teams, {len(accounts)} accounts, {len(contacts)} contacts")
+        # VALIDATED CROSS-DATABASE FKs - Use registry and direct CRM lookup
+        master_data['accounts'] = accounts_from_crm[:100] if accounts_from_crm else ['ACC-000001']
+        master_data['contacts'] = contacts_from_crm[:100] if contacts_from_crm else ['CONTACT-000001']  
+        master_data['employees'] = list(valid_employee_ids)[:50] if valid_employee_ids else ['EMP-000001']
+        master_data['customers'] = list(valid_customer_ids)[:50] if valid_customer_ids else ['CUST-000001']
+        
+        logger.info(f"REGISTRY MASTER DATA LOADED:")
+        logger.info(f"  Service Agents: {len(master_data['service_agents'])}")
+        logger.info(f"  Service Teams: {len(master_data['service_teams'])}")
+        logger.info(f"  CRM Accounts: {len(master_data['accounts'])}")
+        logger.info(f"  CRM Contacts: {len(master_data['contacts'])}")
+        logger.info(f"  Validated Employees: {len(master_data['employees'])}")
+        
+        # FK Validation Test
+        logger.info(f"✓ Account FK Sample: {master_data['accounts'][:3]}")
+        logger.info(f"✓ Contact FK Sample: {master_data['contacts'][:3]}")
+        
         return True
     except Exception as e:
-        logger.error(f"Failed to load master data: {e}")
+        logger.error(f"Failed to load master data with registry: {e}")
         return False
 
 def insert_batch_parallel(cursor, insert_sql, data, table_name, batch_size, connection=None):
@@ -198,6 +252,59 @@ def insert_batch_parallel(cursor, insert_sql, data, table_name, batch_size, conn
             logger.error(f"  Batch {batch_idx + 1}/{total_batches} error: {e}")
             if connection:
                 connection.rollback()
+
+def get_max_service_timestamp():
+    """Get the maximum timestamp from service tables and ensure no future dates"""
+    try:
+        conn = psycopg2.connect(
+            host=PG_HOST, port=PG_PORT, database=PG_SERVICE_DB,
+            user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE, connect_timeout=10
+        )
+        cursor = conn.cursor()
+        
+        # Check multiple service tables for latest timestamp
+        tables_to_check = ['service_tickets', 'warranty_claims', 'rma_requests']
+        max_timestamp = None
+        
+        for table in tables_to_check:
+            try:
+                cursor.execute(f"SELECT MAX(created_at) FROM {table};")
+                result = cursor.fetchone()
+                if result and result[0]:
+                    table_max = result[0]
+                    if max_timestamp is None or table_max > max_timestamp:
+                        max_timestamp = table_max
+            except Exception as e:
+                logger.debug(f"Could not get max timestamp from {table}: {e}")
+        
+        cursor.close()
+        conn.close()
+        
+        if max_timestamp:
+            logger.info(f"Found max timestamp in Service data: {max_timestamp}")
+            
+            # CRITICAL FIX: Never use future dates - cap at current date
+            current_datetime = datetime.now()
+            if max_timestamp > current_datetime:
+                logger.warning(f"Found future timestamp {max_timestamp}, using current date instead")
+                max_timestamp = current_datetime
+            
+            # Start next day to avoid overlaps
+            next_day = (max_timestamp + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            
+            # Double-check: if next day is still future, use current time
+            if next_day > current_datetime:
+                logger.warning(f"Next day {next_day} is in future, using current time instead")
+                next_day = current_datetime.replace(minute=0, second=0, microsecond=0)
+            
+            return next_day
+        else:
+            logger.info("No existing timestamps found, starting from current time")
+            return datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    except Exception as e:
+        logger.warning(f"Could not get max timestamp: {e}, using current time")
+        return datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
 def main():
     """Main - Generate all service data in-memory, then bulk dump"""
@@ -242,7 +349,9 @@ def main():
     warranty_claims = []
     metrics = []
     
-    sim_base_time = datetime.strptime(datetime.now().strftime('%Y-%m-%d 00:00:00'), '%Y-%m-%d %H:%M:%S')
+    # Get current date for today's data generation (no historical continuation)
+    sim_base_time = get_max_service_timestamp()
+    logger.info(f"Using current date for data generation: {sim_base_time}")
     run_timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
     
     # Generate service records (multiple per hour)
@@ -250,30 +359,44 @@ def main():
         timestamp_offset = i * 300  # 5 minute intervals
         current_ts = sim_base_time + timedelta(seconds=timestamp_offset)
         
+        # Use VALIDATED FK references from registry
         account = random.choice(master_data['accounts'])
         contact = random.choice(master_data['contacts']) if master_data['contacts'] else None
         agent = random.choice(master_data['service_agents'])
         team = random.choice(master_data['service_teams'])
         queue = random.choice(master_data['service_queues'])
+        assigned_employee = random.choice(master_data['employees'])
+        escalated_employee = random.choice(master_data['employees'])
+        sla = random.choice(master_data['sla_definitions'])
         
         # Service Tickets (1 per 50 records)
         if i % 50 == 0:
             ticket_id = f"TICKET-{(counters['ticket'] + i // 50):06d}"
             ticket_num = f"TKT-{run_timestamp}-{i // 50:04d}"
+            
+            # Calculate SLA times based on priority
+            priority = random.choice(['Low', 'Medium', 'High', 'Critical'])
+            sla_hours = {'Critical': 4, 'High': 8, 'Medium': 24, 'Low': 48}[priority]
+            response_due = current_ts + timedelta(hours=1) 
+            resolution_due = current_ts + timedelta(hours=sla_hours)
+            
             tickets.append({
                 'ticket_id': ticket_id,
                 'ticket_number': ticket_num,
-                'account_id': account,
-                'contact_id': contact,
+                'account_id': account,  # VALIDATED FK
+                'contact_id': contact,  # VALIDATED FK
                 'channel': random.choice(['Phone', 'Email', 'Chat', 'Portal', 'Social']),
                 'ticket_type': random.choice(['Incident', 'Service Request', 'Question']),
                 'category': random.choice(['Technical', 'Billing', 'General', 'Sales']),
-                'priority': random.choice(['Low', 'Medium', 'High', 'Critical']),
+                'priority': priority,
                 'ticket_status': random.choice(['New', 'Open', 'In Progress', 'Waiting', 'Resolved', 'Closed']),
                 'subject': f"Service Issue {i // 50}",
                 'description': f"Customer reported issue {i // 50}",
-                'assigned_to': agent,
+                'assigned_to': assigned_employee,  # VALIDATED FK
                 'assigned_team': team,
+                'response_due_datetime': response_due,
+                'resolution_due_datetime': resolution_due,
+                'sla_id': sla,  # VALIDATED FK
                 'created_at': current_ts,
                 'updated_at': current_ts
             })
@@ -287,7 +410,7 @@ def main():
                 'comment_text': f"Comment on ticket issue {i // 25}",
                 'comment_type': random.choice(['Customer', 'Internal', 'System']),
                 'is_public': random.choice([True, False]),
-                'created_by': agent,
+                'created_by': assigned_employee,  # VALIDATED FK
                 'created_at': current_ts
             })
         
@@ -299,8 +422,8 @@ def main():
                 'ticket_id': tickets[-1]['ticket_id'] if tickets else f"TICKET-000001",
                 'escalation_level': random.randint(1, 3),
                 'escalation_reason': random.choice(['Complex Issue', 'SLA Risk', 'High Priority', 'Manager Request']),
-                'escalated_from': agent,
-                'escalated_to': random.choice(master_data['service_agents']),
+                'escalated_from': assigned_employee,  # VALIDATED FK
+                'escalated_to': escalated_employee,   # VALIDATED FK
                 'escalated_at': current_ts
             })
         
@@ -311,14 +434,14 @@ def main():
             rma_requests.append({
                 'rma_id': rma_id,
                 'rma_number': rma_num,
-                'account_id': account,
-                'contact_id': contact,
+                'account_id': account,  # VALIDATED FK
+                'contact_id': contact,  # VALIDATED FK
                 'ticket_id': tickets[-1]['ticket_id'] if tickets else None,
                 'rma_type': random.choice(['Return', 'Repair', 'Replacement', 'Refund']),
                 'return_reason': random.choice(['Defective', 'Not as expected', 'Damaged', 'Wrong item']),
                 'rma_status': random.choice(['Pending', 'Approved', 'Rejected', 'Completed']),
                 'approved': random.choice([True, False]),
-                'approved_by': agent if random.random() > 0.3 else None,
+                'approved_by': assigned_employee if random.random() > 0.3 else None,  # VALIDATED FK
                 'approved_date': (current_ts + timedelta(days=1)).date() if random.random() > 0.3 else None,
                 'created_at': current_ts
             })
@@ -327,17 +450,19 @@ def main():
         if i % 250 == 0:
             warranty_id = f"WC-{(counters['warranty'] + i // 250):06d}"
             claim_num = f"CLM-{run_timestamp}-{i // 250:04d}"
+            # Use proper warranty registration format
+            warranty_reg_id = f"WAREG-{random.randint(100001, 999999)}"
             warranty_claims.append({
                 'claim_id': warranty_id,
                 'claim_number': claim_num,
-                'warranty_id': f"WAR-{random.randint(1000, 9999)}",
+                'warranty_id': warranty_reg_id,  # FIXED - Link to warranty_registrations table
                 'ticket_id': tickets[-1]['ticket_id'] if tickets else None,
                 'claim_date': current_ts.date(),
                 'issue_description': f"Warranty claim for product failure {i // 250}",
                 'failure_type': random.choice(['Hardware', 'Software', 'Performance', 'Defect']),
                 'claim_status': random.choice(['Pending', 'Approved', 'Rejected', 'Paid']),
                 'approved': random.choice([True, False]),
-                'approved_by': agent if random.random() > 0.4 else None,
+                'approved_by': assigned_employee if random.random() > 0.4 else None,  # VALIDATED FK
                 'approved_date': (current_ts + timedelta(days=3)).date() if random.random() > 0.4 else None,
                 'created_at': current_ts
             })
@@ -380,7 +505,7 @@ def main():
     
     # Bulk dump to PostgreSQL
     logger.info("="*80)
-    logger.info("BULK DUMPING TO POSTGRESQL...")
+    logger.info("BULK DUMPING TO POSTGRESQL WITH TIME COORDINATION...")
     logger.info("="*80)
     
     try:
@@ -392,14 +517,18 @@ def main():
             insert_sql = """INSERT INTO service_tickets (
                 ticket_id, ticket_number, account_id, contact_id, channel, ticket_type,
                 category, priority, ticket_status, subject, description, assigned_to, assigned_team,
-                created_at, updated_at
+                response_due_datetime, resolution_due_datetime, sla_id, created_at, updated_at
             ) VALUES (%(ticket_id)s, %(ticket_number)s, %(account_id)s, %(contact_id)s,
                 %(channel)s, %(ticket_type)s, %(category)s, %(priority)s, %(ticket_status)s,
                 %(subject)s, %(description)s, %(assigned_to)s, %(assigned_team)s,
-                %(created_at)s, %(updated_at)s)
-            ON CONFLICT (ticket_number) DO NOTHING"""
+                %(response_due_datetime)s, %(resolution_due_datetime)s, %(sla_id)s,
+                %(created_at)s, %(updated_at)s)"""
             logger.info(f"Inserting {len(tickets):,} service tickets...")
             insert_batch_parallel(cursor, insert_sql, tickets, "service_tickets", BATCH_SIZE, pg_connection)
+            
+        # TIME COORDINATION - 2 second delay after tickets
+        logger.info("⏱️  Time coordination delay - 2 seconds...")
+        time.sleep(2)
         
         # Insert comments
         if comments:
@@ -407,10 +536,13 @@ def main():
                 comment_id, ticket_id, comment_text, comment_type, is_public,
                 created_by, created_at
             ) VALUES (%(comment_id)s, %(ticket_id)s, %(comment_text)s, %(comment_type)s,
-                %(is_public)s, %(created_by)s, %(created_at)s)
-            ON CONFLICT (comment_id) DO NOTHING"""
+                %(is_public)s, %(created_by)s, %(created_at)s)"""
             logger.info(f"Inserting {len(comments):,} ticket comments...")
             insert_batch_parallel(cursor, insert_sql, comments, "ticket_comments", BATCH_SIZE, pg_connection)
+            
+        # TIME COORDINATION - 2 second delay after comments
+        logger.info("⏱️  Time coordination delay - 2 seconds...")
+        time.sleep(2)
         
         # Insert escalations
         if escalations:
@@ -418,10 +550,13 @@ def main():
                 escalation_id, ticket_id, escalation_level, escalation_reason,
                 escalated_from, escalated_to, escalated_at
             ) VALUES (%(escalation_id)s, %(ticket_id)s, %(escalation_level)s,
-                %(escalation_reason)s, %(escalated_from)s, %(escalated_to)s, %(escalated_at)s)
-            ON CONFLICT (escalation_id) DO NOTHING"""
+                %(escalation_reason)s, %(escalated_from)s, %(escalated_to)s, %(escalated_at)s)"""
             logger.info(f"Inserting {len(escalations):,} escalations...")
             insert_batch_parallel(cursor, insert_sql, escalations, "ticket_escalations", BATCH_SIZE, pg_connection)
+            
+        # TIME COORDINATION - 3 second delay after escalations
+        logger.info("⏱️  Time coordination delay - 3 seconds...")
+        time.sleep(3)
         
         # Insert RMA requests
         if rma_requests:
@@ -430,10 +565,13 @@ def main():
                 return_reason, rma_status, approved, approved_by, approved_date, created_at
             ) VALUES (%(rma_id)s, %(rma_number)s, %(account_id)s, %(contact_id)s,
                 %(ticket_id)s, %(rma_type)s, %(return_reason)s, %(rma_status)s,
-                %(approved)s, %(approved_by)s, %(approved_date)s, %(created_at)s)
-            ON CONFLICT (rma_number) DO NOTHING"""
+                %(approved)s, %(approved_by)s, %(approved_date)s, %(created_at)s)"""
             logger.info(f"Inserting {len(rma_requests):,} RMA requests...")
             insert_batch_parallel(cursor, insert_sql, rma_requests, "rma_requests", BATCH_SIZE, pg_connection)
+            
+        # TIME COORDINATION - 2 second delay after RMA
+        logger.info("⏱️  Time coordination delay - 2 seconds...")
+        time.sleep(2)
         
         # Insert warranty claims
         if warranty_claims:
@@ -443,10 +581,13 @@ def main():
                 approved_date, created_at
             ) VALUES (%(claim_id)s, %(claim_number)s, %(warranty_id)s, %(ticket_id)s,
                 %(claim_date)s, %(issue_description)s, %(failure_type)s, %(claim_status)s,
-                %(approved)s, %(approved_by)s, %(approved_date)s, %(created_at)s)
-            ON CONFLICT (claim_number) DO NOTHING"""
+                %(approved)s, %(approved_by)s, %(approved_date)s, %(created_at)s)"""
             logger.info(f"Inserting {len(warranty_claims):,} warranty claims...")
             insert_batch_parallel(cursor, insert_sql, warranty_claims, "warranty_claims", BATCH_SIZE, pg_connection)
+            
+        # TIME COORDINATION - 2 second delay after warranty
+        logger.info("⏱️  Time coordination delay - 2 seconds...")
+        time.sleep(2)
         
         # Insert metrics
         if metrics:
@@ -458,17 +599,20 @@ def main():
             ) VALUES (%(metric_id)s, %(metric_date)s, %(tickets_created)s, %(tickets_resolved)s, %(tickets_closed)s,
                 %(avg_first_response_time_minutes)s, %(avg_resolution_time_minutes)s, %(response_sla_compliance_pct)s,
                 %(resolution_sla_compliance_pct)s, %(fcr_rate_pct)s, %(avg_csat_rating)s, %(phone_tickets)s, %(email_tickets)s,
-                %(chat_tickets)s, %(portal_tickets)s, %(critical_tickets)s, %(high_tickets)s, %(medium_tickets)s, %(low_tickets)s, %(created_at)s)
-            ON CONFLICT DO NOTHING"""
+                %(chat_tickets)s, %(portal_tickets)s, %(critical_tickets)s, %(high_tickets)s, %(medium_tickets)s, %(low_tickets)s, %(created_at)s)"""
             logger.info(f"Inserting {len(metrics):,} service metrics...")
             insert_batch_parallel(cursor, insert_sql, metrics, "service_metrics_daily", BATCH_SIZE, pg_connection)
         
         cursor.close()
         
+        # TIME COORDINATION - Final 3 second delay before commit
+        logger.info("⏱️  Time coordination delay - 3 seconds before commit...")
+        time.sleep(3)
+        
         # Commit all data
         pg_connection.commit()
         
-        logger.info(f"✓ All records inserted successfully")
+        logger.info(f"✓ All records inserted successfully with time coordination")
     except Exception as e:
         logger.error(f"PostgreSQL error: {e}")
         return 1
