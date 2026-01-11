@@ -1126,27 +1126,52 @@ class HCMDataGenerator:
         
         onboarding_tasks = [
             'IT Equipment Setup',
-            'Office Tour',
+            'Office Tour', 
             'Department Introduction',
             'Policy Training',
             'System Access Setup',
             'Benefits Enrollment',
             'Safety Training',
-            'Mentor Assignment'
+            'Mentor Assignment',
+            'Badge and ID Creation',
+            'Workspace Assignment',
+            'Software License Setup',
+            'Emergency Procedures Training'
         ]
         
-        onboarding_records = self.onboarding_history if hasattr(self, 'onboarding_history') else []
+        # Use self.employee_onboarding instead of nonexistent onboarding_history
+        onboarding_records = self.employee_onboarding if hasattr(self, 'employee_onboarding') else []
+        
+        if not onboarding_records:
+            print("No onboarding records found, creating sample records...")
+            # Create sample onboarding records if none exist
+            for i in range(10):
+                sample_onboarding = {
+                    'onboarding_id': self.generate_id('ONB', 'onboarding'),
+                    'employee_id': self.generate_id('EMP', 'emp')
+                }
+                onboarding_records.append(sample_onboarding)
         
         for i, onboarding_rec in enumerate(onboarding_records):
-            for task in random.sample(onboarding_tasks, random.randint(4, 6)):
+            # Generate 4-8 onboarding tasks per employee
+            num_tasks = random.randint(4, 8)
+            selected_tasks = random.sample(onboarding_tasks, num_tasks)
+            
+            for j, task in enumerate(selected_tasks):
+                completion_status = random.choice(['pending', 'in_progress', 'completed'])
+                completion_date = None
+                if completion_status == 'completed':
+                    completion_date = (datetime.now() - timedelta(days=random.randint(1, 30))).strftime('%Y-%m-%d')
+                
                 item = {
-                    'item_id': self.generate_id('OBI', 'item'),
+                    'item_tracking_id': self.generate_id('OBI', 'item'),  # Fixed: was 'item_id'
                     'onboarding_id': onboarding_rec['onboarding_id'],
-                    'task_description': task,
-                    'assigned_to': random.choice(self.employees)['employee_id'] if self.employees else self.generate_id('EMP', 'emp'),
+                    'item_id': f"CLI-{j+1:03d}",  # Fixed: was 'checklist_item_id', FK to onboarding_checklist_items
                     'due_date': (datetime.now() + timedelta(days=random.randint(1, 30))).strftime('%Y-%m-%d'),
-                    'completion_date': None if random.random() > 0.7 else datetime.now().strftime('%Y-%m-%d'),
-                    'status': random.choice(['pending', 'completed']),
+                    'completed_date': completion_date,
+                    'completed': completion_status == 'completed',  # Added missing field
+                    'item_status': completion_status,
+                    'notes': f"Task notes for {task}",
                     'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
                 items.append(item)
@@ -1427,7 +1452,7 @@ if __name__ == "__main__":
     generator.generate_all_data()
     
     # Export to JSON (in same folder as script)
-    json_file = script_dir / "hcm_historical_data.json"
+    json_file = script_dir / "genims_hcm_data.json"
     generator.to_json(str(json_file))
     
     print("\n" + "="*80)

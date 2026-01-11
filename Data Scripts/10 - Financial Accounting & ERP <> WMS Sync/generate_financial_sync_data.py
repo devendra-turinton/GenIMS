@@ -48,16 +48,33 @@ class FinancialSyncDataGenerator:
         self.fiscal_years = []
         self.fiscal_periods = []
         self.budgets = []
+        self.budget_lines = []
         self.exchange_rates = []
+        self.financial_statements = []
+        self.gl_audit_trail = []
+        self.period_close_tasks = []
         
         # Inventory Sync
         self.sync_mappings = []
         self.inventory_snapshot = []
+        self.cycle_count_integration = []
+        self.inventory_adjustments_sync = []
+        self.inventory_allocations = []
+        self.inventory_reconciliation_headers = []
+        self.inventory_reconciliation_lines = []
+        self.inventory_sync_errors = []
+        self.inventory_sync_metrics = []
+        self.inventory_sync_queue = []
+        self.inventory_transaction_log = []
         
         # Counters
         self.counters = {
             'account': 1000, 'rule': 1, 'cc': 1, 'fy': 1, 'period': 1,
-            'budget': 1, 'rate': 1, 'mapping': 1, 'snapshot': 1
+            'budget': 1, 'rate': 1, 'mapping': 1, 'snapshot': 1,
+            'statement': 1, 'audit': 1, 'task': 1, 'cycle': 1,
+            'adjustment': 1, 'allocation': 1, 'recon_header': 1, 
+            'recon_line': 1, 'sync_error': 1, 'sync_metric': 1, 
+            'sync_queue': 1, 'transaction': 1
         }
     
     def generate_id(self, prefix: str, counter_key: str) -> str:
@@ -78,10 +95,21 @@ class FinancialSyncDataGenerator:
         self.generate_fiscal_calendar()
         self.generate_exchange_rates()
         self.generate_budgets()
+        self.generate_financial_statements()
+        self.generate_gl_audit_trail()
+        self.generate_period_close_tasks()
         
         # Inventory Sync Master Data
         self.generate_sync_mappings()
         self.generate_inventory_snapshot()
+        self.generate_cycle_count_integration()
+        self.generate_inventory_adjustments_sync()
+        self.generate_inventory_allocations()
+        self.generate_inventory_reconciliation()
+        self.generate_sync_errors()
+        self.generate_sync_metrics()
+        self.generate_sync_queue()
+        self.generate_transaction_log()
         
         self._print_summary()
     
@@ -370,7 +398,7 @@ class FinancialSyncDataGenerator:
     # ========================================================================
     
     def generate_budgets(self):
-        """Generate sample budgets"""
+        """Generate sample budgets and budget lines"""
         print("Generating budgets...")
         
         current_year = datetime.now().year
@@ -388,7 +416,197 @@ class FinancialSyncDataGenerator:
         }
         self.budgets.append(budget)
         
+        # Generate budget lines for each account and period
+        print("Generating budget lines...")
+        budget_id = budget['budget_id']
+        
+        # Get revenue and expense accounts for budgeting
+        revenue_accounts = [acc for acc in self.coa_accounts if acc['account_type'] == 'revenue']
+        expense_accounts = [acc for acc in self.coa_accounts if acc['account_type'] == 'expense']
+        
+        for month in range(1, 13):  # 12 months
+            # Revenue budget lines
+            for acc in revenue_accounts:
+                budget_line = {
+                    'budget_line_id': self.generate_id('BUDGETLINE', 'budget'),
+                    'budget_id': budget_id,
+                    'account_id': acc['account_id'],
+                    'cost_center_id': random.choice([cc['cost_center_id'] for cc in self.cost_centers]) if self.cost_centers else None,
+                    'fiscal_year': current_year,
+                    'fiscal_period': month,
+                    'budget_amount': round(random.uniform(50000, 200000), 2),  # Revenue budget
+                    'revised_amount': None,
+                    'budget_currency': 'INR',
+                    'budget_type': 'revenue',
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                self.budget_lines.append(budget_line)
+            
+            # Expense budget lines  
+            for acc in expense_accounts:
+                budget_line = {
+                    'budget_line_id': self.generate_id('BUDGETLINE', 'budget'),
+                    'budget_id': budget_id,
+                    'account_id': acc['account_id'],
+                    'cost_center_id': random.choice([cc['cost_center_id'] for cc in self.cost_centers]) if self.cost_centers else None,
+                    'fiscal_year': current_year,
+                    'fiscal_period': month,
+                    'budget_amount': round(random.uniform(10000, 80000), 2),  # Expense budget
+                    'revised_amount': None,
+                    'budget_currency': 'INR',
+                    'budget_type': 'expense',
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                self.budget_lines.append(budget_line)
+        
         print(f"Generated {len(self.budgets)} budgets")
+        print(f"Generated {len(self.budget_lines)} budget lines")
+    
+    def generate_financial_statements(self):
+        """Generate sample financial statements"""
+        print("Generating financial statements...")
+        
+        statement_types = ['profit_loss', 'balance_sheet', 'cash_flow']
+        
+        for fiscal_year in [2025, 2026]:
+            for quarter in range(1, 5):
+                for stmt_type in statement_types:
+                    # Calculate date range for quarter
+                    start_month = (quarter - 1) * 3 + 1
+                    end_month = quarter * 3
+                    start_date = f"{fiscal_year}-{start_month:02d}-01"
+                    end_date = f"{fiscal_year}-{end_month:02d}-{31 if end_month in [1,3,5,7,8,10,12] else 30 if end_month != 2 else 28}"
+                    
+                    statement = {
+                        'statement_id': self.generate_id('STMT', 'statement'),
+                        'statement_type': stmt_type,
+                        'fiscal_year': fiscal_year,
+                        'fiscal_period': quarter,
+                        'start_date': start_date,
+                        'end_date': end_date,
+                        'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'generated_by': 'SYS-GENIMS-001',
+                        'statement_status': 'finalized',
+                        'statement_data': self._generate_statement_data(stmt_type),
+                        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    self.financial_statements.append(statement)
+        
+        print(f"Generated {len(self.financial_statements)} financial statements")
+    
+    def _generate_statement_data(self, stmt_type):
+        """Generate sample statement data based on type"""
+        if stmt_type == 'profit_loss':
+            return {
+                'revenue': round(random.uniform(5000000, 10000000), 2),
+                'cost_of_goods_sold': round(random.uniform(2000000, 4000000), 2),
+                'gross_profit': round(random.uniform(2000000, 6000000), 2),
+                'operating_expenses': round(random.uniform(1000000, 3000000), 2),
+                'net_income': round(random.uniform(500000, 2500000), 2)
+            }
+        elif stmt_type == 'balance_sheet':
+            return {
+                'total_assets': round(random.uniform(10000000, 50000000), 2),
+                'current_assets': round(random.uniform(3000000, 15000000), 2),
+                'fixed_assets': round(random.uniform(7000000, 35000000), 2),
+                'total_liabilities': round(random.uniform(5000000, 25000000), 2),
+                'current_liabilities': round(random.uniform(1000000, 5000000), 2),
+                'equity': round(random.uniform(5000000, 25000000), 2)
+            }
+        else:  # cash_flow
+            return {
+                'operating_cash_flow': round(random.uniform(1000000, 5000000), 2),
+                'investing_cash_flow': round(random.uniform(-2000000, -500000), 2),
+                'financing_cash_flow': round(random.uniform(-1000000, 1000000), 2),
+                'net_cash_flow': round(random.uniform(-500000, 3000000), 2),
+                'beginning_cash': round(random.uniform(500000, 2000000), 2),
+                'ending_cash': round(random.uniform(1000000, 5000000), 2)
+            }
+    
+    def generate_gl_audit_trail(self):
+        """Generate GL audit trail records"""
+        print("Generating GL audit trail...")
+        
+        actions = ['insert', 'update', 'delete', 'post', 'reverse']
+        tables = ['gl_journal_entries', 'gl_journal_lines', 'chart_of_accounts', 'budget_headers', 'budget_lines']
+        users = ['USR-001', 'USR-002', 'USR-003', 'USR-004', 'USR-005']
+        
+        # Generate audit records for the last 30 days
+        base_date = datetime.now()
+        
+        for i in range(250):  # Generate 250 audit trail entries
+            action_date = base_date - timedelta(days=random.randint(0, 30))
+            
+            audit_entry = {
+                'audit_id': self.generate_id('AUDIT', 'audit'),
+                'table_name': random.choice(tables),
+                'record_id': f"REC-{random.randint(100000, 999999)}",
+                'action_type': random.choice(actions),
+                'user_id': random.choice(users),
+                'action_timestamp': action_date.strftime('%Y-%m-%d %H:%M:%S'),
+                'old_values': self._generate_audit_values(),
+                'new_values': self._generate_audit_values(),
+                'session_id': f"SESS-{random.randint(100000, 999999)}",
+                'ip_address': f"{random.randint(192,192)}.{random.randint(168,168)}.{random.randint(1,10)}.{random.randint(1,254)}",
+                'application_name': 'GenIMS',
+                'created_at': action_date.strftime('%Y-%m-%d %H:%M:%S')
+            }
+            self.gl_audit_trail.append(audit_entry)
+        
+        print(f"Generated {len(self.gl_audit_trail)} audit trail entries")
+    
+    def _generate_audit_values(self):
+        """Generate sample audit trail values"""
+        return {
+            'amount': round(random.uniform(1000, 100000), 2),
+            'account_code': f"{random.randint(1000, 9999)}",
+            'description': f"GL Entry {random.randint(1000, 9999)}",
+            'status': random.choice(['draft', 'posted', 'reversed'])
+        }
+    
+    def generate_period_close_tasks(self):
+        """Generate period close task templates"""
+        print("Generating period close tasks...")
+        
+        task_templates = [
+            {'name': 'Verify Bank Reconciliations', 'category': 'bank', 'sequence': 1, 'required': True},
+            {'name': 'Review AR Aging Reports', 'category': 'receivables', 'sequence': 2, 'required': True},
+            {'name': 'Process Depreciation Calculations', 'category': 'fixed_assets', 'sequence': 3, 'required': True},
+            {'name': 'Accrue Payroll Expenses', 'category': 'payroll', 'sequence': 4, 'required': True},
+            {'name': 'Review Inventory Valuations', 'category': 'inventory', 'sequence': 5, 'required': True},
+            {'name': 'Post Month-End Journal Entries', 'category': 'journal', 'sequence': 6, 'required': True},
+            {'name': 'Generate Financial Reports', 'category': 'reporting', 'sequence': 7, 'required': True},
+            {'name': 'Review and Approve Statements', 'category': 'approval', 'sequence': 8, 'required': True},
+            {'name': 'Archive Period Documents', 'category': 'archive', 'sequence': 9, 'required': False},
+            {'name': 'Update Budget vs Actual Analysis', 'category': 'analysis', 'sequence': 10, 'required': False}
+        ]
+        
+        # Create tasks for last 6 months
+        base_date = datetime.now()
+        for month_offset in range(6):
+            period_date = base_date - timedelta(days=month_offset * 30)
+            period_name = period_date.strftime('%Y-%m')
+            fiscal_year = period_date.year
+            fiscal_period = period_date.month
+            
+            for template in task_templates:
+                task = {
+                    'task_id': self.generate_id('TASK', 'task'),
+                    'fiscal_year': fiscal_year,
+                    'fiscal_period': fiscal_period,
+                    'task_sequence': template['sequence'],
+                    'task_name': template['name'],
+                    'task_description': f"{template['name']} for period {period_name}",
+                    'task_status': random.choice(['completed', 'in_progress', 'pending']),
+                    'started_at': (period_date + timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S') if random.choice([True, False]) else None,
+                    'completed_at': (period_date + timedelta(days=random.randint(1, 7))).strftime('%Y-%m-%d %H:%M:%S') if random.choice([True, False, True]) else None,
+                    'completed_by': f"USR-{random.randint(1, 5):03d}" if random.choice([True, False]) else None,
+                    'result_message': f"Task completed successfully for {period_name}" if random.choice([True, False]) else None,
+                    'created_at': period_date.strftime('%Y-%m-%d %H:%M:%S')
+                }
+                self.period_close_tasks.append(task)
+        
+        print(f"Generated {len(self.period_close_tasks)} period close tasks")
     
     # ========================================================================
     # INVENTORY SYNC
@@ -448,6 +666,234 @@ class FinancialSyncDataGenerator:
         
         print(f"Generated {len(self.inventory_snapshot)} inventory snapshots")
     
+    def generate_cycle_count_integration(self):
+        """Generate cycle count integration records"""
+        print("Generating cycle count integration...")
+        
+        for i in range(15):  # Generate 15 cycle count integrations
+            integration = {
+                'integration_id': self.generate_id('CYCLE', 'cycle'),
+                'cycle_count_id': f"CC-{random.randint(100000, 999999)}",
+                'wms_warehouse_id': f"WMS-{random.randint(1, 3):03d}",
+                'erp_location_id': f"FAC-{random.randint(1, 4):06d}",
+                'integration_status': random.choice(['completed', 'pending', 'failed']),
+                'items_counted': random.randint(50, 500),
+                'discrepancies_found': random.randint(0, 25),
+                'value_adjustment': round(random.uniform(-5000, 5000), 2),
+                'integration_timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'error_message': None if random.choice([True, True, False]) else "Minor discrepancy in count",
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            self.cycle_count_integration.append(integration)
+        
+        print(f"Generated {len(self.cycle_count_integration)} cycle count integrations")
+    
+    def generate_inventory_adjustments_sync(self):
+        """Generate inventory adjustment sync records"""
+        print("Generating inventory adjustment sync...")
+        
+        for i in range(30):  # Generate 30 adjustment sync records
+            adjustment = {
+                'adjustment_sync_id': self.generate_id('ADJ', 'adjustment'),
+                'erp_adjustment_id': f"ADJ-{random.randint(100000, 999999)}",
+                'wms_adjustment_id': f"WMSADJ-{random.randint(100000, 999999)}",
+                'material_id': f"MAT-{random.randint(1, 200):06d}",
+                'location_id': f"FAC-{random.randint(1, 4):06d}",
+                'adjustment_type': random.choice(['damage', 'loss', 'found', 'correction']),
+                'adjustment_date': (datetime.now() - timedelta(days=random.randint(0, 30))).strftime('%Y-%m-%d'),  # Required field
+                'quantity_adjusted': random.randint(-100, 100),
+                'adjustment_quantity': abs(random.randint(1, 100)),  # Required field - absolute quantity of adjustment
+                'unit_cost': round(random.uniform(10, 1000), 2),
+                'total_value': 0,  # Will be calculated
+                'source_system': random.choice(['ERP', 'WMS']),  # Required field
+                'sync_status': random.choice(['synced', 'pending', 'error']),
+                'sync_timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            # Calculate total value
+            adjustment['total_value'] = round(adjustment['quantity_adjusted'] * adjustment['unit_cost'], 2)
+            self.inventory_adjustments_sync.append(adjustment)
+        
+        print(f"Generated {len(self.inventory_adjustments_sync)} adjustment sync records")
+    
+    def generate_inventory_allocations(self):
+        """Generate inventory allocation records"""
+        print("Generating inventory allocations...")
+        
+        for i in range(40):  # Generate 40 allocation records
+            allocation = {
+                'allocation_id': self.generate_id('ALLOC', 'allocation'),
+                'material_id': f"MAT-{random.randint(1, 200):06d}",
+                'source_location': f"FAC-{random.randint(1, 4):06d}",
+                'target_location': f"FAC-{random.randint(1, 4):06d}",
+                'allocation_type': random.choice(['sales_order', 'work_order', 'transfer', 'reserve']),
+                'source_type': random.choice(['ERP', 'WMS', 'MES']),  # Required field
+                'allocated_quantity': random.randint(10, 500),
+                'allocation_date': datetime.now().strftime('%Y-%m-%d'),
+                'expiry_date': (datetime.now() + timedelta(days=random.randint(7, 90))).strftime('%Y-%m-%d'),
+                'allocation_status': random.choice(['active', 'consumed', 'expired', 'cancelled']),
+                'reference_document': f"SO-{random.randint(100000, 999999)}",
+                'allocated_by': f"USR-{random.randint(1, 10):03d}",
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            self.inventory_allocations.append(allocation)
+        
+        print(f"Generated {len(self.inventory_allocations)} inventory allocations")
+    
+    def generate_inventory_reconciliation(self):
+        """Generate inventory reconciliation headers and lines"""
+        print("Generating inventory reconciliation...")
+        
+        # Generate reconciliation headers
+        for i in range(8):  # 8 reconciliation sessions
+            header = {
+                'reconciliation_id': self.generate_id('RECON', 'recon_header'),
+                'reconciliation_number': f"RECON-{datetime.now().strftime('%Y%m')}-{i+1:03d}",  # Required field
+                'reconciliation_date': (datetime.now() - timedelta(days=random.randint(1, 30))).strftime('%Y-%m-%d'),
+                'reconciliation_type': random.choice(['monthly', 'quarterly', 'cycle_count', 'audit']),
+                'location_id': f"FAC-{random.randint(1, 4):06d}",
+                'total_items': random.randint(50, 200),
+                'discrepancies_found': random.randint(0, 20),
+                'reconciliation_status': random.choice(['completed', 'in_progress', 'approved']),
+                'performed_by': f"USR-{random.randint(1, 5):03d}",
+                'approved_by': f"USR-{random.randint(1, 5):03d}" if random.choice([True, False]) else None,
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            self.inventory_reconciliation_headers.append(header)
+            
+            # Generate reconciliation lines for each header
+            for j in range(random.randint(5, 25)):
+                line = {
+                    'reconciliation_line_id': self.generate_id('RECONLINE', 'recon_line'),
+                    'reconciliation_id': header['reconciliation_id'],
+                    'material_id': f"MAT-{random.randint(1, 200):06d}",
+                    'system_quantity': random.randint(0, 1000),
+                    'physical_quantity': random.randint(0, 1000),
+                    'variance_quantity': 0,  # Will be calculated
+                    'unit_cost': round(random.uniform(10, 500), 2),
+                    'variance_value': 0,  # Will be calculated
+                    'variance_reason': random.choice(['count_error', 'system_error', 'theft', 'damage', 'none']) if random.choice([True, False]) else None,
+                    'adjustment_required': False,  # Will be set based on variance
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                # Calculate variance
+                line['variance_quantity'] = line['physical_quantity'] - line['system_quantity']
+                line['variance_value'] = round(line['variance_quantity'] * line['unit_cost'], 2)
+                line['adjustment_required'] = abs(line['variance_quantity']) > 0
+                self.inventory_reconciliation_lines.append(line)
+        
+        print(f"Generated {len(self.inventory_reconciliation_headers)} reconciliation headers")
+        print(f"Generated {len(self.inventory_reconciliation_lines)} reconciliation lines")
+    
+    def generate_sync_errors(self):
+        """Generate sync error records"""
+        print("Generating sync errors...")
+        
+        error_types = ['connection_timeout', 'data_validation', 'duplicate_key', 'foreign_key', 'network_error']
+        
+        for i in range(12):  # Generate 12 error records
+            error = {
+                'error_id': self.generate_id('ERR', 'sync_error'),
+                'sync_operation': random.choice(['inventory_update', 'order_sync', 'allocation_sync', 'adjustment_sync']),
+                'error_type': random.choice(error_types),
+                'error_message': f"Sync failed: {random.choice(['Connection timeout', 'Invalid data format', 'Record not found', 'Database constraint violation'])}",
+                'error_timestamp': (datetime.now() - timedelta(hours=random.randint(1, 72))).strftime('%Y-%m-%d %H:%M:%S'),
+                'retry_count': random.randint(0, 3),
+                'resolution_status': random.choice(['resolved', 'pending', 'escalated']),
+                'resolution_timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S') if random.choice([True, False]) else None,
+                'affected_records': random.randint(1, 50),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            self.inventory_sync_errors.append(error)
+        
+        print(f"Generated {len(self.inventory_sync_errors)} sync error records")
+    
+    def generate_sync_metrics(self):
+        """Generate sync performance metrics"""
+        print("Generating sync metrics...")
+        
+        # Generate daily metrics for the last 30 days
+        base_date = datetime.now()
+        for day_offset in range(30):
+            metric_date = base_date - timedelta(days=day_offset)
+            
+            metric = {
+                'metric_id': self.generate_id('METRIC', 'sync_metric'),
+                'metric_date': metric_date.strftime('%Y-%m-%d'),
+                'total_sync_operations': random.randint(500, 2000),
+                'successful_syncs': random.randint(450, 1950),
+                'failed_syncs': random.randint(0, 50),
+                'average_sync_time_ms': round(random.uniform(100, 2000), 2),
+                'max_sync_time_ms': round(random.uniform(2000, 10000), 2),
+                'throughput_records_per_hour': random.randint(1000, 5000),
+                'error_rate_percent': round(random.uniform(0, 5), 2),
+                'created_at': metric_date.strftime('%Y-%m-%d %H:%M:%S')
+            }
+            self.inventory_sync_metrics.append(metric)
+        
+        print(f"Generated {len(self.inventory_sync_metrics)} sync metrics")
+    
+    def generate_sync_queue(self):
+        """Generate sync queue records"""
+        print("Generating sync queue...")
+        
+        operations = ['inventory_update', 'allocation_create', 'adjustment_sync', 'reconciliation_update']
+        
+        for i in range(25):  # Generate 25 queue items
+            queue_item = {
+                'queue_id': self.generate_id('QUEUE', 'sync_queue'),
+                'operation_type': random.choice(operations),
+                'transaction_type': random.choice(['allocation', 'reservation', 'movement', 'adjustment', 'cycle_count']),  # Required field
+                'sync_direction': random.choice(['ERP_TO_WMS', 'WMS_TO_ERP']),  # Required field
+                'quantity': round(random.uniform(1, 500), 2),  # Required field
+                'payload_data': {
+                    'material_id': f"MAT-{random.randint(1, 200):06d}",
+                    'quantity': random.randint(1, 500),
+                    'location': f"FAC-{random.randint(1, 4):06d}",
+                    'timestamp': datetime.now().isoformat()
+                },
+                'queue_timestamp': (datetime.now() + timedelta(minutes=random.randint(-30, 30))).strftime('%Y-%m-%d %H:%M:%S'),
+                'processing_status': random.choice(['pending', 'processing', 'completed', 'failed']),
+                'retry_count': random.randint(0, 2),
+                'max_retries': 3,
+                'priority': random.choice(['high', 'normal', 'low']),
+                'processed_timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S') if random.choice([True, False]) else None,
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            self.inventory_sync_queue.append(queue_item)
+        
+        print(f"Generated {len(self.inventory_sync_queue)} sync queue items")
+    
+    def generate_transaction_log(self):
+        """Generate inventory transaction log"""
+        print("Generating inventory transaction log...")
+        
+        transaction_types = ['receipt', 'issue', 'transfer', 'adjustment', 'allocation', 'consumption']
+        
+        for i in range(100):  # Generate 100 transaction log entries
+            transaction = {
+                'transaction_id': self.generate_id('TXN', 'transaction'),
+                'material_id': f"MAT-{random.randint(1, 200):06d}",
+                'transaction_type': random.choice(transaction_types),
+                'transaction_date': (datetime.now() - timedelta(days=random.randint(0, 30))).strftime('%Y-%m-%d'),
+                'reference_document': f"DOC-{random.randint(100000, 999999)}",
+                'source_system': random.choice(['ERP', 'WMS', 'MES']),  # Required field
+                'quantity_change': round(random.uniform(-500, 500), 2),  # Required field
+                'source_location': f"FAC-{random.randint(1, 4):06d}" if random.choice([True, False]) else None,
+                'target_location': f"FAC-{random.randint(1, 4):06d}",
+                'quantity': round(random.uniform(1, 500), 2),
+                'unit_cost': round(random.uniform(10, 1000), 2),
+                'total_value': 0,  # Will be calculated
+                'user_id': f"USR-{random.randint(1, 10):03d}",
+                'batch_id': f"BATCH-{random.randint(1000, 9999)}" if random.choice([True, False]) else None,
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            # Calculate total value
+            transaction['total_value'] = round(transaction['quantity'] * transaction['unit_cost'], 2)
+            self.inventory_transaction_log.append(transaction)
+        
+        print(f"Generated {len(self.inventory_transaction_log)} transaction log entries")
+    
     def _print_summary(self):
         print(f"\n{'='*80}")
         print(f"Financial & Sync Data Generation Complete!")
@@ -460,11 +906,23 @@ class FinancialSyncDataGenerator:
         print(f"  Fiscal Periods: {len(self.fiscal_periods)}")
         print(f"  Exchange Rates: {len(self.exchange_rates)}")
         print(f"  Budgets: {len(self.budgets)}")
+        print(f"  Budget Lines: {len(self.budget_lines)}")
+        print(f"  Financial Statements: {len(self.financial_statements)}")
+        print(f"  GL Audit Trail: {len(self.gl_audit_trail)}")
+        print(f"  Period Close Tasks: {len(self.period_close_tasks)}")
         
         print(f"\nInventory Sync:")
         print(f"  Sync Mappings: {len(self.sync_mappings)}")
         print(f"  Inventory Snapshots: {len(self.inventory_snapshot)}")
-    
+        print(f"  Cycle Count Integration: {len(self.cycle_count_integration)}")
+        print(f"  Adjustment Sync: {len(self.inventory_adjustments_sync)}")
+        print(f"  Inventory Allocations: {len(self.inventory_allocations)}")
+        print(f"  Reconciliation Headers: {len(self.inventory_reconciliation_headers)}")
+        print(f"  Reconciliation Lines: {len(self.inventory_reconciliation_lines)}")
+        print(f"  Sync Errors: {len(self.inventory_sync_errors)}")
+        print(f"  Sync Metrics: {len(self.inventory_sync_metrics)}")
+        print(f"  Sync Queue: {len(self.inventory_sync_queue)}")
+        print(f"  Transaction Log: {len(self.inventory_transaction_log)}")    
     def to_json(self, output_file=None):
         """Export to JSON - TWO separate files for TWO databases"""
         if output_file is None:
@@ -480,7 +938,11 @@ class FinancialSyncDataGenerator:
             'fiscal_years': self.fiscal_years,
             'fiscal_periods': self.fiscal_periods,
             'exchange_rates': self.exchange_rates,
-            'budget_headers': [b for b in self.budgets]
+            'budget_headers': [b for b in self.budgets],
+            'budget_lines': self.budget_lines,
+            'financial_statements': self.financial_statements,
+            'gl_audit_trail': self.gl_audit_trail,
+            'period_close_tasks': self.period_close_tasks
         }
         
         financial_file = Path(__file__).parent / 'genims_financial_data.json'
@@ -491,7 +953,16 @@ class FinancialSyncDataGenerator:
         # FILE 2: Inventory sync data (for genims_erp_wms_sync_db)
         inventory_sync_data = {
             'inventory_sync_mappings': self.sync_mappings,
-            'inventory_snapshot': self.inventory_snapshot
+            'inventory_snapshot': self.inventory_snapshot,
+            'cycle_count_integration': self.cycle_count_integration,
+            'inventory_adjustments_sync': self.inventory_adjustments_sync,
+            'inventory_allocations': self.inventory_allocations,
+            'inventory_reconciliation_headers': self.inventory_reconciliation_headers,
+            'inventory_reconciliation_lines': self.inventory_reconciliation_lines,
+            'inventory_sync_errors': self.inventory_sync_errors,
+            'inventory_sync_metrics': self.inventory_sync_metrics,
+            'inventory_sync_queue': self.inventory_sync_queue,
+            'inventory_transaction_log': self.inventory_transaction_log
         }
         
         inventory_file = Path(__file__).parent / 'genims_inventory_sync_data.json'
