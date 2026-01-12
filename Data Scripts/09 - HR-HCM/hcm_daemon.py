@@ -169,48 +169,60 @@ def initialize_id_counters():
 def load_master_data():
     global master_data
     try:
-        conn = psycopg2.connect(
+        # Connect to MASTER database for employee data
+        master_conn = psycopg2.connect(
+            host=PG_HOST, port=PG_PORT, database='genims_master_db',
+            user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE, connect_timeout=30
+        )
+        master_cursor = master_conn.cursor()
+        
+        # Load employees from MASTER database
+        master_cursor.execute("SELECT employee_id FROM employees LIMIT 200")
+        employees = [row[0] for row in master_cursor.fetchall()]
+        
+        # Load departments from MASTER database (from employees table) 
+        master_cursor.execute("SELECT DISTINCT department FROM employees WHERE department IS NOT NULL LIMIT 50")
+        departments = [row[0] for row in master_cursor.fetchall()]
+        
+        master_cursor.close()
+        master_conn.close()
+        
+        # Connect to HR database for HR-specific data
+        hr_conn = psycopg2.connect(
             host=PG_HOST, port=PG_PORT, database=PG_HR_DB,
             user=PG_USER, password=PG_PASSWORD, sslmode=PG_SSL_MODE, connect_timeout=30
         )
-        cursor = conn.cursor()
+        hr_cursor = hr_conn.cursor()
         
-        # Load employees
-        cursor.execute("SELECT employee_id FROM employees LIMIT 200")
-        employees = [row[0] for row in cursor.fetchall()]
+        # Load shifts from HR database
+        hr_cursor.execute("SELECT shift_id FROM shift_schedules LIMIT 20")
+        shifts = [row[0] for row in hr_cursor.fetchall()]
         
-        # Load departments
-        cursor.execute("SELECT department_id FROM departments LIMIT 50")
-        departments = [row[0] for row in cursor.fetchall()]
+        # Load leave types from HR database
+        hr_cursor.execute("SELECT leave_type_id FROM leave_types LIMIT 10")
+        leave_types = [row[0] for row in hr_cursor.fetchall()]
         
-        # Load shifts
-        cursor.execute("SELECT shift_id FROM shift_schedules LIMIT 20")
-        shifts = [row[0] for row in cursor.fetchall()]
-        
-        # Load leave types
-        cursor.execute("SELECT leave_type_id FROM leave_types LIMIT 10")
-        leave_types = [row[0] for row in cursor.fetchall()]
-        
-        # Load training schedules
-        cursor.execute("SELECT schedule_id FROM training_schedules LIMIT 30")
-        training_schedules = [row[0] for row in cursor.fetchall()]
+        # Load training schedules from HR database
+        hr_cursor.execute("SELECT schedule_id FROM training_schedules LIMIT 30")
+        training_schedules = [row[0] for row in hr_cursor.fetchall()]
         
         # Load existing enrollment combinations to avoid duplicates
-        cursor.execute("SELECT schedule_id, employee_id FROM training_enrollments")
-        existing_enrollments = set(cursor.fetchall())
+        hr_cursor.execute("SELECT schedule_id, employee_id FROM training_enrollments")
+        existing_enrollments = set(hr_cursor.fetchall())
         
         # Load existing attendance combinations (last 60 days only for memory efficiency)
-        cursor.execute("SELECT employee_id, attendance_date FROM attendance_records WHERE attendance_date >= CURRENT_DATE - INTERVAL '60 days'")
-        existing_attendance = set(cursor.fetchall())
+        hr_cursor.execute("SELECT employee_id, attendance_date FROM attendance_records WHERE attendance_date >= CURRENT_DATE - INTERVAL '60 days'")
+        existing_attendance = set(hr_cursor.fetchall())
         
-        cursor.close()
-        conn.close()
+        hr_cursor.close()
+        hr_conn.close()
         
-        master_data['employees'] = employees or ['EMP-000001', 'EMP-000002']
-        master_data['departments'] = departments or ['DEPT-000001']
-        master_data['shifts'] = shifts or ['SHIFT-DAY']
-        master_data['leave_types'] = leave_types or ['LVT-000001']
-        master_data['training_schedules'] = training_schedules or ['TS-000001']
+        # Use master data employees, fallback to defaults if empty
+        master_data['employees'] = employees if employees else ['EMP-000001', 'EMP-000002']
+        master_data['departments'] = departments if departments else ['DEPT-000001']
+        master_data['shifts'] = shifts if shifts else ['SHIFT-DAY']
+        master_data['leave_types'] = leave_types if leave_types else ['LVT-000001']
+        master_data['training_schedules'] = training_schedules if training_schedules else ['TS-000001']
         master_data['existing_enrollments'] = existing_enrollments
         master_data['existing_attendance'] = existing_attendance
         
