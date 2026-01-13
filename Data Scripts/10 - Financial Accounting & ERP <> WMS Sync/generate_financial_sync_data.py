@@ -10,6 +10,9 @@ from datetime import datetime, timedelta
 from typing import List, Dict
 from pathlib import Path
 import sys
+from concurrent.futures import ThreadPoolExecutor
+import threading
+from multiprocessing import cpu_count
 
 # Add scripts to path for helper access
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
@@ -20,6 +23,14 @@ try:
 except ImportError:
     HELPER_AVAILABLE = False
     print("Warning: Registry helper not available")
+
+try:
+    from time_coordinator import TimeCoordinator
+except ImportError:
+    # Create a simple fallback
+    class TimeCoordinator:
+        def get_current_time(self):
+            return datetime.now()
 
 class FinancialSyncDataGenerator:
     def __init__(self):
@@ -76,6 +87,15 @@ class FinancialSyncDataGenerator:
             'recon_line': 1, 'sync_error': 1, 'sync_metric': 1, 
             'sync_queue': 1, 'transaction': 1
         }
+        
+        # ✅ ULTRA-FAST PARALLEL PROCESSING CONFIGURATION
+        self.worker_count = min(8, cpu_count() - 2 if cpu_count() > 2 else 1)
+        self.data_lock = threading.Lock()
+        self.batch_size = 150000  # Large batch for high performance
+        self.time_coord = TimeCoordinator()
+        
+        print(f"🚀 ULTRA-FAST FINANCIAL PARALLEL MODE: {self.worker_count} workers, batch_size={self.batch_size:,}")
+        print(f"   CPU cores available: {cpu_count()}, Using {self.worker_count} for generation")
     
     def generate_id(self, prefix: str, counter_key: str) -> str:
         id_val = f"{prefix}-{str(self.counters[counter_key]).zfill(6)}"
@@ -99,17 +119,8 @@ class FinancialSyncDataGenerator:
         self.generate_gl_audit_trail()
         self.generate_period_close_tasks()
         
-        # Inventory Sync Master Data
-        self.generate_sync_mappings()
-        self.generate_inventory_snapshot()
-        self.generate_cycle_count_integration()
-        self.generate_inventory_adjustments_sync()
-        self.generate_inventory_allocations()
-        self.generate_inventory_reconciliation()
-        self.generate_sync_errors()
-        self.generate_sync_metrics()
-        self.generate_sync_queue()
-        self.generate_transaction_log()
+        # Inventory Sync Master Data - PARALLEL PROCESSING
+        self.generate_inventory_sync_parallel()
         
         self._print_summary()
     
@@ -284,30 +295,58 @@ class FinancialSyncDataGenerator:
     # ========================================================================
     
     def generate_cost_centers(self):
-        """Generate cost centers"""
-        print("Generating cost centers...")
+        """Generate cost centers for 4 factories"""
+        print("Generating cost centers for 4 factories...")
         
-        cc_configs = [
-            {'code': 'PROD-001', 'name': 'Production - Assembly', 'type': 'production'},
-            {'code': 'PROD-002', 'name': 'Production - Machining', 'type': 'production'},
-            {'code': 'WH-001', 'name': 'Warehouse Operations', 'type': 'warehouse'},
-            {'code': 'SALES-001', 'name': 'Sales & Marketing', 'type': 'sales'},
-            {'code': 'ADMIN-001', 'name': 'Administration', 'type': 'admin'},
-            {'code': 'MAINT-001', 'name': 'Maintenance', 'type': 'production'}
+        # Cost centers for each factory (4 factories)
+        factories = ['FAC01', 'FAC02', 'FAC03', 'FAC04']
+        cc_types = [
+            {'code': 'PROD-ASSY', 'name': 'Production - Assembly', 'type': 'production'},
+            {'code': 'PROD-MACH', 'name': 'Production - Machining', 'type': 'production'},
+            {'code': 'PROD-PAINT', 'name': 'Production - Painting', 'type': 'production'},
+            {'code': 'PROD-QC', 'name': 'Quality Control', 'type': 'production'},
+            {'code': 'WH-RECV', 'name': 'Warehouse - Receiving', 'type': 'warehouse'},
+            {'code': 'WH-SHIP', 'name': 'Warehouse - Shipping', 'type': 'warehouse'},
+            {'code': 'MAINT', 'name': 'Maintenance', 'type': 'production'},
+            {'code': 'ENG', 'name': 'Engineering', 'type': 'engineering'},
+            {'code': 'ADMIN', 'name': 'Administration', 'type': 'admin'}
         ]
         
-        for config in cc_configs:
+        # Generate cost centers for each factory
+        for factory in factories:
+            for cc_type in cc_types:
+                cc = {
+                    'cost_center_id': self.generate_id('CC', 'cc'),
+                    'cost_center_code': f"{factory}-{cc_type['code']}",
+                    'cost_center_name': f"{factory} - {cc_type['name']}",
+                    'cost_center_type': cc_type['type'],
+                    'factory_code': factory,
+                    'is_active': True,
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                self.cost_centers.append(cc)
+        
+        # Add corporate cost centers
+        corporate_centers = [
+            {'code': 'CORP-SALES', 'name': 'Corporate Sales & Marketing', 'type': 'sales'},
+            {'code': 'CORP-FIN', 'name': 'Corporate Finance', 'type': 'finance'},
+            {'code': 'CORP-HR', 'name': 'Corporate HR', 'type': 'admin'},
+            {'code': 'CORP-IT', 'name': 'Corporate IT', 'type': 'admin'}
+        ]
+        
+        for cc_type in corporate_centers:
             cc = {
                 'cost_center_id': self.generate_id('CC', 'cc'),
-                'cost_center_code': config['code'],
-                'cost_center_name': config['name'],
-                'cost_center_type': config['type'],
+                'cost_center_code': cc_type['code'],
+                'cost_center_name': cc_type['name'],
+                'cost_center_type': cc_type['type'],
+                'factory_code': 'CORP',
                 'is_active': True,
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             self.cost_centers.append(cc)
         
-        print(f"Generated {len(self.cost_centers)} cost centers")
+        print(f"Generated {len(self.cost_centers)} cost centers across 4 factories")
     
     # ========================================================================
     # FISCAL CALENDAR
@@ -495,9 +534,9 @@ class FinancialSyncDataGenerator:
         print(f"Generated {len(self.financial_statements)} financial statements")
     
     def _generate_statement_data(self, stmt_type):
-        """Generate sample statement data based on type"""
+        """Generate sample statement data based on type (returns JSON string)"""
         if stmt_type == 'profit_loss':
-            return {
+            data = {
                 'revenue': round(random.uniform(5000000, 10000000), 2),
                 'cost_of_goods_sold': round(random.uniform(2000000, 4000000), 2),
                 'gross_profit': round(random.uniform(2000000, 6000000), 2),
@@ -505,7 +544,7 @@ class FinancialSyncDataGenerator:
                 'net_income': round(random.uniform(500000, 2500000), 2)
             }
         elif stmt_type == 'balance_sheet':
-            return {
+            data = {
                 'total_assets': round(random.uniform(10000000, 50000000), 2),
                 'current_assets': round(random.uniform(3000000, 15000000), 2),
                 'fixed_assets': round(random.uniform(7000000, 35000000), 2),
@@ -514,7 +553,7 @@ class FinancialSyncDataGenerator:
                 'equity': round(random.uniform(5000000, 25000000), 2)
             }
         else:  # cash_flow
-            return {
+            data = {
                 'operating_cash_flow': round(random.uniform(1000000, 5000000), 2),
                 'investing_cash_flow': round(random.uniform(-2000000, -500000), 2),
                 'financing_cash_flow': round(random.uniform(-1000000, 1000000), 2),
@@ -522,6 +561,8 @@ class FinancialSyncDataGenerator:
                 'beginning_cash': round(random.uniform(500000, 2000000), 2),
                 'ending_cash': round(random.uniform(1000000, 5000000), 2)
             }
+        # Convert Python dict to proper JSON string with double quotes
+        return json.dumps(data)
     
     def generate_gl_audit_trail(self):
         """Generate GL audit trail records"""
@@ -556,13 +597,15 @@ class FinancialSyncDataGenerator:
         print(f"Generated {len(self.gl_audit_trail)} audit trail entries")
     
     def _generate_audit_values(self):
-        """Generate sample audit trail values"""
-        return {
+        """Generate sample audit trail values (returns JSON string)"""
+        data = {
             'amount': round(random.uniform(1000, 100000), 2),
             'account_code': f"{random.randint(1000, 9999)}",
             'description': f"GL Entry {random.randint(1000, 9999)}",
             'status': random.choice(['draft', 'posted', 'reversed'])
         }
+        # Convert Python dict to proper JSON string with double quotes
+        return json.dumps(data)
     
     def generate_period_close_tasks(self):
         """Generate period close task templates"""
@@ -673,7 +716,7 @@ class FinancialSyncDataGenerator:
         for i in range(15):  # Generate 15 cycle count integrations
             integration = {
                 'integration_id': self.generate_id('CYCLE', 'cycle'),
-                'cycle_count_id': f"CC-{random.randint(100000, 999999)}",
+                'wms_cycle_count_id': f"CC-{random.randint(100000, 999999)}",
                 'wms_warehouse_id': f"WMS-{random.randint(1, 3):03d}",
                 'erp_location_id': f"FAC-{random.randint(1, 4):06d}",
                 'integration_status': random.choice(['completed', 'pending', 'failed']),
@@ -694,15 +737,14 @@ class FinancialSyncDataGenerator:
         
         for i in range(30):  # Generate 30 adjustment sync records
             adjustment = {
-                'adjustment_sync_id': self.generate_id('ADJ', 'adjustment'),
-                'erp_adjustment_id': f"ADJ-{random.randint(100000, 999999)}",
-                'wms_adjustment_id': f"WMSADJ-{random.randint(100000, 999999)}",
-                'material_id': f"MAT-{random.randint(1, 200):06d}",
+                'sync_id': self.generate_id('ADJ', 'adjustment'),
+                'source_system': random.choice(['ERP', 'WMS']),
+                'adjustment_document_id': f"ADJDOC-{random.randint(100000, 999999)}",
+                'material_id': f"MATERIAL-{random.randint(1, 200):06d}",
                 'location_id': f"FAC-{random.randint(1, 4):06d}",
-                'adjustment_type': random.choice(['damage', 'loss', 'found', 'correction']),
-                'adjustment_date': (datetime.now() - timedelta(days=random.randint(0, 30))).strftime('%Y-%m-%d'),  # Required field
-                'quantity_adjusted': random.randint(-100, 100),
-                'adjustment_quantity': abs(random.randint(1, 100)),  # Required field - absolute quantity of adjustment
+                'adjustment_type': random.choice(['cycle_count', 'physical_count', 'damage', 'obsolescence']),
+                'adjustment_date': (datetime.now() - timedelta(days=random.randint(0, 30))).strftime('%Y-%m-%d'),
+                'adjustment_quantity': round(random.uniform(-100, 100), 2),
                 'unit_cost': round(random.uniform(10, 1000), 2),
                 'total_value': 0,  # Will be calculated
                 'source_system': random.choice(['ERP', 'WMS']),  # Required field
@@ -721,19 +763,16 @@ class FinancialSyncDataGenerator:
         print("Generating inventory allocations...")
         
         for i in range(40):  # Generate 40 allocation records
+            source_types = ['sales_order', 'production_order', 'transfer_order']
             allocation = {
                 'allocation_id': self.generate_id('ALLOC', 'allocation'),
-                'material_id': f"MAT-{random.randint(1, 200):06d}",
-                'source_location': f"FAC-{random.randint(1, 4):06d}",
-                'target_location': f"FAC-{random.randint(1, 4):06d}",
-                'allocation_type': random.choice(['sales_order', 'work_order', 'transfer', 'reserve']),
-                'source_type': random.choice(['ERP', 'WMS', 'MES']),  # Required field
-                'allocated_quantity': random.randint(10, 500),
+                'source_type': random.choice(source_types),
+                'source_document_id': f"DOC-{random.randint(100000, 999999)}",
+                'material_id': f"MATERIAL-{random.randint(1, 200):06d}",
+                'location_id': f"FAC-{random.randint(1, 4):06d}",
+                'allocated_quantity': round(random.uniform(10, 500), 2),
+                'allocation_status': random.choice(['allocated', 'picked', 'shipped', 'cancelled']),
                 'allocation_date': datetime.now().strftime('%Y-%m-%d'),
-                'expiry_date': (datetime.now() + timedelta(days=random.randint(7, 90))).strftime('%Y-%m-%d'),
-                'allocation_status': random.choice(['active', 'consumed', 'expired', 'cancelled']),
-                'reference_document': f"SO-{random.randint(100000, 999999)}",
-                'allocated_by': f"USR-{random.randint(1, 10):03d}",
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             self.inventory_allocations.append(allocation)
@@ -764,8 +803,9 @@ class FinancialSyncDataGenerator:
             # Generate reconciliation lines for each header
             for j in range(random.randint(5, 25)):
                 line = {
-                    'reconciliation_line_id': self.generate_id('RECONLINE', 'recon_line'),
+                    'line_id': self.generate_id('RECONLINE', 'recon_line'),
                     'reconciliation_id': header['reconciliation_id'],
+                    'location_id': header['location_id'],
                     'material_id': f"MAT-{random.randint(1, 200):06d}",
                     'system_quantity': random.randint(0, 1000),
                     'physical_quantity': random.randint(0, 1000),
@@ -792,16 +832,19 @@ class FinancialSyncDataGenerator:
         error_types = ['connection_timeout', 'data_validation', 'duplicate_key', 'foreign_key', 'network_error']
         
         for i in range(12):  # Generate 12 error records
+            error_details_data = {
+                'operation': random.choice(['inventory_update', 'order_sync', 'allocation_sync', 'adjustment_sync']),
+                'timestamp': datetime.now().isoformat(),
+                'affected_records': random.randint(1, 50)
+            }
             error = {
                 'error_id': self.generate_id('ERR', 'sync_error'),
-                'sync_operation': random.choice(['inventory_update', 'order_sync', 'allocation_sync', 'adjustment_sync']),
                 'error_type': random.choice(error_types),
                 'error_message': f"Sync failed: {random.choice(['Connection timeout', 'Invalid data format', 'Record not found', 'Database constraint violation'])}",
-                'error_timestamp': (datetime.now() - timedelta(hours=random.randint(1, 72))).strftime('%Y-%m-%d %H:%M:%S'),
+                'error_details': json.dumps(error_details_data),
                 'retry_count': random.randint(0, 3),
-                'resolution_status': random.choice(['resolved', 'pending', 'escalated']),
-                'resolution_timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S') if random.choice([True, False]) else None,
-                'affected_records': random.randint(1, 50),
+                'error_status': random.choice(['open', 'investigating', 'resolved', 'ignored']),
+                'resolved_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S') if random.choice([True, False]) else None,
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             self.inventory_sync_errors.append(error)
@@ -842,22 +885,13 @@ class FinancialSyncDataGenerator:
         for i in range(25):  # Generate 25 queue items
             queue_item = {
                 'queue_id': self.generate_id('QUEUE', 'sync_queue'),
-                'operation_type': random.choice(operations),
-                'transaction_type': random.choice(['allocation', 'reservation', 'movement', 'adjustment', 'cycle_count']),  # Required field
-                'sync_direction': random.choice(['ERP_TO_WMS', 'WMS_TO_ERP']),  # Required field
-                'quantity': round(random.uniform(1, 500), 2),  # Required field
-                'payload_data': {
-                    'material_id': f"MAT-{random.randint(1, 200):06d}",
-                    'quantity': random.randint(1, 500),
-                    'location': f"FAC-{random.randint(1, 4):06d}",
-                    'timestamp': datetime.now().isoformat()
-                },
-                'queue_timestamp': (datetime.now() + timedelta(minutes=random.randint(-30, 30))).strftime('%Y-%m-%d %H:%M:%S'),
-                'processing_status': random.choice(['pending', 'processing', 'completed', 'failed']),
+                'sync_direction': random.choice(['ERP_TO_WMS', 'WMS_TO_ERP']),
+                'transaction_type': random.choice(['allocation', 'reservation', 'movement', 'adjustment', 'cycle_count']),
+                'transaction_id': f"TXN-{random.randint(100000, 999999)}",
+                'material_id': f"MATERIAL-{random.randint(1, 200):06d}",
+                'quantity': round(random.uniform(1, 500), 2),
+                'sync_status': random.choice(['pending', 'in_progress', 'completed', 'error']),
                 'retry_count': random.randint(0, 2),
-                'max_retries': 3,
-                'priority': random.choice(['high', 'normal', 'low']),
-                'processed_timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S') if random.choice([True, False]) else None,
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             self.inventory_sync_queue.append(queue_item)
@@ -872,20 +906,13 @@ class FinancialSyncDataGenerator:
         
         for i in range(100):  # Generate 100 transaction log entries
             transaction = {
-                'transaction_id': self.generate_id('TXN', 'transaction'),
-                'material_id': f"MAT-{random.randint(1, 200):06d}",
+                'log_id': self.generate_id('LOG', 'transaction'),
+                'transaction_id': f"TXN-{random.randint(100000, 999999)}",
+                'material_id': f"MATERIAL-{random.randint(1, 200):06d}",
+                'location_id': f"FAC-{random.randint(1, 4):06d}",
                 'transaction_type': random.choice(transaction_types),
-                'transaction_date': (datetime.now() - timedelta(days=random.randint(0, 30))).strftime('%Y-%m-%d'),
-                'reference_document': f"DOC-{random.randint(100000, 999999)}",
-                'source_system': random.choice(['ERP', 'WMS', 'MES']),  # Required field
-                'quantity_change': round(random.uniform(-500, 500), 2),  # Required field
-                'source_location': f"FAC-{random.randint(1, 4):06d}" if random.choice([True, False]) else None,
-                'target_location': f"FAC-{random.randint(1, 4):06d}",
-                'quantity': round(random.uniform(1, 500), 2),
-                'unit_cost': round(random.uniform(10, 1000), 2),
-                'total_value': 0,  # Will be calculated
-                'user_id': f"USR-{random.randint(1, 10):03d}",
-                'batch_id': f"BATCH-{random.randint(1000, 9999)}" if random.choice([True, False]) else None,
+                'source_system': random.choice(['ERP', 'WMS', 'MES']),
+                'quantity_change': round(random.uniform(-500, 500), 2),
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             # Calculate total value
@@ -893,6 +920,323 @@ class FinancialSyncDataGenerator:
             self.inventory_transaction_log.append(transaction)
         
         print(f"Generated {len(self.inventory_transaction_log)} transaction log entries")
+    
+    def generate_inventory_sync_parallel(self):
+        """Generate all inventory sync operations with ULTRA-FAST parallel processing"""
+        print(f"\nGenerating inventory sync operations with PARALLEL processing...")
+        start_time = datetime.now()
+        
+        # Generate master sync data first (sequential)
+        self.generate_sync_mappings()
+        self.generate_inventory_snapshot()
+        
+        # Generate time-based sync operations in parallel
+        days_to_process = 30  # Last 30 days of sync operations
+        chunk_size = max(1, days_to_process // self.worker_count)
+        chunks = []
+        
+        for i in range(0, days_to_process, chunk_size):
+            end_day = min(i + chunk_size, days_to_process)
+            chunks.append((i, end_day))
+        
+        print(f"  🚀 Processing {len(chunks)} day chunks with {self.worker_count} workers...")
+        
+        # Thread-safe data collectors
+        all_cycle_counts = []
+        all_adjustments = []
+        all_allocations = []
+        all_recon_headers = []
+        all_recon_lines = []
+        all_sync_errors = []
+        all_sync_metrics = []
+        all_sync_queue = []
+        all_transaction_logs = []
+        
+        def process_sync_chunk(chunk_info):
+            """Process a chunk of days for sync operations"""
+            start_day, end_day = chunk_info
+            chunk_cycle_counts = []
+            chunk_adjustments = []
+            chunk_allocations = []
+            chunk_recon_headers = []
+            chunk_recon_lines = []
+            chunk_sync_errors = []
+            chunk_sync_metrics = []
+            chunk_sync_queue = []
+            chunk_transaction_logs = []
+            
+            # Local counters to avoid ID collision
+            local_cycle_counter = start_day * 10 + 1000
+            local_adj_counter = start_day * 15 + 2000
+            local_alloc_counter = start_day * 8 + 500
+            local_recon_header_counter = start_day * 5 + 100
+            local_recon_line_counter = start_day * 20 + 3000
+            local_error_counter = start_day * 12 + 1500
+            local_metric_counter = start_day * 6 + 200
+            local_queue_counter = start_day * 25 + 4000
+            local_txn_counter = start_day * 30 + 5000
+            
+            for day_offset in range(start_day, end_day):
+                current_date = datetime.now() - timedelta(days=day_offset)
+                
+                day_data = self._generate_sync_day_data_local(
+                    current_date, local_cycle_counter, local_adj_counter,
+                    local_alloc_counter, local_recon_header_counter, local_recon_line_counter,
+                    local_error_counter, local_metric_counter, local_queue_counter,
+                    local_txn_counter
+                )
+                
+                chunk_cycle_counts.extend(day_data['cycle_counts'])
+                chunk_adjustments.extend(day_data['adjustments'])
+                chunk_allocations.extend(day_data['allocations'])
+                chunk_recon_headers.extend(day_data['recon_headers'])
+                chunk_recon_lines.extend(day_data['recon_lines'])
+                chunk_sync_errors.extend(day_data['sync_errors'])
+                chunk_sync_metrics.extend(day_data['sync_metrics'])
+                chunk_sync_queue.extend(day_data['sync_queue'])
+                chunk_transaction_logs.extend(day_data['transaction_logs'])
+                
+                # Update counters
+                local_cycle_counter += len(day_data['cycle_counts'])
+                local_adj_counter += len(day_data['adjustments'])
+                local_alloc_counter += len(day_data['allocations'])
+                local_recon_header_counter += len(day_data['recon_headers'])
+                local_recon_line_counter += len(day_data['recon_lines'])
+                local_error_counter += len(day_data['sync_errors'])
+                local_metric_counter += len(day_data['sync_metrics'])
+                local_queue_counter += len(day_data['sync_queue'])
+                local_txn_counter += len(day_data['transaction_logs'])
+            
+            # Thread-safe data collection
+            with self.data_lock:
+                all_cycle_counts.extend(chunk_cycle_counts)
+                all_adjustments.extend(chunk_adjustments)
+                all_allocations.extend(chunk_allocations)
+                all_recon_headers.extend(chunk_recon_headers)
+                all_recon_lines.extend(chunk_recon_lines)
+                all_sync_errors.extend(chunk_sync_errors)
+                all_sync_metrics.extend(chunk_sync_metrics)
+                all_sync_queue.extend(chunk_sync_queue)
+                all_transaction_logs.extend(chunk_transaction_logs)
+            
+            print(f"    ✓ Sync chunk {start_day+1}-{end_day}/{days_to_process} completed ({len(chunk_transaction_logs)} transactions)")
+            return len(chunk_transaction_logs)
+        
+        # Execute parallel processing
+        with ThreadPoolExecutor(max_workers=self.worker_count) as executor:
+            futures = [executor.submit(process_sync_chunk, chunk) for chunk in chunks]
+            total_records = sum(future.result() for future in futures)
+        
+        # Assign to class attributes
+        self.cycle_count_integration = all_cycle_counts
+        self.inventory_adjustments_sync = all_adjustments
+        self.inventory_allocations = all_allocations
+        self.inventory_reconciliation_headers = all_recon_headers
+        self.inventory_reconciliation_lines = all_recon_lines
+        self.inventory_sync_errors = all_sync_errors
+        self.inventory_sync_metrics = all_sync_metrics
+        self.inventory_sync_queue = all_sync_queue
+        self.inventory_transaction_log = all_transaction_logs
+        
+        elapsed = (datetime.now() - start_time).total_seconds()
+        print(f"✓ Generated {len(all_transaction_logs)} transaction logs, {len(all_cycle_counts)} cycle counts, "
+              f"{len(all_adjustments)} adjustments via PARALLEL processing in {elapsed:.2f}s")
+    
+    def _generate_sync_day_data_local(self, current_date: datetime, cycle_counter: int,
+                                     adj_counter: int, alloc_counter: int, recon_header_counter: int,
+                                     recon_line_counter: int, error_counter: int, metric_counter: int,
+                                     queue_counter: int, txn_counter: int) -> Dict:
+        """Generate all sync data for a single day (local/chunk version)"""
+        day_cycle_counts = []
+        day_adjustments = []
+        day_allocations = []
+        day_recon_headers = []
+        day_recon_lines = []
+        day_sync_errors = []
+        day_sync_metrics = []
+        day_sync_queue = []
+        day_transaction_logs = []
+        
+        # Generate cycle count integrations (1-3 per day)
+        cycle_count_num = random.randint(1, 3)
+        for i in range(cycle_count_num):
+            integration = {
+                'integration_id': f"CYCLE-{str(cycle_counter + i).zfill(6)}",
+                'wms_cycle_count_id': f"CC-{random.randint(100000, 999999)}",
+                'wms_warehouse_id': f"WMS-{random.randint(1, 3):03d}",
+                'erp_location_id': f"FAC-{random.randint(1, 4):06d}",
+                'integration_status': random.choice(['completed', 'pending', 'failed']),
+                'items_counted': random.randint(50, 500),
+                'discrepancies_found': random.randint(0, 25),
+                'value_adjustment': round(random.uniform(-5000, 5000), 2),
+                'integration_timestamp': current_date.strftime('%Y-%m-%d %H:%M:%S'),
+                'error_message': None if random.choice([True, True, False]) else "Minor discrepancy in count",
+                'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            day_cycle_counts.append(integration)
+        
+        # Generate inventory adjustments (2-5 per day)
+        adj_num = random.randint(2, 5)
+        for i in range(adj_num):
+            adjustment = {
+                'sync_id': f"ADJ-{str(adj_counter + i).zfill(6)}",
+                'source_system': random.choice(['ERP', 'WMS']),
+                'adjustment_document_id': f"ADJDOC-{random.randint(100000, 999999)}",
+                'material_id': f"MATERIAL-{random.randint(1, 200):06d}",
+                'location_id': f"FAC-{random.randint(1, 4):06d}",
+                'adjustment_type': random.choice(['cycle_count', 'physical_count', 'damage', 'obsolescence']),
+                'adjustment_date': current_date.strftime('%Y-%m-%d'),
+                'adjustment_quantity': round(random.uniform(-100, 100), 2),
+                'sync_status': random.choice(['pending', 'completed', 'error']),
+                'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            day_adjustments.append(adjustment)
+        
+        # Generate inventory allocations (3-8 per day)
+        alloc_num = random.randint(3, 8)
+        for i in range(alloc_num):
+            source_types = ['sales_order', 'production_order', 'transfer_order']
+            allocation = {
+                'allocation_id': f"ALLOC-{str(alloc_counter + i).zfill(6)}",
+                'source_type': random.choice(source_types),
+                'source_document_id': f"DOC-{random.randint(100000, 999999)}",
+                'material_id': f"MATERIAL-{random.randint(1, 200):06d}",
+                'location_id': f"FAC-{random.randint(1, 4):06d}",
+                'allocated_quantity': round(random.uniform(10, 1000), 2),
+                'allocation_status': random.choice(['allocated', 'picked', 'shipped', 'cancelled']),
+                'allocation_date': current_date.strftime('%Y-%m-%d'),
+                'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            day_allocations.append(allocation)
+        
+        # Generate sync errors (0-5 per day)
+        error_num = random.randint(0, 5)
+        for i in range(error_num):
+            error_details_data = {
+                'error_context': 'Sync operation',
+                'affected_record': f"REC-{random.randint(100000, 999999)}",
+                'timestamp': current_date.isoformat()
+            }
+            error = {
+                'error_id': f"ERR-{str(error_counter + i).zfill(6)}",
+                'error_type': random.choice(['data_mismatch', 'connection_timeout', 'validation_error', 'mapping_error']),
+                'source_system': random.choice(['ERP', 'WMS']),
+                'target_system': random.choice(['ERP', 'WMS']),
+                'error_message': f"Sync error occurred at {current_date}",
+                'error_details': json.dumps(error_details_data),
+                'record_id': f"REC-{random.randint(100000, 999999)}",
+                'retry_count': random.randint(0, 3),
+                'error_status': random.choice(['resolved', 'pending', 'failed']),
+                'occurred_at': current_date.strftime('%Y-%m-%d %H:%M:%S'),
+                'resolved_at': (current_date + timedelta(hours=random.randint(1, 24))).strftime('%Y-%m-%d %H:%M:%S') if random.random() > 0.3 else None,
+                'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            day_sync_errors.append(error)
+        
+        # Generate sync metrics (1 per day)
+        metric = {
+            'metric_id': f"METRIC-{str(metric_counter).zfill(6)}",
+            'metric_date': current_date.strftime('%Y-%m-%d'),
+            'sync_type': random.choice(['inventory', 'transaction', 'master_data']),
+            'records_processed': random.randint(100, 10000),
+            'records_successful': random.randint(95, 99),
+            'records_failed': random.randint(1, 5),
+            'processing_time_seconds': random.randint(30, 3600),
+            'throughput_per_second': round(random.uniform(10, 100), 2),
+            'error_rate_percent': round(random.uniform(0.1, 5.0), 2),
+            'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        day_sync_metrics.append(metric)
+        
+        # Generate sync queue items (5-25 per day)
+        queue_num = random.randint(5, 25)
+        for i in range(queue_num):
+            queue_item = {
+                'queue_id': f"QUEUE-{str(queue_counter + i).zfill(6)}",
+                'sync_direction': random.choice(['ERP_TO_WMS', 'WMS_TO_ERP']),
+                'transaction_type': random.choice(['allocation', 'reservation', 'movement', 'adjustment', 'cycle_count']),
+                'transaction_id': f"TXN-{random.randint(100000, 999999)}",
+                'material_id': f"MATERIAL-{random.randint(1, 200):06d}",
+                'quantity': round(random.uniform(1, 500), 2),
+                'sync_status': random.choice(['pending', 'in_progress', 'completed', 'error']),
+                'retry_count': random.randint(0, 2),
+                'priority': random.choice(['high', 'medium', 'low']),
+                'payload_data': '{"material_id": "MATERIAL-123", "quantity": 100}',
+                'retry_count': random.randint(0, 2),
+                'queued_at': current_date.strftime('%Y-%m-%d %H:%M:%S'),
+                'processed_at': (current_date + timedelta(minutes=random.randint(1, 60))).strftime('%Y-%m-%d %H:%M:%S') if random.random() > 0.2 else None,
+                'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            day_sync_queue.append(queue_item)
+        
+        # Generate transaction logs (10-30 per day)
+        txn_num = random.randint(10, 30)
+        transaction_types = ['receipt', 'issue', 'transfer', 'adjustment', 'allocation', 'consumption']
+        for i in range(txn_num):
+            transaction = {
+                'log_id': f"LOG-{str(txn_counter + i).zfill(6)}",
+                'transaction_id': f"TXN-{str(txn_counter + i).zfill(6)}",
+                'material_id': f"MAT-{random.randint(1, 200):06d}",
+                'location_id': f"FAC-{random.randint(1, 4):06d}",
+                'transaction_type': random.choice(transaction_types),
+                'transaction_date': current_date.strftime('%Y-%m-%d'),
+                'reference_document': f"DOC-{random.randint(100000, 999999)}",
+                'source_system': random.choice(['ERP', 'WMS', 'MES']),
+                'quantity_change': round(random.uniform(-500, 500), 2),
+                'source_location': f"FAC-{random.randint(1, 4):06d}" if random.choice([True, False]) else None,
+                'target_location': f"FAC-{random.randint(1, 4):06d}",
+                'quantity': round(random.uniform(1, 500), 2),
+                'unit_cost': round(random.uniform(10, 1000), 2),
+                'total_value': 0,  # Will be calculated
+                'user_id': f"USR-{random.randint(1, 10):03d}",
+                'batch_id': f"BATCH-{random.randint(1000, 9999)}" if random.choice([True, False]) else None,
+                'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            transaction['total_value'] = round(transaction['quantity'] * transaction['unit_cost'], 2)
+            day_transaction_logs.append(transaction)
+        
+        # Generate inventory reconciliation headers (1-2 per day)
+        recon_header_num = random.randint(1, 2)
+        for i in range(recon_header_num):
+            header = {
+                'reconciliation_id': f"RECON-{str(recon_header_counter + i).zfill(6)}",
+                'reconciliation_number': f"RECON-{current_date.strftime('%Y%m')}-{str(recon_header_counter + i).zfill(3)}",
+                'reconciliation_date': current_date.strftime('%Y-%m-%d'),
+                'location_id': f"FAC-{random.randint(1, 4):06d}",
+                'reconciliation_status': random.choice(['in_progress', 'completed', 'approved']),
+                'total_variance_value': round(random.uniform(-10000, 10000), 2),
+                'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            day_recon_headers.append(header)
+            
+            # Generate reconciliation lines for each header (5-15 lines per header)
+            line_num = random.randint(5, 15)
+            for j in range(line_num):
+                # Use current length of accumulated lines to ensure unique IDs
+                line_id_num = recon_line_counter + len(day_recon_lines)
+                line = {
+                    'line_id': f"RECONLN-{str(line_id_num).zfill(6)}",
+                    'reconciliation_id': header['reconciliation_id'],
+                    'location_id': header['location_id'],
+                    'material_id': f"MATERIAL-{random.randint(1, 200):06d}",
+                    'variance_quantity': round(random.uniform(-500, 500), 2),
+                    'variance_value': round(random.uniform(-50000, 50000), 2),
+                    'variance_reason': random.choice(['Count discrepancy', 'System error', 'Damage', 'Theft']) if random.random() > 0.6 else None,
+                    'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                day_recon_lines.append(line)
+        
+        return {
+            'cycle_counts': day_cycle_counts,
+            'adjustments': day_adjustments,
+            'allocations': day_allocations,
+            'recon_headers': day_recon_headers,
+            'recon_lines': day_recon_lines,
+            'sync_errors': day_sync_errors,
+            'sync_metrics': day_sync_metrics,
+            'sync_queue': day_sync_queue,
+            'transaction_logs': day_transaction_logs
+        }
     
     def _print_summary(self):
         print(f"\n{'='*80}")

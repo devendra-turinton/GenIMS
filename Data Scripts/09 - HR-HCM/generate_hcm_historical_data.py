@@ -10,16 +10,20 @@ from datetime import datetime, timedelta
 from typing import List, Dict
 import sys
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+import threading
+from multiprocessing import cpu_count
 
 # Add scripts to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 from generator_helper import get_helper  # type: ignore
+from time_coordinator import TimeCoordinator
 
 # Configuration
 DAYS_OF_HISTORY = 180
-EMPLOYEES_PER_FACTORY = 50
-TRAINING_COURSES_COUNT = 30
-DEPARTMENTS_PER_FACTORY = 8
+EMPLOYEES_PER_FACTORY = 200   # Increased from 50 to 200 per factory (4x)
+TRAINING_COURSES_COUNT = 120  # Increased from 30 to 120 (4x training catalog)
+DEPARTMENTS_PER_FACTORY = 16  # Increased from 8 to 16 (2x departments)
 
 class HCMDataGenerator:
     def __init__(self, master_data_file=None):
@@ -75,8 +79,18 @@ class HCMDataGenerator:
             'emp_shift': 1, 'attend': 1, 'leave_type': 1,
             'balance': 1, 'leave_req': 1, 'checklist': 1,
             'onboard': 1, 'incident': 1, 'path': 1, 'plan': 1,
-            'kpi': 1, 'item': 1, 'offboard': 1, 'tech': 1
+            'kpi': 1, 'item': 1, 'offboard': 1, 'tech': 1, 'candidate': 1,
+            'rsr': 1, 'onboarding': 1
         }
+        
+        # ✅ ULTRA-FAST PARALLEL PROCESSING CONFIGURATION
+        self.worker_count = min(8, cpu_count() - 2 if cpu_count() > 2 else 1)
+        self.data_lock = threading.Lock()
+        self.batch_size = 150000  # Large batch for high performance
+        self.time_coord = TimeCoordinator()
+        
+        print(f"🚀 ULTRA-FAST HCM PARALLEL MODE: {self.worker_count} workers, batch_size={self.batch_size:,}")
+        print(f"   CPU cores available: {cpu_count()}, Using {self.worker_count} for generation")
         
         print(f"Loaded: {len(self.factories)} factories")
     
@@ -112,12 +126,9 @@ class HCMDataGenerator:
         self.assign_employee_shifts()
         self.generate_employee_onboarding()  # Generate and store onboarding records
         
-        # Historical Operations (180 days)
+        # Historical Operations (180 days) - PARALLEL PROCESSING
         start_date = datetime.now() - timedelta(days=DAYS_OF_HISTORY)
-        self.generate_attendance_records(start_date, DAYS_OF_HISTORY)
-        self.generate_leave_requests(start_date, DAYS_OF_HISTORY)
-        self.generate_performance_reviews()
-        self.generate_safety_incidents(start_date, DAYS_OF_HISTORY)
+        self.generate_hr_operations_parallel(start_date, DAYS_OF_HISTORY)
         
         self._print_summary()
     
@@ -825,6 +836,181 @@ class HCMDataGenerator:
         
         print(f"Generated {len(self.safety_incidents)} safety incidents")
     
+    def generate_hr_operations_parallel(self, start_date: datetime, days: int):
+        """Generate all HR operations with ULTRA-FAST parallel processing"""
+        print(f"\nGenerating {days} days of HR operations with PARALLEL processing...")
+        start_time = datetime.now()
+        
+        # Calculate days per chunk for parallel processing
+        chunk_size = max(1, days // self.worker_count)
+        chunks = []
+        
+        for i in range(0, days, chunk_size):
+            end_day = min(i + chunk_size, days)
+            chunks.append((i, end_day))
+        
+        print(f"  🚀 Processing {len(chunks)} day chunks with {self.worker_count} workers...")
+        
+        # Thread-safe data collectors
+        all_attendance = []
+        all_leave_requests = []
+        all_safety_incidents = []
+        
+        def process_hr_chunk(chunk_info):
+            """Process a chunk of days for HR operations"""
+            start_day, end_day = chunk_info
+            chunk_attendance = []
+            chunk_leave_requests = []
+            chunk_safety_incidents = []
+            
+            # Local counters to avoid ID collision
+            local_attend_counter = start_day * 1000 + 10000
+            local_leave_counter = start_day * 20 + 1000
+            local_incident_counter = start_day * 5 + 100
+            
+            for day_offset in range(start_day, end_day):
+                current_date = start_date + timedelta(days=day_offset)
+                
+                # Skip weekends for attendance
+                if current_date.weekday() < 5:  # Monday-Friday
+                    day_data = self._generate_hr_day_data_local(
+                        current_date, local_attend_counter, local_leave_counter,
+                        local_incident_counter
+                    )
+                    
+                    chunk_attendance.extend(day_data['attendance'])
+                    chunk_leave_requests.extend(day_data['leave_requests'])
+                    chunk_safety_incidents.extend(day_data['safety_incidents'])
+                    
+                    # Update counters
+                    local_attend_counter += len(day_data['attendance'])
+                    local_leave_counter += len(day_data['leave_requests'])
+                    local_incident_counter += len(day_data['safety_incidents'])
+            
+            # Thread-safe data collection
+            with self.data_lock:
+                all_attendance.extend(chunk_attendance)
+                all_leave_requests.extend(chunk_leave_requests)
+                all_safety_incidents.extend(chunk_safety_incidents)
+            
+            print(f"    ✓ HR chunk {start_day+1}-{end_day}/{days} completed ({len(chunk_attendance)} attendance)")
+            return len(chunk_attendance)
+        
+        # Execute parallel processing
+        with ThreadPoolExecutor(max_workers=self.worker_count) as executor:
+            futures = [executor.submit(process_hr_chunk, chunk) for chunk in chunks]
+            total_records = sum(future.result() for future in futures)
+        
+        # Assign to class attributes
+        self.attendance_records = all_attendance
+        self.leave_requests.extend(all_leave_requests)
+        self.safety_incidents.extend(all_safety_incidents)
+        
+        # Generate performance reviews (non-time based)
+        self.generate_performance_reviews()
+        
+        elapsed = (datetime.now() - start_time).total_seconds()
+        print(f"✓ Generated {len(self.attendance_records)} attendance records, {len(all_leave_requests)} leave requests, "
+              f"{len(all_safety_incidents)} safety incidents via PARALLEL processing in {elapsed:.2f}s")
+    
+    def _generate_hr_day_data_local(self, current_date: datetime, attend_counter: int,
+                                   leave_counter: int, incident_counter: int) -> Dict:
+        """Generate all HR data for a single day (local/chunk version)"""
+        day_attendance = []
+        day_leave_requests = []
+        day_safety_incidents = []
+        
+        local_attend_counter = attend_counter
+        local_leave_counter = leave_counter
+        local_incident_counter = incident_counter
+        
+        # Generate attendance for all employees (95% attendance rate)
+        for emp in self.employees:
+            if random.random() < 0.95:
+                attendance = {
+                    'attendance_id': f"ATT-{str(local_attend_counter).zfill(6)}",
+                    'employee_id': emp['employee_id'],
+                    'attendance_date': current_date.strftime('%Y-%m-%d'),
+                    'clock_in_time': current_date.strftime(f'%Y-%m-%d {random.randint(7,9):02d}:{random.randint(0,59):02d}:00'),
+                    'clock_out_time': current_date.strftime(f'%Y-%m-%d {random.randint(16,18):02d}:{random.randint(0,59):02d}:00'),
+                    'scheduled_hours': 8,
+                    'actual_hours': round(random.uniform(7.5, 9), 2),
+                    'regular_hours': 8,
+                    'overtime_hours': round(random.uniform(0, 2), 2) if random.random() > 0.7 else 0,
+                    'attendance_status': 'present',
+                    'late_minutes': random.randint(0, 30) if random.random() > 0.8 else 0,
+                    'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                day_attendance.append(attendance)
+                local_attend_counter += 1
+        
+        # Generate leave requests (5% chance per employee per day)
+        for emp in self.employees:
+            if random.random() < 0.05:  # 5% chance per employee per day
+                if self.leave_types:
+                    leave_type = random.choice(self.leave_types)
+                    leave_start = current_date + timedelta(days=random.randint(1, 30))
+                    leave_days = random.randint(1, 5)
+                    
+                    leave_req = {
+                        'request_id': f"LREQ-{str(local_leave_counter).zfill(6)}",
+                        'employee_id': emp['employee_id'],
+                        'leave_type_id': leave_type['leave_type_id'],
+                        'request_date': current_date.strftime('%Y-%m-%d'),
+                        'start_date': leave_start.strftime('%Y-%m-%d'),
+                        'end_date': (leave_start + timedelta(days=leave_days)).strftime('%Y-%m-%d'),
+                        'total_days': leave_days,
+                        'reason': 'Personal reasons',
+                        'request_status': random.choice(['approved', 'approved', 'approved', 'pending']),
+                        'approval_date': leave_start.strftime('%Y-%m-%d'),
+                        'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    day_leave_requests.append(leave_req)
+                    local_leave_counter += 1
+        
+        # Generate safety incidents (1% chance per day across all employees)
+        if random.random() < 0.01:  # 1% chance per day
+            emp = random.choice(self.employees)
+            incident_type_val = random.choice(['injury', 'near_miss', 'property_damage'])
+            
+            incident = {
+                'incident_id': f"INC-{str(local_incident_counter).zfill(6)}",
+                'incident_number': f"SI-{current_date.strftime('%Y%m%d')}-{local_incident_counter:04d}",
+                'employee_id': emp['employee_id'],
+                'incident_date': current_date.strftime('%Y-%m-%d'),
+                'department_id': emp.get('primary_department_id', emp.get('department_id', 'DEPT-000001')),
+                'incident_type': incident_type_val,
+                'severity': random.choice(['minor', 'moderate', 'serious']),
+                'description': 'Safety incident description',
+                'investigation_status': random.choice(['completed', 'in_progress']),
+                'incident_status': random.choice(['closed', 'open']),
+                'body_part_affected': random.choice(['Hand', 'Foot', 'Head', 'Back', 'Arm', 'Leg']) if incident_type_val == 'injury' else None,
+                'closed_date': (current_date + timedelta(days=random.randint(7, 30))).strftime('%Y-%m-%d') if random.random() < 0.8 else None,
+                'corrective_actions': 'Increase safety training' if random.random() < 0.7 else None,
+                'days_away_from_work': random.randint(0, 30) if incident_type_val == 'injury' else 0,
+                'immediate_cause': 'Slippery surface',
+                'incident_location': random.choice(['Factory Floor', 'Warehouse', 'Office']),
+                'incident_time': f"{random.randint(8, 17)}:{random.randint(0, 59):02d}:00",
+                'injury_type': random.choice(['Cut', 'Bruise', 'Strain', 'Fracture']) if incident_type_val == 'injury' else None,
+                'investigated_by': 'MGR-001' if random.random() < 0.7 else None,
+                'investigation_date': (current_date + timedelta(days=random.randint(1, 7))).strftime('%Y-%m-%d'),
+                'investigation_findings': 'Root cause identified and addressed',
+                'medical_treatment_required': random.choice([True, False]),
+                'osha_recordable': random.random() < 0.3,
+                'preventive_measures': 'Install safety barriers',
+                'root_cause': 'Inadequate safety measures',
+                'updated_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S'),
+                'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            day_safety_incidents.append(incident)
+            local_incident_counter += 1
+        
+        return {
+            'attendance': day_attendance,
+            'leave_requests': day_leave_requests,
+            'safety_incidents': day_safety_incidents
+        }
+    
     # ========================================================================
     # EMPTY TABLE GENERATORS
     # ========================================================================
@@ -861,11 +1047,9 @@ class HCMDataGenerator:
             shift = {
                 'employee_shift_id': self.generate_id('ES', 'emp_shift'),
                 'employee_id': employee['employee_id'],
-                'shift_schedule_id': random.choice(self.shift_schedules)['shift_id'],
+                'shift_id': random.choice(self.shift_schedules)['shift_id'],
                 'effective_date': employee.get('hire_date', datetime.now().strftime('%Y-%m-%d')),
-                'shift_start_date': (datetime.now() - timedelta(days=random.randint(30, 180))).strftime('%Y-%m-%d'),
-                'shift_type': random.choice(['day', 'evening', 'night', 'rotating']),
-                'status': 'active',
+                'is_active': True,
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             shifts.append(shift)
@@ -938,11 +1122,12 @@ class HCMDataGenerator:
             for i in range(random.randint(2, 4)):
                 req = {
                     'requirement_id': self.generate_id('TR', 'req'),
-                    'job_role_id': role['role_id'],
-                    'training_course_id': random.choice(self.training_courses)['course_id'],
-                    'requirement_type': random.choice(['mandatory', 'recommended', 'optional']),
-                    'training_hours': random.randint(4, 40),
-                    'completion_deadline_months': random.randint(3, 12),
+                    'requirement_type': random.choice(['role_based', 'location_based', 'regulatory']),
+                    'role_id': role['role_id'],
+                    'course_id': random.choice(self.training_courses)['course_id'],
+                    'is_mandatory': random.choice([True, True, False]),
+                    'frequency': random.choice(['one_time', 'annual', 'biennial']),
+                    'validity_months': random.choice([12, 24, 36]),
                     'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
                 requirements.append(req)
@@ -981,15 +1166,11 @@ class HCMDataGenerator:
         
         for role in self.job_roles:
             plan = {
-                'plan_id': self.generate_id('SP', 'plan'),
+                'succession_id': self.generate_id('SP', 'plan'),
                 'position_id': random.choice([p['position_id'] for p in self.positions]),
-                'job_role_id': role['role_id'],
-                'role_name': role['role_name'],
-                'current_holder_id': random.choice(self.employees)['employee_id'],
-                'succession_risk_level': random.choice(['low', 'medium', 'high']),
-                'critical_skills': json.dumps(['Leadership', 'Technical expertise', 'Industry knowledge']),
-                'contingency_plan': 'Documented plan available',
-                'plan_status': 'active',
+                'current_incumbent_id': random.choice(self.employees)['employee_id'],
+                'succession_risk': random.choice(['low', 'medium', 'high']),
+                'successor_ready': random.choice([True, False]),
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             plans.append(plan)
@@ -1002,22 +1183,17 @@ class HCMDataGenerator:
         print("Generating succession candidates...")
         candidates = []
         
-        for i in range(30):
+        # Get succession plans from the generated plans
+        succession_plans = self._generate_succession_planning()
+        
+        for plan in succession_plans[:min(30, len(succession_plans))]:
             candidate = {
-                'candidate_id': self.generate_id('SC', 'shift'),
-                'plan_id': self.generate_id('PLAN', 'plan'),
+                'candidate_id': self.generate_id('SC', 'candidate'),
+                'succession_id': plan['succession_id'],
                 'employee_id': random.choice(self.employees)['employee_id'],
-                'readiness_level': random.choice(['ready_now', 'ready_in_1_year', 'ready_in_3_years']),
-                'readiness_score': round(random.uniform(0.5, 1.0), 2),
-                'development_plan': 'In progress',
-                'mentoring_plan': random.choice([
-                    'Assigned to senior manager',
-                    'Executive coaching program',
-                    'Leadership development track',
-                    'Cross-functional rotation',
-                    'MBA sponsorship',
-                    'One-on-one mentoring'
-                ]),
+                'readiness_level': random.choice(['ready_now', 'ready_1_year', 'ready_2_years']),
+                'strengths': 'Strong leadership and technical skills',
+                'development_needs': 'Strategic thinking development needed',
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             candidates.append(candidate)
@@ -1104,13 +1280,15 @@ class HCMDataGenerator:
         onboarding = []
         
         for employee in self.employees:
+            # Get or create default checklist
+            checklist = self.onboarding_checklists[0] if self.onboarding_checklists else {'checklist_id': 'OBCL-000001'}
+            
             record = {
                 'onboarding_id': self.generate_id('OB', 'onboard'),
                 'employee_id': employee['employee_id'],
+                'checklist_id': checklist['checklist_id'],
                 'onboarding_start_date': employee['hire_date'],
-                'onboarding_end_date': (datetime.strptime(employee['hire_date'], '%Y-%m-%d') + timedelta(days=random.randint(30, 90))).strftime('%Y-%m-%d'),
-                'onboarding_manager_id': random.choice(self.employees)['employee_id'],
-                'status': random.choice(['in_progress', 'completed']),
+                'onboarding_status': random.choice(['in_progress', 'completed']),
                 'completion_pct': random.randint(50, 100),
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
@@ -1274,12 +1452,12 @@ class HCMDataGenerator:
         for role in self.job_roles:
             for skill in random.sample(self.skills_catalog, min(3, len(self.skills_catalog))):
                 req = {
-                    'requirement_id': self.generate_id('RSR', 'balance'),
-                    'job_role_id': role['role_id'],
+                    'requirement_id': self.generate_id('RSR', 'rsr'),
+                    'role_id': role['role_id'],
                     'skill_id': skill['skill_id'],
-                    'proficiency_level': random.choice(['beginner', 'intermediate', 'advanced', 'expert']),
-                    'is_mandatory': random.choice([True, True, False]),
-                    'validation_method': random.choice(['certification', 'assessment', 'experience']),
+                    'requirement_type': random.choice(['required', 'preferred', 'optional']),
+                    'min_proficiency_level': random.randint(1, 5),
+                    'priority': random.randint(1, 5),
                     'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
                 requirements.append(req)
@@ -1422,7 +1600,7 @@ class HCMDataGenerator:
             # Safety & Onboarding
             'safety_incidents': self.safety_incidents,
             'ppe_requirements': ppe_requirements,
-            'employee_onboarding': self.employee_onboarding,
+            'employee_onboarding': self._generate_employee_onboarding(),
             'employee_onboarding_items': employee_onboarding_items,
             'onboarding_checklists': self.onboarding_checklists,
             'onboarding_checklist_items': onboarding_checklist_items,

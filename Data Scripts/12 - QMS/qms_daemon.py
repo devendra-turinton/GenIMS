@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 GenIMS Quality Management System (QMS) Daemon - Enterprise-grade Ultra-Fast Batch Generation
-Generates 30 days of QMS data with TimeCoordinator, Registry validation, and proper error handling
+Generates daily QMS data with TimeCoordinator, Registry validation, and proper error handling
 """
 
 import sys
@@ -168,7 +168,7 @@ def load_master_data(cursor):
     return master_data
 
 def generate_batch_data(master_data, start_time, run_timestamp):
-    """Generate 30 days of QMS data (14,400 5-minute intervals)"""
+    """Generate daily QMS data (600 intervals for realistic quality operations)"""
     logger.info("Generating batch data...")
     
     # Initialize ID counters - extract from numeric fields only to avoid timestamp overflow
@@ -197,15 +197,15 @@ def generate_batch_data(master_data, start_time, run_timestamp):
     # Track unique combinations
     kpi_dates_seen = set(master_data.get('existing_kpi_dates', []))
     
-    # Generate data for 30 days (14,400 5-minute intervals)
-    num_intervals = 30 * 24 * 12  # 30 days * 24 hours * 12 (5-min intervals)
+    # Generate data for daily quality operations (600 intervals for realistic enterprise volume)
+    num_intervals = 600  # Daily enterprise quality operations volume
     
     for i in range(num_intervals):
         current_time = start_time + timedelta(minutes=5 * i)
         current_date = current_time.date()
         
-        # Customer Complaints (1 per 100 intervals)
-        if i % 100 == 0 and master_data['customers'] and master_data['products']:
+        # Customer Complaints (1 per 8 intervals for enterprise scale)
+        if i % 8 == 0 and master_data['customers'] and master_data['products']:
             complaint_counter += 1
             complaint_id = f"COMP-{run_timestamp}-{complaint_counter:06d}"
             complaint_number = f"COMP-{complaint_counter:08d}"
@@ -226,8 +226,8 @@ def generate_batch_data(master_data, start_time, run_timestamp):
                 'created_at': current_time
             })
         
-        # NCR Headers (1 per 75 intervals)
-        if i % 75 == 0 and master_data['materials']:
+        # NCR Headers (1 per 6 intervals for multiple factories)
+        if i % 6 == 0 and master_data['materials']:
             ncr_counter += 1
             ncr_id = f"NCR-{run_timestamp}-{ncr_counter:06d}"
             ncr_number = f"NCR-{ncr_counter:08d}"
@@ -264,8 +264,8 @@ def generate_batch_data(master_data, start_time, run_timestamp):
                 'created_at': current_time
             })
         
-        # CAPA Headers (1 per 150 intervals)
-        if i % 150 == 0 and master_data['employees']:
+        # CAPA Headers (1 per 15 intervals for enterprise corrective actions)
+        if i % 15 == 0 and master_data['employees']:
             capa_counter += 1
             capa_id = f"CAPA-{run_timestamp}-{capa_counter:06d}"
             capa_number = f"CAPA-{capa_counter:08d}"
@@ -326,8 +326,8 @@ def generate_batch_data(master_data, start_time, run_timestamp):
                 'created_at': current_time
             })
         
-        # SPC Data Points (1 per 10 intervals)
-        if i % 10 == 0 and master_data['spc_charts']:
+        # SPC Data Points (1 per 4 intervals for continuous process monitoring)
+        if i % 4 == 0 and master_data['spc_charts']:
             chart_id, chart_number, process_name, ucl, lcl, target = random.choice(master_data['spc_charts'])
             
             # Convert to float for calculations
@@ -355,8 +355,8 @@ def generate_batch_data(master_data, start_time, run_timestamp):
                 'created_at': current_time
             })
         
-        # Calibration Alerts (1 per 200 intervals)
-        if i % 200 == 0 and master_data['equipment']:
+        # Calibration Alerts (1 per 20 intervals for multiple equipment)
+        if i % 20 == 0 and master_data['equipment']:
             equipment_id, equipment_number, next_due = random.choice(master_data['equipment'])
             
             days_until_due = (next_due - current_date).days if next_due else 30
@@ -373,8 +373,8 @@ def generate_batch_data(master_data, start_time, run_timestamp):
                 'created_at': current_time
             })
         
-        # Audit Findings (1 per 300 intervals)
-        if i % 300 == 0 and master_data['audits'] and master_data['employees']:
+        # Audit Findings (1 per 30 intervals for regular quality audits)
+        if i % 30 == 0 and master_data['audits'] and master_data['employees']:
             finding_counter += 1
             
             audit_findings.append({
@@ -695,7 +695,7 @@ def main():
         master_data = load_master_data(cursor)
         cursor.close()
         
-        # Generate batch data (30 days from now)
+        # Generate batch data (daily quality operations)
         run_timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
         start_time = datetime.now()
         

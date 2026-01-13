@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-GenIMS CRM Historical Data Generator
+GenIMS CRM Historical Data Generator with ULTRA-FAST PARALLEL Processing
 Generates 180 days of CRM data (leads, opportunities, quotes, cases)
+Includes ultra-fast parallel processing optimizations
 """
 
 import random
@@ -10,18 +11,26 @@ from datetime import datetime, timedelta
 from typing import List, Dict
 import sys
 from pathlib import Path
+import multiprocessing
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Add scripts to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 from generator_helper import get_helper
 
+# ULTRA-FAST PARALLEL Configuration
+cpu_count = multiprocessing.cpu_count()
+WORKER_COUNT = min(8, max(4, cpu_count - 2))  # Use 8 workers or available CPUs minus 2
+BATCH_SIZE = 150000  # Large batch size for optimal performance
+
 # Configuration
 DAYS_OF_HISTORY = 180
-SALES_REPS_COUNT = 15
-TERRITORIES_COUNT = 5
-LEADS_PER_DAY = (2, 8)
-OPPORTUNITIES_PER_MONTH = (10, 25)
-CASES_PER_WEEK = (5, 15)
+SALES_REPS_COUNT = 60      # Increased from 15 to 60 (15 per factory)
+TERRITORIES_COUNT = 20     # Increased from 5 to 20 (5 per factory)
+LEADS_PER_DAY = (80, 200)  # Enterprise lead generation (20-50 per factory)
+OPPORTUNITIES_PER_MONTH = (400, 800)  # Scaled opportunities (100-200 per factory)
+CASES_PER_WEEK = (200, 400)  # Customer service volume (50-100 per factory)
 
 class CRMDataGenerator:
     def __init__(self, master_data_file=None, erp_data_file=None):
@@ -99,6 +108,15 @@ class CRMDataGenerator:
             'campaign': 1, 'case': 1, 'contract': 1,
             'activity': 1, 'task': 1, 'interaction': 1, 'forecast': 1
         }
+        
+        # ULTRA-FAST PARALLEL Configuration
+        self.worker_count = WORKER_COUNT
+        self.batch_size = BATCH_SIZE
+        self.parallel_enabled = True
+        self.data_lock = threading.Lock()
+        
+        print(f"🚀 ULTRA-FAST CRM PARALLEL MODE: {self.worker_count} workers, batch_size={self.batch_size:,}")
+        print(f"   CPU cores available: {cpu_count}, Using {self.worker_count} for generation")
         
         print(f"Loaded: {len(self.customers)} customers, {len(self.materials)} materials")
     
@@ -318,9 +336,183 @@ class CRMDataGenerator:
     # ========================================================================
     
     def generate_crm_operations(self, start_date: datetime, days: int):
-        """Generate daily CRM operations"""
-        print(f"Generating {days} days of CRM operations...")
+        """Generate daily CRM operations with ULTRA-FAST PARALLEL processing"""
+        print(f"\nGenerating {days} days of CRM operations with PARALLEL processing...")
         
+        # Get valid FK sets for thread-safe access
+        valid_employee_ids = list(self.helper.get_valid_employee_ids())
+        
+        if not self.parallel_enabled or days < 20:
+            return self._generate_crm_operations_sequential(start_date, days, valid_employee_ids)
+        
+        # Parallel processing for large datasets
+        chunk_size = max(5, days // self.worker_count)  # At least 5 days per chunk
+        day_chunks = [(i, min(chunk_size, days - i)) for i in range(0, days, chunk_size)]
+        
+        print(f"  🚀 Processing {len(day_chunks)} day chunks with {self.worker_count} workers...")
+        
+        all_leads = []
+        all_lead_activities = []
+        all_opportunities = []
+        all_opp_history = []
+        all_opp_products = []
+        all_quotations = []
+        all_quote_lines = []
+        all_cases = []
+        all_activities = []
+        all_tasks = []
+        all_interactions = []
+        
+        with ThreadPoolExecutor(max_workers=self.worker_count) as executor:
+            # Submit chunk processing tasks
+            futures = {
+                executor.submit(self._generate_crm_operations_chunk, 
+                    start_date + timedelta(days=start_day), 
+                    chunk_days, 
+                    chunk_id,
+                    valid_employee_ids): chunk_id 
+                for chunk_id, (start_day, chunk_days) in enumerate(day_chunks)
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(futures):
+                chunk_id = futures[future]
+                try:
+                    chunk_results = future.result()
+                    
+                    all_leads.extend(chunk_results['leads'])
+                    all_lead_activities.extend(chunk_results['lead_activities'])
+                    all_opportunities.extend(chunk_results['opportunities'])
+                    all_opp_history.extend(chunk_results['opp_history'])
+                    all_opp_products.extend(chunk_results['opp_products'])
+                    all_quotations.extend(chunk_results['quotations'])
+                    all_quote_lines.extend(chunk_results['quote_lines'])
+                    all_cases.extend(chunk_results['cases'])
+                    all_activities.extend(chunk_results['activities'])
+                    all_tasks.extend(chunk_results['tasks'])
+                    all_interactions.extend(chunk_results['interactions'])
+                    
+                    print(f"    ✓ CRM chunk {chunk_id + 1}/{len(day_chunks)} completed ({len(chunk_results['leads'])} leads, {len(chunk_results['opportunities'])} opps)")
+                except Exception as e:
+                    print(f"    ✗ CRM chunk {chunk_id + 1} failed: {e}")
+        
+        # Store results with thread safety
+        with self.data_lock:
+            self.leads.extend(all_leads)
+            self.lead_activities.extend(all_lead_activities)
+            self.opportunities.extend(all_opportunities)
+            self.opp_history.extend(all_opp_history)
+            self.opp_products.extend(all_opp_products)
+            self.quotations.extend(all_quotations)
+            self.quote_lines.extend(all_quote_lines)
+            self.cases.extend(all_cases)
+            self.activities.extend(all_activities)
+            self.tasks.extend(all_tasks)
+            self.interactions.extend(all_interactions)
+        
+        print(f"✓ Generated CRM operations: {len(self.leads):,} leads, {len(self.opportunities):,} opportunities, {len(self.cases):,} cases via PARALLEL processing")
+    
+    def _generate_crm_operations_chunk(self, start_date: datetime, days: int, chunk_id: int, 
+                                      valid_employee_ids: List[str]) -> Dict:
+        """Generate CRM operations for a chunk of days (parallel worker method)"""
+        
+        # Local data storage for this chunk
+        chunk_leads = []
+        chunk_lead_activities = []
+        chunk_opportunities = []
+        chunk_opp_history = []
+        chunk_opp_products = []
+        chunk_quotations = []
+        chunk_quote_lines = []
+        chunk_cases = []
+        chunk_activities = []
+        chunk_tasks = []
+        chunk_interactions = []
+        
+        # Local counters to avoid collision
+        local_lead_counter = chunk_id * 50000 + 1
+        local_lead_act_counter = chunk_id * 100000 + 1
+        local_opp_counter = chunk_id * 30000 + 1
+        local_opp_hist_counter = chunk_id * 100000 + 1
+        local_opp_prod_counter = chunk_id * 100000 + 1
+        local_quote_counter = chunk_id * 30000 + 1
+        local_quote_line_counter = chunk_id * 100000 + 1
+        local_case_counter = chunk_id * 50000 + 1
+        local_activity_counter = chunk_id * 200000 + 1
+        local_task_counter = chunk_id * 100000 + 1
+        local_interaction_counter = chunk_id * 200000 + 1
+        
+        current_date = start_date
+        
+        for day in range(days):
+            # Daily: Generate leads
+            num_leads = random.randint(*LEADS_PER_DAY)
+            for _ in range(num_leads):
+                lead_data = self._create_lead_local(current_date, local_lead_counter, 
+                                                   local_lead_act_counter, valid_employee_ids)
+                if lead_data:
+                    chunk_leads.append(lead_data['lead'])
+                    chunk_lead_activities.extend(lead_data['lead_activities'])
+                    local_lead_counter += 1
+                    local_lead_act_counter += len(lead_data['lead_activities'])
+            
+            # Weekly: Generate opportunities
+            if day % 7 == 0:
+                num_opps = random.randint(3, 8)
+                for _ in range(num_opps):
+                    opp_data = self._create_opportunity_local(current_date, local_opp_counter, 
+                                                             local_opp_hist_counter, local_opp_prod_counter,
+                                                             local_quote_counter, local_quote_line_counter,
+                                                             valid_employee_ids)
+                    if opp_data:
+                        chunk_opportunities.append(opp_data['opportunity'])
+                        chunk_opp_history.extend(opp_data['opp_history'])
+                        chunk_opp_products.extend(opp_data['opp_products'])
+                        chunk_quotations.extend(opp_data['quotations'])
+                        chunk_quote_lines.extend(opp_data['quote_lines'])
+                        local_opp_counter += 1
+                        local_opp_hist_counter += len(opp_data['opp_history'])
+                        local_opp_prod_counter += len(opp_data['opp_products'])
+                        local_quote_counter += len(opp_data['quotations'])
+                        local_quote_line_counter += len(opp_data['quote_lines'])
+            
+            # Weekly: Generate cases
+            if day % 7 == 0:
+                num_cases = random.randint(*CASES_PER_WEEK)
+                for _ in range(num_cases):
+                    case_data = self._create_case_local(current_date, local_case_counter, 
+                                                       local_activity_counter, local_task_counter,
+                                                       valid_employee_ids)
+                    if case_data:
+                        chunk_cases.append(case_data['case'])
+                        chunk_activities.extend(case_data['activities'])
+                        chunk_tasks.extend(case_data['tasks'])
+                        chunk_interactions.extend(case_data['interactions'])
+                        local_case_counter += 1
+                        local_activity_counter += len(case_data['activities'])
+                        local_task_counter += len(case_data['tasks'])
+                        local_interaction_counter += len(case_data['interactions'])
+            
+            current_date += timedelta(days=1)
+        
+        # Return all chunk data
+        return {
+            'leads': chunk_leads,
+            'lead_activities': chunk_lead_activities,
+            'opportunities': chunk_opportunities,
+            'opp_history': chunk_opp_history,
+            'opp_products': chunk_opp_products,
+            'quotations': chunk_quotations,
+            'quote_lines': chunk_quote_lines,
+            'cases': chunk_cases,
+            'activities': chunk_activities,
+            'tasks': chunk_tasks,
+            'interactions': chunk_interactions
+        }
+    
+    def _generate_crm_operations_sequential(self, start_date: datetime, days: int, valid_employee_ids: List[str]):
+        """Fallback sequential CRM operations for small datasets"""
+        print("Generating CRM operations (sequential fallback)...")
         current_date = start_date
         
         for day in range(days):
@@ -344,7 +536,246 @@ class CRMDataGenerator:
             current_date += timedelta(days=1)
         
         print(f"Generated CRM operations: {len(self.leads)} leads, "
-              f"{len(self.opportunities)} opportunities, {len(self.cases)} cases")
+              f"{len(self.opportunities)} opportunities, {len(self.cases)} cases (sequential)")
+    
+    def _create_lead_local(self, date: datetime, lead_counter: int, lead_act_counter: int,
+                          valid_employee_ids: List[str]) -> Dict:
+        """Create lead with activities (local/chunk version)"""
+        campaign = random.choice(self.campaigns) if self.campaigns else None
+        rep = random.choice(self.sales_reps) if self.sales_reps else None
+        
+        assigned_to = random.choice(valid_employee_ids) if valid_employee_ids else (rep['sales_rep_id'] if rep else 'SREP-000001')
+        campaign_id = campaign['campaign_id'] if campaign else None
+        lead_status = random.choice(['new', 'contacted', 'qualified', 'unqualified', 'converted'])
+        
+        lead = {
+            'lead_id': f"LEAD-{str(lead_counter).zfill(6)}",
+            'lead_number': f"LEAD-{date.strftime('%Y%m%d')}-{lead_counter:04d}",
+            'company_name': f"Prospect Company {lead_counter}",
+            'lead_source': random.choice(['website', 'referral', 'trade_show', 'cold_call', 'social_media']),
+            'source_campaign_id': campaign_id,
+            'contact_first_name': f"Lead{lead_counter}",
+            'contact_last_name': "Contact",
+            'email': f"lead{lead_counter}@prospect.com",
+            'phone': f"+91 {random.randint(7000000000, 9999999999)}",
+            'industry': random.choice(['automotive', 'electronics', 'aerospace', 'packaging']),
+            'company_size': random.choice(['small', 'medium', 'large']),
+            'lead_score': random.randint(0, 100),
+            'lead_status': lead_status,
+            'estimated_deal_value': round(random.uniform(500000, 10000000), 2),
+            'assigned_to': assigned_to,
+            'converted': lead_status == 'converted',
+            'is_active': True,
+            'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        # Create lead activities
+        lead_activities = []
+        if lead_status in ['contacted', 'qualified']:
+            activity = {
+                'activity_id': f"LEADACT-{str(lead_act_counter).zfill(6)}",
+                'lead_id': lead['lead_id'],
+                'activity_type': random.choice(['call', 'email', 'meeting', 'demo']),
+                'activity_date': date.strftime('%Y-%m-%d'),
+                'activity_notes': f"Contact activity for {lead['company_name']}",
+                'performed_by': assigned_to,
+                'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            lead_activities.append(activity)
+        
+        return {
+            'lead': lead,
+            'lead_activities': lead_activities
+        }
+    
+    def _create_opportunity_local(self, date: datetime, opp_counter: int, opp_hist_counter: int,
+                                 opp_prod_counter: int, quote_counter: int, quote_line_counter: int,
+                                 valid_employee_ids: List[str]) -> Dict:
+        """Create opportunity with history and products (local/chunk version)"""
+        if not self.accounts:
+            return None
+        
+        account = random.choice(self.accounts)
+        rep = random.choice(self.sales_reps) if self.sales_reps else None
+        assigned_to = random.choice(valid_employee_ids) if valid_employee_ids else (rep['sales_rep_id'] if rep else 'SREP-000001')
+        
+        opp_stage = random.choice(['prospecting', 'qualification', 'proposal', 'negotiation', 'closed_won', 'closed_lost'])
+        close_date = date + timedelta(days=random.randint(30, 180))
+        
+        opportunity = {
+            'opportunity_id': f"OPP-{str(opp_counter).zfill(6)}",
+            'opportunity_number': f"OPP-{date.strftime('%Y%m%d')}-{opp_counter:04d}",
+            'account_id': account['account_id'],
+            'opportunity_name': f"Opportunity {opp_counter} - {account['account_name']}",
+            'stage': opp_stage,
+            'amount': round(random.uniform(1000000, 20000000), 2),
+            'probability': random.randint(10, 90),
+            'close_date': close_date.strftime('%Y-%m-%d'),
+            'sales_rep_id': rep['sales_rep_id'] if rep else 'SREP-000001',
+            'lead_source': random.choice(['website', 'referral', 'cold_call']),
+            'competitor': random.choice(['Competitor A', 'Competitor B', 'None']),
+            'next_step': 'Follow up meeting',
+            'created_at': date.strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        # Create opportunity history
+        opp_history = [{
+            'history_id': f"OPPHIST-{str(opp_hist_counter).zfill(6)}",
+            'opportunity_id': opportunity['opportunity_id'],
+            'from_stage': 'prospecting',
+            'to_stage': opp_stage,
+            'changed_by': assigned_to,
+            'changed_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S'),
+            'change_reason': f"Stage changed to {opp_stage}"
+        }]
+        
+        # Create opportunity products
+        opp_products = []
+        if self.materials:
+            num_products = random.randint(1, 3)
+            for i in range(num_products):
+                material = random.choice(self.materials)
+                product = {
+                    'opp_product_id': f"OPPPROD-{str(opp_prod_counter + i).zfill(6)}",
+                    'opportunity_id': opportunity['opportunity_id'],
+                    'material_id': material['material_id'],
+                    'quantity': random.randint(100, 1000),
+                    'unit_price': round(random.uniform(1000, 5000), 2),
+                    'total_price': round(random.uniform(100000, 5000000), 2),
+                    'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                opp_products.append(product)
+        
+        # Create quotations
+        quotations = []
+        quote_lines = []
+        if opp_stage in ['proposal', 'negotiation']:
+            # Get a contact for this account
+            account_contact = next((c for c in self.contacts if c.get('account_id') == account['account_id']), None)
+            
+            quote = {
+                'quotation_id': f"QUOTE-{str(quote_counter).zfill(6)}",
+                'quotation_number': f"Q-{date.strftime('%Y%m%d')}-{quote_counter:04d}",
+                'quotation_name': f"Quotation for {opportunity['opportunity_name']}",
+                'opportunity_id': opportunity['opportunity_id'],
+                'account_id': account['account_id'],
+                'contact_id': account_contact['contact_id'] if account_contact else None,
+                'quotation_date': date.strftime('%Y-%m-%d'),
+                'valid_until_date': (date + timedelta(days=30)).strftime('%Y-%m-%d'),
+                'total_amount': opportunity['amount'],
+                'quotation_status': 'sent',
+                'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            quotations.append(quote)
+            
+            # Create quote lines
+            for i, product in enumerate(opp_products[:2]):  # Limit to 2 for performance
+                # Find material name
+                material = next((m for m in self.materials if m['material_id'] == product['material_id']), None)
+                product_name = material['material_name'] if material else f"Product {product['material_id']}"
+                
+                quote_line = {
+                    'quote_line_id': f"QL-{str(quote_line_counter + i).zfill(6)}",
+                    'quotation_id': quote['quotation_id'],
+                    'line_number': i + 1,
+                    'material_id': product['material_id'],
+                    'product_name': product_name,
+                    'quantity': product['quantity'],
+                    'unit_price': product['unit_price'],
+                    'line_total': product['total_price'],
+                    'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                quote_lines.append(quote_line)
+        
+        return {
+            'opportunity': opportunity,
+            'opp_history': opp_history,
+            'opp_products': opp_products,
+            'quotations': quotations,
+            'quote_lines': quote_lines
+        }
+    
+    def _create_case_local(self, date: datetime, case_counter: int, activity_counter: int,
+                          task_counter: int, valid_employee_ids: List[str]) -> Dict:
+        """Create case with activities and tasks (local/chunk version)"""
+        if not self.accounts:
+            return None
+        
+        account = random.choice(self.accounts)
+        contact = random.choice(self.contacts) if self.contacts else None
+        assigned_to = random.choice(valid_employee_ids) if valid_employee_ids else 'EMP-000001'
+        
+        case_type = random.choice(['technical', 'billing', 'complaint', 'request'])
+        priority = random.choice(['low', 'medium', 'high', 'critical'])
+        status = random.choice(['new', 'in_progress', 'waiting', 'resolved', 'closed'])
+        
+        case = {
+            'case_id': f"CASE-{str(case_counter).zfill(6)}",
+            'case_number': f"CASE-{date.strftime('%Y%m%d')}-{case_counter:04d}",
+            'account_id': account['account_id'],
+            'contact_id': contact['contact_id'] if contact else None,
+            'subject': f"{case_type.title()} Issue {case_counter}",
+            'case_type': case_type,
+            'priority': priority,
+            'status': status,
+            'description': f"Customer {case_type} issue requiring attention",
+            'assigned_to': assigned_to,
+            'created_date': date.strftime('%Y-%m-%d'),
+            'last_modified_date': date.strftime('%Y-%m-%d'),
+            'resolution': 'Issue resolved' if status in ['resolved', 'closed'] else None,
+            'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        # Create case activities
+        activities = []
+        num_activities = random.randint(1, 3)
+        for i in range(num_activities):
+            activity = {
+                'activity_id': f"ACT-{str(activity_counter + i).zfill(6)}",
+                'case_id': case['case_id'],
+                'activity_type': random.choice(['email', 'call', 'meeting', 'note']),
+                'activity_date': date.strftime('%Y-%m-%d'),
+                'description': f"Case activity {i+1}",
+                'performed_by': assigned_to,
+                'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            activities.append(activity)
+        
+        # Create case tasks
+        tasks = []
+        if status == 'in_progress':
+            task = {
+                'task_id': f"TASK-{str(task_counter).zfill(6)}",
+                'case_id': case['case_id'],
+                'task_subject': f"Resolve {case_type} issue",
+                'task_type': 'follow_up',
+                'due_date': (date + timedelta(days=random.randint(1, 7))).strftime('%Y-%m-%d'),
+                'assigned_to': assigned_to,
+                'task_status': 'open',
+                'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            tasks.append(task)
+        
+        # Create customer interactions
+        interactions = []
+        interaction = {
+            'interaction_id': f"INT-{str(activity_counter).zfill(6)}",
+            'case_id': case['case_id'],
+            'interaction_type': random.choice(['inbound_call', 'outbound_call', 'email', 'chat']),
+            'interaction_date': date.strftime('%Y-%m-%d %H:%M:%S'),
+            'duration_minutes': random.randint(5, 60),
+            'notes': f"Customer interaction regarding case {case['case_number']}",
+            'handled_by': assigned_to,
+            'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        interactions.append(interaction)
+        
+        return {
+            'case': case,
+            'activities': activities,
+            'tasks': tasks,
+            'interactions': interactions
+        }
     
     def _create_lead(self, date: datetime):
         """Create a lead with proper FK validation"""
@@ -555,6 +986,7 @@ class CRMDataGenerator:
                         'to_stage': new_stage,
                         'from_probability': self._get_probability_for_stage(old_stage),
                         'to_probability': self._get_probability_for_stage(new_stage),
+                        'changed_by': opp.get('assigned_to', 'EMP-000001'),
                         'changed_at': date.strftime('%Y-%m-%d %H:%M:%S')
                     }
                     self.opp_history.append(history)

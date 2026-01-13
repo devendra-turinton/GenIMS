@@ -10,16 +10,20 @@ from datetime import datetime, timedelta
 from typing import List, Dict
 import sys
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+import threading
+from multiprocessing import cpu_count
 
 # Add scripts to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 from generator_helper import get_helper
+from time_coordinator import TimeCoordinator
 
 DAYS_OF_HISTORY = 180
-SERVICE_AGENTS_COUNT = 20
-FIELD_TECHNICIANS_COUNT = 15
-KB_ARTICLES_COUNT = 80
-TICKETS_PER_DAY = 10
+SERVICE_AGENTS_COUNT = 80     # Increased from 20 to 80 (20 per factory)
+FIELD_TECHNICIANS_COUNT = 60  # Increased from 15 to 60 (15 per factory)
+KB_ARTICLES_COUNT = 320       # Increased from 80 to 320 (4x knowledge base)
+TICKETS_PER_DAY = (200, 400)  # Enterprise support volume (50-100 per factory)
 
 class ServiceDataGenerator:
     def __init__(self, master_data_file=None, crm_data_file=None):
@@ -91,6 +95,15 @@ class ServiceDataGenerator:
             'res_code': 1, 'int_log': 1, 'metric': 1, 'portal': 1
         }
         
+        # ✅ ULTRA-FAST PARALLEL PROCESSING CONFIGURATION
+        self.worker_count = min(8, cpu_count() - 2 if cpu_count() > 2 else 1)
+        self.data_lock = threading.Lock()
+        self.batch_size = 150000  # Large batch for high performance
+        self.time_coord = TimeCoordinator()
+        
+        print(f"🚀 ULTRA-FAST SERVICE PARALLEL MODE: {self.worker_count} workers, batch_size={self.batch_size:,}")
+        print(f"   CPU cores available: {cpu_count()}, Using {self.worker_count} for generation")
+        
     def generate_id(self, prefix: str, counter_key: str) -> str:
         id_val = f"{prefix}-{str(self.counters[counter_key]).zfill(6)}"
         self.counters[counter_key] += 1
@@ -120,11 +133,8 @@ class ServiceDataGenerator:
         self.generate_service_parts()
         self.generate_portal_users()
         
-        # Ticket Processing
+        # Ticket Processing (with parallel comments, attachments, escalations)
         self.generate_service_tickets()
-        self.generate_ticket_comments()
-        self.generate_ticket_attachments()
-        self.generate_ticket_escalations()
         
         # Warranty Management
         self.generate_warranty_registrations()
@@ -454,251 +464,377 @@ class ServiceDataGenerator:
     # ========================================================================
     
     def generate_service_tickets(self):
-        """Generate service tickets - Complete with all schema columns"""
-        print("Generating service tickets...")
+        """Generate service tickets with ULTRA-FAST parallel processing"""
+        print(f"\nGenerating {DAYS_OF_HISTORY} days of service operations with PARALLEL processing...")
+        start_time = datetime.now()
         
+        # Prepare shared data for all workers
         start_date = datetime.now() - timedelta(days=DAYS_OF_HISTORY)
-        
-        # FK from registry - GUARANTEED VALID
         valid_customer_ids = list(self.helper.get_valid_customer_ids())
         valid_employee_ids = list(self.helper.get_valid_employee_ids())
         
-        global_ticket_counter = 0  # Global counter for unique ticket numbers
+        # Calculate days per chunk for parallel processing
+        chunk_size = max(1, DAYS_OF_HISTORY // self.worker_count)
+        chunks = []
         
-        for day in range(DAYS_OF_HISTORY):
-            for _ in range(random.randint(5, 15)):
-                ticket_date = start_date + timedelta(days=day)
-                selected_queue = random.choice(self.service_queues) if self.service_queues else {'queue_id': 'QUE-000001'}
-                queue_id = selected_queue['queue_id']
+        for i in range(0, DAYS_OF_HISTORY, chunk_size):
+            end_day = min(i + chunk_size, DAYS_OF_HISTORY)
+            chunks.append((i, end_day))
+        
+        print(f"  🚀 Processing {len(chunks)} day chunks with {self.worker_count} workers...")
+        
+        # Thread-safe data collectors
+        all_tickets = []
+        all_comments = []
+        all_attachments = []
+        all_escalations = []
+        
+        def process_service_chunk(chunk_info):
+            """Process a chunk of days for service operations"""
+            start_day, end_day = chunk_info
+            chunk_tickets = []
+            chunk_comments = []
+            chunk_attachments = []
+            chunk_escalations = []
+            
+            # Local counters to avoid ID collision - use chunk index * large multiplier
+            chunk_index = start_day // chunk_size
+            local_ticket_counter = chunk_index * 100000 + start_day * 300 + 1000
+            local_comment_counter = chunk_index * 100000 + start_day * 150 + 500
+            local_attach_counter = chunk_index * 50000 + start_day * 50 + 100
+            local_esc_counter = chunk_index * 25000 + start_day * 25 + 50
+            
+            for day_offset in range(start_day, end_day):
+                day_data = self._generate_service_day_data_local(
+                    start_date + timedelta(days=day_offset),
+                    local_ticket_counter, local_comment_counter,
+                    local_attach_counter, local_esc_counter,
+                    valid_customer_ids, valid_employee_ids
+                )
                 
-                global_ticket_counter += 1
+                chunk_tickets.extend(day_data['tickets'])
+                chunk_comments.extend(day_data['comments'])
+                chunk_attachments.extend(day_data['attachments'])
+                chunk_escalations.extend(day_data['escalations'])
                 
-                priority = random.choice(['critical', 'urgent', 'high', 'medium', 'low'])
-                status = random.choice(['new', 'assigned', 'in_progress', 'pending_customer', 'on_hold', 'resolved', 'closed'])
+                # Update counters
+                local_ticket_counter += len(day_data['tickets'])
+                local_comment_counter += len(day_data['comments'])
+                local_attach_counter += len(day_data['attachments'])
+                local_esc_counter += len(day_data['escalations'])
+            
+            # Thread-safe data collection
+            with self.data_lock:
+                all_tickets.extend(chunk_tickets)
+                all_comments.extend(chunk_comments)
+                all_attachments.extend(chunk_attachments)
+                all_escalations.extend(chunk_escalations)
+            
+            print(f"    ✓ Service chunk {start_day+1}-{end_day}/{DAYS_OF_HISTORY} completed ({len(chunk_tickets)} tickets)")
+            return len(chunk_tickets)
+        
+        # Execute parallel processing
+        with ThreadPoolExecutor(max_workers=self.worker_count) as executor:
+            futures = [executor.submit(process_service_chunk, chunk) for chunk in chunks]
+            total_records = sum(future.result() for future in futures)
+        
+        # Assign to class attributes
+        self.service_tickets = all_tickets
+        self.ticket_comments = all_comments
+        self.ticket_attachments = all_attachments
+        self.ticket_escalations = all_escalations
+        
+        elapsed = (datetime.now() - start_time).total_seconds()
+        print(f"✓ Generated {len(self.service_tickets)} service tickets, {len(self.ticket_comments)} comments, "
+              f"{len(self.ticket_attachments)} attachments, {len(self.ticket_escalations)} escalations "
+              f"via PARALLEL processing in {elapsed:.2f}s")
+    
+    def _generate_service_day_data_local(self, ticket_date: datetime, ticket_counter: int,
+                                        comment_counter: int, attach_counter: int, esc_counter: int,
+                                        valid_customer_ids: List[str], valid_employee_ids: List[str]) -> Dict:
+        """Generate all service data for a single day (local/chunk version)"""
+        day_tickets = []
+        day_comments = []
+        day_attachments = []
+        day_escalations = []
+        
+        local_ticket_counter = ticket_counter
+        local_comment_counter = comment_counter
+        local_attach_counter = attach_counter
+        local_esc_counter = esc_counter
+        
+        # Generate tickets for this day
+        tickets_today = random.randint(*TICKETS_PER_DAY)
+        
+        for _ in range(tickets_today):
+            # Create ticket with complete logic
+            selected_queue = random.choice(self.service_queues) if self.service_queues else {'queue_id': 'QUE-000001'}
+            queue_id = selected_queue['queue_id']
+            
+            priority = random.choice(['critical', 'urgent', 'high', 'medium', 'low'])
+            status = random.choice(['new', 'assigned', 'in_progress', 'pending_customer', 'on_hold', 'resolved', 'closed'])
+            category = random.choice(['technical', 'billing', 'delivery', 'quality', 'installation', 'training'])
+            
+            # SLA based on priority
+            sla_hours = {'critical': 4, 'urgent': 6, 'high': 8, 'medium': 24, 'low': 48}[priority]
+            
+            # Response and resolution timestamps
+            response_due = ticket_date + timedelta(hours=1)
+            resolution_due = ticket_date + timedelta(hours=sla_hours)
+            
+            first_response_datetime = None
+            resolved_datetime = None
+            closed_datetime = None
+            response_sla_breached = False
+            resolution_sla_breached = False
+            
+            # Simulate response time
+            if random.random() > 0.15:  # 85% get first response
+                first_response_minutes = random.randint(5, sla_hours * 30)
+                first_response_datetime = (ticket_date + timedelta(minutes=first_response_minutes)).strftime('%Y-%m-%d %H:%M:%S')
+                response_sla_breached = first_response_minutes > 60
+            
+            # Simulate resolution - 75% of all tickets get resolution data
+            if random.random() < 0.75 or status in ['resolved', 'closed']:
+                resolution_minutes = random.randint(30, sla_hours * 120)
+                resolved_datetime = (ticket_date + timedelta(minutes=resolution_minutes)).strftime('%Y-%m-%d %H:%M:%S')
+                resolution_sla_breached = resolution_minutes > (sla_hours * 60)
                 
-                # SLA based on priority
-                sla_hours = {'critical': 4, 'urgent': 6, 'high': 8, 'medium': 24, 'low': 48}[priority]
-                
-                # Response and resolution timestamps
-                response_due = ticket_date + timedelta(hours=1)
-                resolution_due = ticket_date + timedelta(hours=sla_hours)
-                
-                first_response_datetime = None
-                resolved_datetime = None
-                closed_datetime = None
-                response_sla_breached = False
-                resolution_sla_breached = False
-                
-                # Simulate response time
-                if random.random() > 0.15:  # 85% get first response
-                    first_response_minutes = random.randint(5, sla_hours * 30)
-                    first_response_datetime = (ticket_date + timedelta(minutes=first_response_minutes)).strftime('%Y-%m-%d %H:%M:%S')
-                    response_sla_breached = first_response_minutes > 60
-                
-                # Simulate resolution - 75% of all tickets get resolution data
-                # This ensures rich data for analytics even for open tickets
-                if random.random() < 0.75 or status in ['resolved', 'closed']:
-                    resolution_minutes = random.randint(30, sla_hours * 120)
-                    resolved_datetime = (ticket_date + timedelta(minutes=resolution_minutes)).strftime('%Y-%m-%d %H:%M:%S')
-                    resolution_sla_breached = resolution_minutes > (sla_hours * 60)
-                    
-                    # 85% of resolved tickets also get closed
-                    if status == 'closed' or (resolved_datetime and random.random() < 0.85):
-                        closed_datetime = (ticket_date + timedelta(minutes=resolution_minutes + random.randint(60, 480))).strftime('%Y-%m-%d %H:%M:%S')
+                # 85% of resolved tickets also get closed
+                if status == 'closed' or (resolved_datetime and random.random() < 0.85):
+                    closed_datetime = (ticket_date + timedelta(minutes=resolution_minutes + random.randint(60, 480))).strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Escalation logic
+            escalation_level = 0
+            escalated_to = None
+            escalated_datetime = None
+            escalation_reason = None
+            
+            # Determine escalation
+            should_escalate = False
+            escalation_trigger = None
+            
+            if priority == 'critical':
+                should_escalate = random.random() < 0.85
+                escalation_trigger = 'critical_priority'
+            elif priority == 'urgent':
+                should_escalate = random.random() < 0.70
+                escalation_trigger = 'urgent_priority'
+            elif priority == 'high':
+                should_escalate = random.random() < 0.50
+                escalation_trigger = 'high_priority'
+            elif response_sla_breached or resolution_sla_breached:
+                should_escalate = random.random() < 0.90
+                escalation_trigger = 'sla_breach'
+            else:
+                should_escalate = random.random() < 0.25
+                escalation_trigger = 'wait_time'
+            
+            if should_escalate:
+                if escalation_trigger in ['critical_priority', 'sla_breach']:
+                    escalation_level = random.choice([2, 3])
+                elif escalation_trigger == 'urgent_priority':
+                    escalation_level = random.choice([1, 2])
                 else:
-                    resolved_datetime = None
-                    closed_datetime = None
-                    resolution_sla_breached = False
+                    escalation_level = 1
                 
-                # FIXED ESCALATION LOGIC - Use escalation rules properly
-                escalation_level = 0
-                escalated_to = None
-                escalated_datetime = None
-                escalation_reason = None
+                escalated_to = random.choice(valid_employee_ids)
+                escalation_hours = random.randint(1, 3) if escalation_trigger == 'critical_priority' else random.randint(2, 6)
+                escalated_datetime = (ticket_date + timedelta(hours=escalation_hours)).strftime('%Y-%m-%d %H:%M:%S')
                 
-                # Determine escalation based on priority and SLA breaches
-                should_escalate = False
-                escalation_trigger = None
-                
-                # Priority-based escalation
-                if priority == 'critical':
-                    should_escalate = random.random() < 0.85  # 85% for critical
-                    escalation_trigger = 'critical_priority'
-                elif priority == 'urgent':
-                    should_escalate = random.random() < 0.70  # 70% for urgent  
-                    escalation_trigger = 'urgent_priority'
-                elif priority == 'high':
-                    should_escalate = random.random() < 0.50  # 50% for high
-                    escalation_trigger = 'high_priority'
-                elif response_sla_breached or resolution_sla_breached:
-                    should_escalate = random.random() < 0.90  # 90% for SLA breach
-                    escalation_trigger = 'sla_breach'
+                if escalation_trigger == 'critical_priority':
+                    escalation_reason = random.choice(['Critical Business Impact', 'System Down', 'Data Loss Risk'])
+                elif escalation_trigger == 'sla_breach':
+                    escalation_reason = random.choice(['SLA Response Breach', 'SLA Resolution Breach', 'Customer Escalation'])
+                elif escalation_trigger == 'urgent_priority':
+                    escalation_reason = random.choice(['High Priority Issue', 'Customer VIP', 'Technical Complexity'])
                 else:
-                    should_escalate = random.random() < 0.25  # 25% for normal cases
-                    escalation_trigger = 'wait_time'
-                
-                if should_escalate:
-                    # Set escalation level based on trigger
-                    if escalation_trigger in ['critical_priority', 'sla_breach']:
-                        escalation_level = random.choice([2, 3])  # Skip level 1 for critical
-                    elif escalation_trigger == 'urgent_priority':
-                        escalation_level = random.choice([1, 2])
-                    else:
-                        escalation_level = 1
-                    
-                    escalated_to = random.choice(valid_employee_ids)
-                    escalation_hours = random.randint(1, 3) if escalation_trigger == 'critical_priority' else random.randint(2, 6)
-                    escalated_datetime = (ticket_date + timedelta(hours=escalation_hours)).strftime('%Y-%m-%d %H:%M:%S')
-                    
-                    # Proper escalation reasons based on trigger
-                    if escalation_trigger == 'critical_priority':
-                        escalation_reason = random.choice(['Critical Business Impact', 'System Down', 'Data Loss Risk'])
-                    elif escalation_trigger == 'sla_breach':
-                        escalation_reason = random.choice(['SLA Response Breach', 'SLA Resolution Breach', 'Customer Escalation'])
-                    elif escalation_trigger == 'urgent_priority':
-                        escalation_reason = random.choice(['High Priority Issue', 'Customer VIP', 'Technical Complexity'])
-                    else:
-                        escalation_reason = random.choice(['Long Wait Time', 'Customer Request', 'Complexity Analysis'])
+                    escalation_reason = random.choice(['Long Wait Time', 'Customer Request', 'Complexity Analysis'])
+            
+            # KB article linkage
+            kb_article = None
+            if resolved_datetime:
+                if category == 'technical':
+                    kb_article = f"KB-{random.randint(100000, 999999)}" if random.random() < 0.95 else None
+                elif category in ['installation', 'training']:
+                    kb_article = f"KB-{random.randint(100000, 999999)}" if random.random() < 0.85 else None
                 else:
-                    # Non-escalated tickets should have minimal escalation metadata
-                    escalation_level = 0
-                    escalated_to = None
-                    escalated_datetime = None
-                    escalation_reason = None
+                    kb_article = f"KB-{random.randint(100000, 999999)}" if random.random() < 0.60 else None
+            else:
+                kb_article = f"KB-{random.randint(100000, 999999)}" if random.random() < 0.30 else None
+            
+            # Handle time and satisfaction
+            if resolved_datetime:
+                base_time = 15 if priority == 'low' else 30 if priority == 'medium' else 60 if priority == 'high' else 90
+                handle_time = random.randint(base_time, base_time * 8)
+            else:
+                handle_time = random.randint(5, 60)
+            
+            csat_rating = None
+            csat_comment = None
+            csat_survey_sent = False
+            csat_survey_sent_datetime = None
+            
+            if resolved_datetime:
+                csat_rating = random.choices([1, 2, 3, 4, 5], weights=[0.05, 0.10, 0.20, 0.30, 0.35])[0]
+                csat_comment = random.choice(['Great support!', 'Problem solved quickly', 'Very helpful', 'Good service', 'Acceptable', 'Met expectations', 'Professional handling'])
+                csat_survey_sent = True
+                csat_survey_sent_datetime = (datetime.strptime(resolved_datetime, '%Y-%m-%d %H:%M:%S') + timedelta(hours=2)).strftime('%Y-%m-%d %H:%M:%S')
+            
+            related_serial = f"SN-{random.randint(100000, 999999)}" if random.random() < 0.80 else None
+            related_order = f"ORD-{random.randint(100000, 999999)}" if random.random() < 0.85 else None
+            
+            reopened_count = 0
+            if status in ['resolved', 'closed'] and random.random() < 0.08:
+                reopened_count = random.randint(1, 3)
+            
+            ticket = {
+                'ticket_id': f"TKT-{str(local_ticket_counter).zfill(6)}",
+                'ticket_number': f"TKT-{local_ticket_counter:08d}",
                 
-                # IMPROVED KB ARTICLE LINKAGE - Based on category and resolution
-                kb_article = None
-                if resolved_datetime:  # Only resolved tickets can reference KB articles
-                    # Higher chance for technical tickets to use KB
-                    if category == 'technical':
-                        kb_article = f"KB-{random.randint(100000, 999999)}" if random.random() < 0.95 else None
-                    elif category in ['installation', 'training']:
-                        kb_article = f"KB-{random.randint(100000, 999999)}" if random.random() < 0.85 else None
-                    else:
-                        kb_article = f"KB-{random.randint(100000, 999999)}" if random.random() < 0.60 else None
-                else:
-                    # Open tickets might reference KB during troubleshooting
-                    kb_article = f"KB-{random.randint(100000, 999999)}" if random.random() < 0.30 else None
+                # Customer Information
+                'account_id': random.choice(self.accounts)['account_id'] if self.accounts else f"ACC-{random.randint(1000, 9999)}",
+                'contact_id': random.choice(self.contacts)['contact_id'] if self.contacts else f"CONTACT-{random.randint(1000, 9999)}",
                 
-                # Handle time based on complexity and resolution
-                if resolved_datetime:
-                    base_time = 15 if priority == 'low' else 30 if priority == 'medium' else 60 if priority == 'high' else 90
-                    handle_time = random.randint(base_time, base_time * 8)
-                else:
-                    handle_time = random.randint(5, 60)  # Shorter for unresolved
+                # Ticket Source
+                'channel': random.choice(['phone', 'email', 'chat', 'web_portal', 'social_media', 'walk_in']),
+                'source_reference': f"REF-{random.randint(100000, 999999)}",
                 
-                # Satisfaction rating for all resolved records - significantly increased
-                csat_rating = None
-                csat_comment = None
-                csat_survey_sent = False
-                csat_survey_sent_datetime = None
+                # Classification
+                'ticket_type': random.choice(['incident', 'service_request', 'question', 'complaint', 'feedback']),
+                'category': category,
+                'subcategory': random.choice(['software', 'hardware', 'documentation', 'account', 'performance']),
+                'product_category': random.choice(['Electronics', 'Machinery', 'Software', 'Consumables']),
                 
-                if resolved_datetime:  # Always send survey for resolved tickets
-                    csat_rating = random.choices([1, 2, 3, 4, 5], weights=[0.05, 0.10, 0.20, 0.30, 0.35])[0]  # Weighted toward higher ratings
-                    csat_comment = random.choice(['Great support!', 'Problem solved quickly', 'Very helpful', 'Good service', 'Acceptable', 'Met expectations', 'Professional handling'])
-                    csat_survey_sent = True
-                    # resolved_datetime is already a string, add hours to ticket_date instead
-                    csat_survey_sent_datetime = (datetime.strptime(resolved_datetime, '%Y-%m-%d %H:%M:%S') + timedelta(hours=2)).strftime('%Y-%m-%d %H:%M:%S')
+                # Issue Details
+                'subject': random.choice(['Product defect', 'Technical issue', 'Billing inquiry', 'Installation help', 'Performance concern']),
+                'description': 'Detailed problem description with context and troubleshooting steps attempted',
                 
-                # Increase related serial number generation
-                related_serial = f"SN-{random.randint(100000, 999999)}" if random.random() < 0.80 else None
-                related_order = f"ORD-{random.randint(100000, 999999)}" if random.random() < 0.85 else None
+                # Priority
+                'priority': priority,
+                'priority_reason': f"Priority set based on {['impact', 'urgency', 'customer_value', 'sla'][random.randint(0,3)]}",
                 
-                reopened_count = 0
-                if status in ['resolved', 'closed'] and random.random() < 0.08:  # 8% reopen rate
-                    reopened_count = random.randint(1, 3)
+                # Status
+                'ticket_status': status,
+                'status_reason': random.choice(['In Queue', 'Being Resolved', 'Awaiting Customer', 'On Hold', 'Resolved Successfully']) if status != 'new' else None,
                 
-                ticket = {
-                    'ticket_id': self.generate_id('TKT', 'ticket'),
-                    'ticket_number': f"TKT-{global_ticket_counter:08d}",
-                    
-                    # Customer Information
-                    'account_id': random.choice(self.accounts)['account_id'] if self.accounts else f"ACC-{random.randint(1000, 9999)}",
-                    'contact_id': random.choice(self.contacts)['contact_id'] if self.contacts else f"CONTACT-{random.randint(1000, 9999)}",
-                    
-                    # Ticket Source
-                    'channel': random.choice(['phone', 'email', 'chat', 'web_portal', 'social_media', 'walk_in']),
-                    'source_reference': f"REF-{random.randint(100000, 999999)}",
-                    
-                    # Classification
-                    'ticket_type': random.choice(['incident', 'service_request', 'question', 'complaint', 'feedback']),
-                    'category': random.choice(['technical', 'billing', 'delivery', 'quality', 'installation', 'training']),
-                    'subcategory': random.choice(['software', 'hardware', 'documentation', 'account', 'performance']),
-                    'product_category': random.choice(['Electronics', 'Machinery', 'Software', 'Consumables']),
-                    
-                    # Issue Details
-                    'subject': random.choice(['Product defect', 'Technical issue', 'Billing inquiry', 'Installation help', 'Performance concern']),
-                    'description': 'Detailed problem description with context and troubleshooting steps attempted',
-                    
-                    # Priority
-                    'priority': priority,
-                    'priority_reason': f"Priority set based on {['impact', 'urgency', 'customer_value', 'sla'][random.randint(0,3)]}",
-                    
-                    # Status
-                    'ticket_status': status,
-                    'status_reason': random.choice(['In Queue', 'Being Resolved', 'Awaiting Customer', 'On Hold', 'Resolved Successfully']) if status != 'new' else None,
-                    
-                    # Related Records
-                    'related_order_id': related_order,
-                    'related_product': random.choice(self.products)['product_name'] if self.products else 'Product A',
-                    'related_serial_number': related_serial,
-                    
-                    # SLA Tracking
-                    'sla_id': random.choice(self.sla_definitions)['sla_id'] if self.sla_definitions else 'SLA-000001',
-                    'response_due_datetime': response_due.strftime('%Y-%m-%d %H:%M:%S'),
-                    'resolution_due_datetime': resolution_due.strftime('%Y-%m-%d %H:%M:%S'),
-                    
-                    'first_response_datetime': first_response_datetime,
-                    'resolved_datetime': resolved_datetime,
-                    'closed_datetime': closed_datetime,
-                    
-                    'response_sla_breached': response_sla_breached,
-                    'resolution_sla_breached': resolution_sla_breached,
-                    
-                    # Assignment
-                    'assigned_to': random.choice(valid_employee_ids),
-                    'assigned_team': random.choice(self.service_teams)['team_id'] if self.service_teams else 'STM-000001',
-                    'assigned_datetime': (ticket_date + timedelta(minutes=random.randint(5, 120))).strftime('%Y-%m-%d %H:%M:%S'),
-                    
-                    # Routing
-                    'routed_to_queue': queue_id,
-                    
-                    # Escalation
-                    'escalation_level': escalation_level,
+                # Related Records
+                'related_order_id': related_order,
+                'related_product': random.choice(self.products)['product_name'] if self.products else 'Product A',
+                'related_serial_number': related_serial,
+                
+                # SLA Tracking
+                'sla_id': random.choice(self.sla_definitions)['sla_id'] if self.sla_definitions else 'SLA-000001',
+                'response_due_datetime': response_due.strftime('%Y-%m-%d %H:%M:%S'),
+                'resolution_due_datetime': resolution_due.strftime('%Y-%m-%d %H:%M:%S'),
+                
+                'first_response_datetime': first_response_datetime,
+                'resolved_datetime': resolved_datetime,
+                'closed_datetime': closed_datetime,
+                
+                'response_sla_breached': response_sla_breached,
+                'resolution_sla_breached': resolution_sla_breached,
+                
+                # Assignment
+                'assigned_to': random.choice(valid_employee_ids),
+                'assigned_team': random.choice(self.service_teams)['team_id'] if self.service_teams else 'STM-000001',
+                'assigned_datetime': (ticket_date + timedelta(minutes=random.randint(5, 120))).strftime('%Y-%m-%d %H:%M:%S'),
+                
+                # Routing
+                'routed_to_queue': queue_id,
+                
+                # Escalation
+                'escalation_level': escalation_level,
+                'escalated_to': escalated_to,
+                'escalated_datetime': escalated_datetime,
+                'escalation_reason': escalation_reason,
+                
+                # Resolution
+                'resolution_summary': 'Issue was resolved by...' if resolved_datetime else None,
+                'root_cause': random.choice(['Hardware Failure', 'Configuration Error', 'User Error', 'Software Bug']) if resolved_datetime else None,
+                'resolution_code': random.choice(self.resolution_codes)['code_id'] if self.resolution_codes else 'RES-000001',
+                
+                # Customer Satisfaction
+                'csat_rating': csat_rating,
+                'csat_comment': csat_comment,
+                'csat_survey_sent': csat_survey_sent,
+                'csat_survey_sent_datetime': csat_survey_sent_datetime,
+                
+                # Knowledge Base Link
+                'kb_article_used': kb_article,
+                
+                # Metrics
+                'first_response_time_minutes': int((datetime.fromisoformat(first_response_datetime.replace(' ', 'T')) - ticket_date).total_seconds() / 60) if first_response_datetime else None,
+                'resolution_time_minutes': int((datetime.fromisoformat(resolved_datetime.replace(' ', 'T')) - ticket_date).total_seconds() / 60) if resolved_datetime else None,
+                'handle_time_minutes': handle_time,
+                'reopened_count': reopened_count,
+                
+                # Tags
+                'tags': json.dumps(random.sample(['urgent', 'vip', 'external', 'internal', 'escalated'], random.randint(1, 3))),
+                
+                'created_by': random.choice(self.contacts)['contact_id'] if self.contacts else f"CONTACT-{random.randint(1000, 9999)}",
+                'created_at': ticket_date.strftime('%Y-%m-%d %H:%M:%S'),
+                'updated_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            day_tickets.append(ticket)
+            
+            # Generate comments for this ticket (80% chance)
+            if random.random() < 0.80:
+                num_comments = random.randint(1, 4)
+                for i in range(num_comments):
+                    comment = {
+                        'comment_id': f"CMNT-{str(local_comment_counter).zfill(6)}",
+                        'ticket_id': ticket['ticket_id'],
+                        'comment_text': f"Comment {i+1} on ticket {ticket['ticket_number']}",
+                        'is_public': random.choice([True, False]),
+                        'comment_type': random.choice(['internal', 'customer', 'system']),
+                        'created_by': random.choice(valid_employee_ids),
+                        'created_at': (ticket_date + timedelta(hours=random.randint(1, 24))).strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    day_comments.append(comment)
+                    local_comment_counter += 1
+            
+            # Generate attachments for this ticket (30% chance)
+            if random.random() < 0.30:
+                num_attachments = random.randint(1, 2)
+                for i in range(num_attachments):
+                    attachment = {
+                        'attachment_id': f"ATT-{str(local_attach_counter).zfill(6)}",
+                        'ticket_id': ticket['ticket_id'],
+                        'filename': f"attachment_{i+1}.pdf",
+                        'file_size': random.randint(1000, 5000000),
+                        'file_type': random.choice(['pdf', 'jpg', 'doc', 'txt']),
+                        'uploaded_by': random.choice(valid_employee_ids),
+                        'uploaded_at': (ticket_date + timedelta(hours=random.randint(1, 12))).strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    day_attachments.append(attachment)
+                    local_attach_counter += 1
+            
+            # Generate escalation record if ticket was escalated
+            if should_escalate and escalated_to:
+                escalation = {
+                    'escalation_id': f"ESC-{str(local_esc_counter).zfill(6)}",
+                    'ticket_id': ticket['ticket_id'],
+                    'escalated_from': ticket['assigned_to'],
                     'escalated_to': escalated_to,
-                    'escalated_datetime': escalated_datetime,
+                    'escalation_level': escalation_level,
                     'escalation_reason': escalation_reason,
-                    
-                    # Resolution
-                    'resolution_summary': 'Issue was resolved by...' if resolved_datetime else None,
-                    'root_cause': random.choice(['Hardware Failure', 'Configuration Error', 'User Error', 'Software Bug']) if resolved_datetime else None,
-                    'resolution_code': random.choice(self.resolution_codes)['code_id'] if self.resolution_codes else 'RES-000001',
-                    
-                    # Customer Satisfaction
-                    'csat_rating': csat_rating,
-                    'csat_comment': csat_comment,
-                    'csat_survey_sent': csat_survey_sent,
-                    'csat_survey_sent_datetime': csat_survey_sent_datetime,
-                    
-                    # Knowledge Base Link
-                    'kb_article_used': kb_article,
-                    
-                    # Metrics
-                    'first_response_time_minutes': int((datetime.fromisoformat(first_response_datetime.replace(' ', 'T')) - ticket_date).total_seconds() / 60) if first_response_datetime else None,
-                    'resolution_time_minutes': int((datetime.fromisoformat(resolved_datetime.replace(' ', 'T')) - ticket_date).total_seconds() / 60) if resolved_datetime else None,
-                    'handle_time_minutes': handle_time,
-                    'reopened_count': reopened_count,
-                    
-                    # Tags
-                    'tags': json.dumps(random.sample(['urgent', 'vip', 'external', 'internal', 'escalated'], random.randint(1, 3))),
-                    
-                    'created_by': random.choice(self.contacts)['contact_id'] if self.contacts else f"CONTACT-{random.randint(1000, 9999)}",
-                    'created_at': ticket_date.strftime('%Y-%m-%d %H:%M:%S'),
-                    'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    'escalated_datetime': escalated_datetime,
+                    'escalation_notes': f"Escalated due to {escalation_trigger}",
+                    'escalated_by': ticket['assigned_to'],
+                    'created_at': self.time_coord.get_current_time().strftime('%Y-%m-%d %H:%M:%S')
                 }
-                self.service_tickets.append(ticket)
+                day_escalations.append(escalation)
+                local_esc_counter += 1
+            
+            local_ticket_counter += 1
         
-        print(f"Generated {len(self.service_tickets)} service tickets")
+        return {
+            'tickets': day_tickets,
+            'comments': day_comments,
+            'attachments': day_attachments,
+            'escalations': day_escalations
+        }
     
     def generate_ticket_comments(self):
         """Generate ticket comments"""
@@ -875,12 +1011,11 @@ class ServiceDataGenerator:
             rma = {
                 'rma_id': self.generate_id('RMA', 'rma'),
                 'rma_number': f"RMA-{i+1:06d}",
-                'customer_id': random.choice(self.customers)['customer_id'] if self.customers else f"CUST-{random.randint(1000, 9999)}",
-                'request_date': (datetime.now() - timedelta(days=random.randint(1, 90))).strftime('%Y-%m-%d'),
+                'account_id': random.choice(self.accounts)['account_id'] if self.accounts else f"ACC-{random.randint(1, 9999):06d}",
+                'contact_id': random.choice(self.contacts)['contact_id'] if self.contacts else None,
                 'return_reason': random.choice(['Defective', 'Wrong item', 'Not working', 'Damaged']),
-                'status': random.choice(['approved', 'pending', 'completed']),
-                'approval_date': (datetime.now() - timedelta(days=random.randint(1, 30))).strftime('%Y-%m-%d'),
-                'rma_status': random.choice(['open', 'in_transit', 'received', 'closed']),
+                'rma_status': random.choice(['requested', 'approved', 'received', 'processing', 'completed']),
+                'approved': random.choice([True, False]),
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             self.rma_requests.append(rma)
@@ -893,17 +1028,20 @@ class ServiceDataGenerator:
         
         for rma in self.rma_requests:
             # 1-3 items per RMA
-            for _ in range(random.randint(1, 3)):
+            for j in range(random.randint(1, 3)):
+                product = random.choice(self.products) if self.products else None
                 item = {
-                    'line_item_id': self.generate_id('RMALI', 'rma_line'),
+                    'rma_line_id': self.generate_id('RMALI', 'rma_line'),
                     'rma_id': rma['rma_id'],
-                    'product_id': random.choice(self.products)['product_id'] if self.products else f"PRD-{random.randint(1000, 9999)}",
-                    'quantity': random.randint(1, 5),
-                    'unit_price': round(random.uniform(1000, 50000), 2),
-                    'total_value': round(random.uniform(5000, 100000), 2),
-                    'condition': random.choice(['damaged', 'defective', 'working']),
-                    'inspection_notes': 'Product inspection results',
-                    'replacement_status': random.choice(['pending', 'shipped', 'completed']),
+                    'line_number': j + 1,
+                    'material_id': product['product_id'] if product else None,
+                    'product_name': product['product_name'] if product else f"Product {j+1}",
+                    'quantity_returned': random.randint(1, 5),
+                    'original_unit_price': round(random.uniform(1000, 50000), 4),
+                    'refund_unit_price': round(random.uniform(1000, 50000), 4),
+                    'line_total_refund': round(random.uniform(5000, 100000), 2),
+                    'condition_on_return': random.choice(['damaged', 'defective', 'good']),
+                    'disposition': random.choice(['restock', 'repair', 'scrap', 'return_to_vendor']),
                     'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
                 self.rma_line_items.append(item)
@@ -927,14 +1065,15 @@ class ServiceDataGenerator:
                 appointment = {
                     'appointment_id': self.generate_id('APPT', 'appt'),
                     'appointment_number': f"APPT-{self.counters['appt']-1:06d}",
-                    'customer_id': random.choice(self.customers)['customer_id'] if self.customers else f"CUST-{random.randint(1000, 9999)}",
+                    'account_id': random.choice(self.accounts)['account_id'] if self.accounts else f"ACC-{random.randint(1, 9999):06d}",
+                    'contact_id': random.choice(self.contacts)['contact_id'] if self.contacts else None,
                     'ticket_id': random.choice(self.service_tickets)['ticket_id'] if self.service_tickets else f"TKT-{random.randint(1000, 9999)}",
-                    'technician_id': random.choice(self.field_technicians)['technician_id'] if self.field_technicians else 'TECH-000001',
+                    'assigned_technician_id': random.choice(self.field_technicians)['technician_id'] if self.field_technicians else 'TECH-000001',
                     'appointment_date': appt_date.strftime('%Y-%m-%d'),
-                    'appointment_time': f"{random.randint(8, 17):02d}:{random.randint(0, 59):02d}",
-                    'duration_minutes': random.choice([30, 60, 90, 120]),
-                    'appointment_status': random.choice(['scheduled', 'completed', 'no_show']),
-                    'service_location': 'Customer location',
+                    'scheduled_start_time': f"{random.randint(8, 17):02d}:{random.randint(0, 59):02d}",
+                    'estimated_duration_minutes': random.choice([30, 60, 90, 120]),
+                    'appointment_status': random.choice(['scheduled', 'confirmed', 'completed', 'no_show']),
+                    'service_type': random.choice(['installation', 'repair', 'maintenance', 'inspection']),
                     'notes': 'Service appointment notes',
                     'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
@@ -955,15 +1094,15 @@ class ServiceDataGenerator:
         for part in parts:
             for i in range(random.randint(3, 8)):
                 sp = {
-                    'part_id': self.generate_id('PART', 'part'),
+                    'service_part_id': self.generate_id('PART', 'part'),
                     'part_number': f"SP-{self.counters['part']-1:06d}",
                     'part_name': f"{part} - Variant {i+1}",
-                    'part_category': 'mechanical' if 'Bearing' in part or 'Pump' in part else 'electrical',
-                    'unit_cost': round(random.uniform(500, 50000), 2),
-                    'stock_quantity': random.randint(5, 100),
-                    'reorder_level': random.randint(5, 20),
-                    'supplier': random.choice(['Supplier A', 'Supplier B', 'Supplier C']),
-                    'part_status': 'active',
+                    'part_category': random.choice(['consumable', 'repairable', 'replacement']),
+                    'part_type': 'mechanical' if 'Bearing' in part or 'Pump' in part else 'electrical',
+                    'standard_cost': round(random.uniform(500, 50000), 4),
+                    'service_price': round(random.uniform(750, 75000), 4),
+                    'current_stock': random.randint(5, 100),
+                    'min_stock_level': random.randint(5, 20),
                     'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
                 self.service_parts.append(sp)
@@ -978,13 +1117,15 @@ class ServiceDataGenerator:
             if random.random() > 0.5:
                 # 1-2 parts used per appointment
                 for _ in range(random.randint(1, 2)):
+                    part = random.choice(self.service_parts) if self.service_parts else None
                     usage = {
                         'usage_id': self.generate_id('USAGE', 'usage'),
+                        'service_part_id': part['service_part_id'] if part else None,
                         'appointment_id': appointment['appointment_id'],
-                        'part_id': random.choice(self.service_parts)['part_id'],
                         'quantity_used': random.randint(1, 5),
+                        'unit_cost': part.get('standard_cost', 1000) if part else 1000,
+                        'usage_type': random.choice(['field_service', 'repair', 'warranty']),
                         'usage_date': appointment['appointment_date'],
-                        'usage_status': 'issued',
                         'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     }
                     self.service_parts_usage.append(usage)
@@ -1048,14 +1189,13 @@ class ServiceDataGenerator:
         for i in range(100):
             feedback = {
                 'feedback_id': self.generate_id('FBCK', 'feedback'),
-                'feedback_number': f"FBCK-{i+1:06d}",
-                'customer_id': random.choice(self.customers)['customer_id'] if self.customers else f"CUST-{random.randint(1000, 9999)}",
-                'feedback_date': (datetime.now() - timedelta(days=random.randint(1, 180))).strftime('%Y-%m-%d'),
-                'feedback_type': random.choice(['product', 'service', 'support']),
-                'feedback_sentiment': random.choice(['positive', 'neutral', 'negative']),
+                'account_id': random.choice(self.accounts)['account_id'] if self.accounts else f"ACC-{random.randint(1, 9999):06d}",
+                'contact_id': random.choice(self.contacts)['contact_id'] if self.contacts else None,
+                'feedback_type': random.choice(['compliment', 'complaint', 'suggestion', 'review']),
                 'feedback_text': 'Detailed customer feedback',
-                'rating': random.randint(1, 5),
-                'action_taken': random.choice(['Yes', 'No', 'Pending']),
+                'overall_rating': random.randint(1, 5),
+                'feedback_status': random.choice(['submitted', 'acknowledged', 'under_review', 'addressed']),
+                'sentiment': random.choice(['positive', 'neutral', 'negative']),
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             self.customer_feedback.append(feedback)
@@ -1072,14 +1212,15 @@ class ServiceDataGenerator:
         
         for i in range(50):
             user = {
-                'user_id': self.generate_id('PUSER', 'portal'),
+                'portal_user_id': self.generate_id('PUSER', 'portal'),
+                'account_id': random.choice(self.accounts)['account_id'] if self.accounts else f"ACC-{random.randint(1, 9999):06d}",
+                'contact_id': random.choice(self.contacts)['contact_id'] if self.contacts else None,
                 'username': f"user{i+1}",
                 'email': f"user{i+1}@company.com",
-                'contact_id': random.choice(self.contacts)['contact_id'] if self.contacts else f"CONTACT-{random.randint(1000, 9999)}",
-                'account_id': random.choice(self.accounts)['account_id'] if self.accounts else f"ACC-{random.randint(1000, 9999)}",
-                'user_role': random.choice(['customer', 'admin', 'technician']),
-                'last_login_date': (datetime.now() - timedelta(days=random.randint(1, 30))).strftime('%Y-%m-%d'),
-                'user_status': random.choice(['active', 'inactive']),
+                'user_status': random.choice(['active', 'locked', 'suspended']),
+                'last_login_datetime': (datetime.now() - timedelta(days=random.randint(1, 30))).strftime('%Y-%m-%d %H:%M:%S'),
+                'login_count': random.randint(1, 100),
+                'email_verified': random.choice([True, False]),
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
             self.portal_users.append(user)

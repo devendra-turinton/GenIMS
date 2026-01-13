@@ -38,8 +38,11 @@ PG_TMS_DB = os.getenv('DB_TMS', 'genims_tms_db')
 
 WMS_BATCH_SIZE = 5000
 TMS_BATCH_SIZE = 5000
-WMS_TOTAL_RECORDS = 28800
-TMS_TOTAL_RECORDS = 5760
+# Aligned with ERP volume (150-300 sales orders/day) and warehouse capacity (12 warehouses)
+# WMS: Inbound (80-150/day) + Outbound waves (60-120/day) + picking tasks (~200-400/day) = ~400-700 total
+WMS_TOTAL_RECORDS = 550  # Daily WMS operations (receiving + waves + picking tasks)
+# TMS: Shipments (~20-40/day) + Tracking events (~80-160/day) + Routes (~15-30/day) = ~120-240 total  
+TMS_TOTAL_RECORDS = 180  # Daily TMS operations (aligned with sales order volume)
 
 # Logging
 log_dir = os.getenv('DAEMON_LOG_DIR', os.path.join(os.path.dirname(__file__), '..', '..', 'logs'))
@@ -465,11 +468,13 @@ def main():
     sim_base_time = datetime.strptime(datetime.now().strftime('%Y-%m-%d 00:00:00'), '%Y-%m-%d %H:%M:%S')
     run_timestamp = datetime.now().strftime('%Y%m%d%H%M%S')  # Unique per run
     
-    # Generate WMS records with FK validation and time coordination
+    # Generate WMS records with FK validation and realistic daily timing
     logger.info(f"Starting WMS generation: {WMS_TOTAL_RECORDS:,} records expected")
     for i in range(WMS_TOTAL_RECORDS):
-        timestamp_offset = i * 300  # 5 minutes per record
-        current_ts = sim_base_time + timedelta(seconds=timestamp_offset)
+        # Spread operations across 10-hour business day (8 AM - 6 PM)
+        business_hours_minutes = 10 * 60  # 600 minutes
+        minute_offset = (i * business_hours_minutes) // WMS_TOTAL_RECORDS
+        current_ts = sim_base_time.replace(hour=8) + timedelta(minutes=minute_offset)
         
         warehouse_id = random.choice(master_data['warehouses'])
         
@@ -488,17 +493,18 @@ def main():
             if len(valid_material_ids) < 10:
                 stats['fk_validation_errors'] += 1
         
-        # Pick waves (1 per 100 records) with capacity management
-        if i % 100 == 0:
-            wave_id = f"WAVE-{(counters['wave'] + i // 100):06d}"
-            total_orders = random.randint(3, 10)
+        # Pick waves (daily target: 60-120 waves across all warehouses = ~15 per warehouse)
+        # Generate wave every ~35-40 records to achieve ~15 waves per day
+        if i % 35 == 0:
+            wave_id = f"WAVE-{(counters['wave'] + i // 35):06d}"
+            total_orders = random.randint(3, 8)  # Reduced from 3-10 for better distribution
             
             # Wave capacity check - limit concurrent waves
             wave_capacity_factor = min(1.0, 100.0 / total_orders)  # Reduce load if too many orders
             
             pick_waves.append({
                 'wave_id': wave_id,
-                'wave_number': f"WAVE-{run_timestamp}-{i // 100:04d}",
+                'wave_number': f"WAVE-{run_timestamp}-{i // 35:04d}",
                 'warehouse_id': warehouse_id,
                 'wave_type': 'batch',
                 'planned_pick_date': current_ts.date(),
@@ -512,15 +518,16 @@ def main():
             })
             stats['wms_tasks_created'] += 1
         
-        # Receiving tasks (1 per 200 records) with inventory validation
-        if i % 200 == 0:
-            task_id = f"RCV-{(counters['receiving_task'] + i // 200):06d}"
+        # Receiving tasks (daily target: 80-150 tasks across all warehouses = ~25 per warehouse)  
+        # Generate receiving every ~20 records to achieve ~25-30 receiving tasks per day
+        if i % 20 == 0:
+            task_id = f"RCV-{(counters['receiving_task'] + i // 20):06d}"
             expected_qty = random.randint(100, 1000)
             received_qty = random.randint(int(expected_qty * 0.8), expected_qty)  # 80-100% receipt rate
             
             receiving_tasks.append({
                 'receiving_task_id': task_id,
-                'task_number': f"RCV-{run_timestamp}-{i // 200:04d}",
+                'task_number': f"RCV-{run_timestamp}-{i // 20:04d}",
                 'warehouse_id': warehouse_id,
                 'material_id': material_id,
                 'expected_quantity': expected_qty,
@@ -533,9 +540,10 @@ def main():
             })
             stats['wms_tasks_created'] += 1
         
-        # Picking tasks (1 per 50 records) with inventory consistency
-        if i % 50 == 0:
-            task_id = f"PICK-{(counters['picking_task'] + i // 50):06d}"
+        # Picking tasks (daily target: 200-400 tasks across all warehouses = ~80 per warehouse)
+        # Generate picking every ~7 records to achieve ~80 picking tasks per day  
+        if i % 7 == 0:
+            task_id = f"PICK-{(counters['picking_task'] + i // 7):06d}"
             quantity_to_pick = random.randint(10, 100)
             
             # Inventory consistency check
@@ -544,7 +552,7 @@ def main():
                 
                 picking_tasks.append({
                     'picking_task_id': task_id,
-                    'task_number': f"PICK-{run_timestamp}-{i // 50:04d}",
+                    'task_number': f"PICK-{run_timestamp}-{i // 7:04d}",
                     'warehouse_id': warehouse_id,
                     'material_id': material_id,
                     'quantity_to_pick': quantity_to_pick,
@@ -557,10 +565,11 @@ def main():
                 })
                 stats['wms_tasks_created'] += 1
         
-        # Packing tasks (1 per 75 records) with sales order validation
-        if i % 75 == 0:
-            task_id = f"PACK-{(counters['packing_task'] + i // 75):06d}"
-            sales_order_id = f"SO-{(counters['sales_order'] + i // 75):06d}"
+        # Packing tasks (daily target: 100-200 tasks = ~50 per warehouse)
+        # Generate packing every ~12 records to achieve ~45 packing tasks per day
+        if i % 12 == 0:
+            task_id = f"PACK-{(counters['packing_task'] + i // 12):06d}"
+            sales_order_id = f"SO-{(counters['sales_order'] + i // 12):06d}"
             
             # FK Validation: Use fallback if sales order doesn't exist in ERP
             if valid_sales_order_ids and len(valid_sales_order_ids) > 0 and sales_order_id not in valid_sales_order_ids:
@@ -573,7 +582,7 @@ def main():
             package_weight = round(random.uniform(1, 50), 2)
             packing_tasks.append({
                 'packing_task_id': task_id,
-                'task_number': f"PACK-{run_timestamp}-{i // 75:04d}",
+                'task_number': f"PACK-{run_timestamp}-{i // 12:04d}",
                 'sales_order_id': sales_order_id,
                 'warehouse_id': warehouse_id,
                 'packing_station': f"Station-{random.randint(1, 5)}",
@@ -585,10 +594,11 @@ def main():
             })
             stats['wms_tasks_created'] += 1
         
-        # Shipping tasks (1 per 150 records) with inventory tracking
-        if i % 150 == 0:
-            task_id = f"SHIP-{(counters['shipping_task'] + i // 150):06d}"
-            sales_order_id = f"SO-{(counters['sales_order'] + i // 150):06d}"
+        # Shipping tasks (daily target: 60-120 tasks = ~30 per warehouse)
+        # Generate shipping every ~18 records to achieve ~30 shipping tasks per day
+        if i % 18 == 0:
+            task_id = f"SHIP-{(counters['shipping_task'] + i // 18):06d}"
+            sales_order_id = f"SO-{(counters['sales_order'] + i // 18):06d}"
             
             # Optimized FK Validation: Use valid sales order with minimal error counting
             if valid_sales_order_ids and sales_order_id not in valid_sales_order_ids:
@@ -604,7 +614,7 @@ def main():
             
             shipping_tasks.append({
                 'shipping_task_id': task_id,
-                'task_number': f"SHIP-{run_timestamp}-{i // 150:04d}",
+                'task_number': f"SHIP-{run_timestamp}-{i // 18:04d}",
                 'sales_order_id': sales_order_id,
                 'warehouse_id': warehouse_id,
                 'shipping_dock': f"Dock-{random.randint(1, 3)}",
@@ -618,19 +628,22 @@ def main():
             })
             stats['wms_tasks_created'] += 1
         
-        if (i + 1) % 1000 == 0:
+        if (i + 1) % 100 == 0:
             logger.info(f"  Generated {i + 1:,} / {WMS_TOTAL_RECORDS:,} WMS records")
     
-    # Generate TMS records with time coordination and FK validation  
+    # Generate TMS records with realistic daily timing and FK validation  
     logger.info(f"Starting TMS generation: {TMS_TOTAL_RECORDS:,} records expected")
     for i in range(TMS_TOTAL_RECORDS):
-        timestamp_offset = i * 15  # 15 second intervals for real-time tracking
-        current_ts = sim_base_time + timedelta(seconds=timestamp_offset)
+        # Spread TMS operations across 12-hour period (6 AM - 6 PM for shipment tracking)
+        business_hours_minutes = 12 * 60  # 720 minutes
+        minute_offset = (i * business_hours_minutes) // TMS_TOTAL_RECORDS
+        current_ts = sim_base_time.replace(hour=6) + timedelta(minutes=minute_offset)
         
-        # Shipments (1 per 10 records) with enhanced tracking
+        # Shipments (daily target: 20-40 shipments across all warehouses)
+        # Generate shipment every ~6 records to achieve ~30 shipments per day
         shipment_id = None
-        if i % 10 == 0:
-            shipment_id = f"SHPM-{(counters['shipment'] + i // 10):06d}"
+        if i % 6 == 0:
+            shipment_id = f"SHPM-{(counters['shipment'] + i // 6):06d}"
             carrier_id = random.choice(carrier_ids) if carrier_ids else 'CAR-000001'
             
             # Generate realistic delivery dates based on distance/service
@@ -649,11 +662,11 @@ def main():
             
             shipments.append({
                 'shipment_id': shipment_id,
-                'shipment_number': f"SHPM-{run_timestamp}-{i // 10:04d}",
+                'shipment_number': f"SHPM-{run_timestamp}-{i // 6:04d}",
                 'warehouse_id': warehouse_id,
                 'carrier_id': carrier_id,
-                'tracking_number': f"TRK-{current_ts.strftime('%Y%m%d%H%M%S')}-{i // 10:04d}",
-                'bol_number': f"BOL-{current_ts.strftime('%Y%m%d')}-{i // 10:04d}",
+                'tracking_number': f"TRK-{current_ts.strftime('%Y%m%d%H%M%S')}-{i // 6:04d}",
+                'bol_number': f"BOL-{current_ts.strftime('%Y%m%d')}-{i // 6:04d}",
                 'origin_warehouse_id': warehouse_id,
                 'origin_name': f"Warehouse {warehouse_id}",
                 'origin_city': origin['city'],
@@ -669,13 +682,14 @@ def main():
             stats['tms_shipments_created'] += 1
         else:
             # Link to most recent shipment for tracking events
-            shipment_idx = (i // 10)
+            shipment_idx = (i // 6)
             if shipment_idx < len(shipments):
                 shipment_id = shipments[shipment_idx]['shipment_id']
         
-        # Tracking events (1 per 5 records) with realistic progression
-        if i % 5 == 0:
-            event_id = f"TRK-{(counters['tracking_event'] + i // 5):06d}"
+        # Tracking events (daily target: 80-160 events = ~3-4 events per shipment)
+        # Generate tracking event every ~2 records to achieve ~90 tracking events per day
+        if i % 2 == 0:
+            event_id = f"TRK-{(counters['tracking_event'] + i // 2):06d}"
             
             # Realistic event progression based on time
             hours_since_shipment = (current_ts - sim_base_time).total_seconds() / 3600
@@ -700,7 +714,7 @@ def main():
             
             tracking_events.append({
                 'event_id': event_id,
-                'shipment_id': shipment_id or f"SHMP-{(counters['shipment'] + i // 5):06d}",
+                'shipment_id': shipment_id or f"SHPM-{(counters['shipment'] + i // 2):06d}",
                 'event_type': event_type,
                 'event_description': event_descriptions[event_type],
                 'event_location': random.choice(['Origin Hub', 'Transit Hub', 'Destination Hub', 'Delivery Address']),
@@ -709,9 +723,10 @@ def main():
             })
             stats['tms_events_created'] += 1
         
-        # Deliveries (1 per 20 records) with proof of delivery
-        if i % 20 == 0:
-            delivery_id = f"DEL-{(counters['delivery'] + i // 20):06d}"
+        # Deliveries (daily target: 15-30 deliveries = similar to shipment count)
+        # Generate delivery every ~6 records to align with shipment creation
+        if i % 6 == 0:
+            delivery_id = f"DEL-{(counters['delivery'] + i // 6):06d}"
             
             # Delivery success based on event progression
             delivery_success = random.random() < 0.85  # 85% success rate
@@ -719,8 +734,8 @@ def main():
             
             deliveries.append({
                 'delivery_id': delivery_id,
-                'delivery_number': f"DEL-{run_timestamp}-{i // 20:04d}",
-                'shipment_id': shipment_id or f"SHMP-{(counters['shipment'] + i // 20):06d}",
+                'delivery_number': f"DEL-{run_timestamp}-{i // 6:04d}",
+                'shipment_id': shipment_id or f"SHPM-{(counters['shipment'] + i // 6):06d}",
                 'delivery_date': current_ts.date(),
                 'actual_delivery_date': current_ts.date() if delivery_success else None,
                 'delivery_status': 'delivered' if delivery_success else random.choice(['pending', 'failed', 'rescheduled']),
@@ -733,9 +748,10 @@ def main():
             })
             stats['tms_deliveries_created'] += 1
         
-        # Routes (1 per 50 records) with optimized planning
-        if i % 50 == 0:
-            route_id = f"ROUTE-{(counters['route'] + i // 50):06d}"
+        # Routes (daily target: 15-30 routes = similar to shipments)
+        # Generate route every ~6 records to align with shipment/delivery creation
+        if i % 6 == 0:
+            route_id = f"ROUTE-{(counters['route'] + i // 6):06d}"
             
             # Route optimization based on stops and distance
             num_stops = random.randint(5, 25)
@@ -743,7 +759,7 @@ def main():
             
             routes.append({
                 'route_id': route_id,
-                'route_number': f"ROUTE-{run_timestamp}-{i // 50:04d}",
+                'route_number': f"ROUTE-{run_timestamp}-{i // 6:04d}",
                 'route_date': current_ts.date(),
                 'route_type': random.choice(['delivery', 'pickup', 'mixed']),
                 'number_of_stops': num_stops,
@@ -756,7 +772,7 @@ def main():
             })
             stats['tms_routes_created'] += 1
         
-        if (i + 1) % 1000 == 0:
+        if (i + 1) % 100 == 0:
             logger.info(f"  Generated {i + 1:,} / {TMS_TOTAL_RECORDS:,} TMS records")
     
     logger.info("✅ WMS+TMS Data Generation Summary:")

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-GenIMS CMMS Historical Data Generator
-Generates 90 days of maintenance history with referential integrity
+GenIMS CMMS Historical Data Generator with ULTRA-FAST PARALLEL Processing
+Generates 180 days of maintenance history with referential integrity
+Includes ultra-fast parallel processing optimizations
 """
 
 import random
@@ -14,18 +15,26 @@ from pathlib import Path
 import logging
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import multiprocessing
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Add scripts to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 from generator_helper import get_helper
 
+# ULTRA-FAST PARALLEL Configuration
+cpu_count = multiprocessing.cpu_count()
+WORKER_COUNT = min(8, max(4, cpu_count - 2))  # Use 8 workers or available CPUs minus 2
+BATCH_SIZE = 150000  # Large batch size for optimal performance
+
 # Configuration
 DAYS_OF_HISTORY = 180
-ASSETS_PER_FACTORY = 20
-TECHNICIANS_PER_FACTORY = 10
-MRO_PARTS_COUNT = 200
-PM_SCHEDULES_PER_ASSET = 2
-WORK_ORDERS_PER_DAY = (3, 10)
+ASSETS_PER_FACTORY = 80   # Increased from 20 to 80 per factory (4x)
+TECHNICIANS_PER_FACTORY = 40  # Increased from 10 to 40 per factory (4x)
+MRO_PARTS_COUNT = 800     # Increased from 200 to 800 (4x parts catalog)
+PM_SCHEDULES_PER_ASSET = 4  # More preventive maintenance schedules per asset
+WORK_ORDERS_PER_DAY = (150, 300)  # Enterprise maintenance volume (37-75 WOs per factory)
 
 # Database configuration
 PG_HOST = os.getenv('POSTGRES_HOST', 'insights-db.postgres.database.azure.com')
@@ -91,7 +100,16 @@ class CMMSDataGenerator:
             'labor': 1, 'meter': 1, 'failure': 1, 'history': 1
         }
         
+        # ULTRA-FAST PARALLEL Configuration
+        self.worker_count = WORKER_COUNT
+        self.batch_size = BATCH_SIZE
+        self.parallel_enabled = True
+        self.data_lock = threading.Lock()
+        
         logger.info(f"Loaded: {len(self.factories)} factories, {len(self.machines)} machines, {len(self.production_lines)} lines")
+        
+        print(f"🚀 ULTRA-FAST CMMS PARALLEL MODE: {self.worker_count} workers, batch_size={self.batch_size:,}")
+        print(f"   CPU cores available: {cpu_count}, Using {self.worker_count} for generation")
     
     def load_master_data_from_json(self, master_data_file):
         """Load master data from JSON file (preferred during setup)"""
@@ -439,6 +457,7 @@ class CMMSDataGenerator:
             
             part = {
                 'mro_part_id': self.generate_id('MRO', 'part'),
+                'part_id': self.generate_id('MRO', 'part'),  # Add this for compatibility
                 'part_number': f"MRO-{self.counters['part']-1:05d}",
                 'part_name': f"Spare Part {i+1}",
                 'part_category': random.choice(part_categories),
@@ -453,6 +472,7 @@ class CMMSDataGenerator:
                 'reorder_quantity': random.randint(20, 50),
                 'criticality': random.choice(['critical', 'high', 'medium', 'low']),
                 'lead_time_days': random.randint(7, 60),
+                'unit_price': round(random.uniform(100, 10000), 2),  # Add unit_price for compatibility
                 'standard_cost': round(random.uniform(100, 10000), 2),
                 'part_status': 'active',
                 'is_active': True,
@@ -497,8 +517,87 @@ class CMMSDataGenerator:
     # ========================================================================
     
     def generate_maintenance_operations(self, start_date: datetime, days: int):
-        """Generate daily maintenance operations"""
-        print(f"Generating {days} days of maintenance operations...")
+        """Generate daily maintenance operations with ULTRA-FAST PARALLEL processing"""
+        print(f"\nGenerating {days} days of maintenance operations with PARALLEL processing...")
+        
+        # Get valid FK sets for thread-safe access
+        valid_machine_ids = list(self.helper.get_valid_machine_ids())
+        valid_employee_ids = list(self.helper.get_valid_employee_ids())
+        
+        if not self.parallel_enabled or days < 20:
+            return self._generate_maintenance_operations_sequential(start_date, days, valid_machine_ids, valid_employee_ids)
+        
+        # Parallel processing for large datasets
+        chunk_size = max(5, days // self.worker_count)  # At least 5 days per chunk
+        day_chunks = [(i, min(chunk_size, days - i)) for i in range(0, days, chunk_size)]
+        
+        print(f"  🚀 Processing {len(day_chunks)} day chunks with {self.worker_count} workers...")
+        
+        all_work_orders = []
+        all_wo_tasks = []
+        all_parts_transactions = []
+        all_labor_entries = []
+        all_meter_readings = []
+        all_maintenance_history = []
+        
+        with ThreadPoolExecutor(max_workers=self.worker_count) as executor:
+            # Submit chunk processing tasks
+            futures = {
+                executor.submit(self._generate_maintenance_operations_chunk, 
+                    start_date + timedelta(days=start_day), 
+                    chunk_days, 
+                    chunk_id,
+                    valid_machine_ids, valid_employee_ids): chunk_id 
+                for chunk_id, (start_day, chunk_days) in enumerate(day_chunks)
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(futures):
+                chunk_id = futures[future]
+                try:
+                    chunk_results = future.result()
+                    
+                    all_work_orders.extend(chunk_results['work_orders'])
+                    all_wo_tasks.extend(chunk_results['wo_tasks'])
+                    all_parts_transactions.extend(chunk_results['parts_transactions'])
+                    all_labor_entries.extend(chunk_results['labor_entries'])
+                    all_meter_readings.extend(chunk_results['meter_readings'])
+                    all_maintenance_history.extend(chunk_results['maintenance_history'])
+                    
+                    print(f"    ✓ CMMS chunk {chunk_id + 1}/{len(day_chunks)} completed ({len(chunk_results['work_orders'])} work orders)")
+                except Exception as e:
+                    print(f"    ✗ CMMS chunk {chunk_id + 1} failed: {e}")
+        
+        # Store results with thread safety
+        with self.data_lock:
+            self.work_orders.extend(all_work_orders)
+            self.wo_tasks.extend(all_wo_tasks)
+            self.parts_transactions.extend(all_parts_transactions)
+            self.labor_entries.extend(all_labor_entries)
+            self.meter_readings.extend(all_meter_readings)
+            self.maintenance_history.extend(all_maintenance_history)
+        
+        print(f"✓ Generated CMMS operations: {len(self.work_orders):,} work orders, {len(self.wo_tasks):,} tasks via PARALLEL processing")
+    
+    def _generate_maintenance_operations_chunk(self, start_date: datetime, days: int, chunk_id: int, 
+                                             valid_machine_ids: List[str], valid_employee_ids: List[str]) -> Dict:
+        """Generate maintenance operations for a chunk of days (parallel worker method)"""
+        
+        # Local data storage for this chunk
+        chunk_work_orders = []
+        chunk_wo_tasks = []
+        chunk_parts_transactions = []
+        chunk_labor_entries = []
+        chunk_meter_readings = []
+        chunk_maintenance_history = []
+        
+        # Local counters to avoid collision
+        local_wo_counter = chunk_id * 100000 + 1
+        local_task_counter = chunk_id * 500000 + 1
+        local_trans_counter = chunk_id * 300000 + 1
+        local_labor_counter = chunk_id * 200000 + 1
+        local_meter_counter = chunk_id * 100000 + 1
+        local_history_counter = chunk_id * 100000 + 1
         
         current_date = start_date
         
@@ -506,11 +605,192 @@ class CMMSDataGenerator:
             num_wos = random.randint(*WORK_ORDERS_PER_DAY)
             
             for _ in range(num_wos):
-                self._create_work_order(current_date)
+                wo_data = self._create_work_order_local(current_date, local_wo_counter, 
+                                                       local_task_counter, local_trans_counter,
+                                                       local_labor_counter, local_meter_counter, 
+                                                       local_history_counter,
+                                                       valid_machine_ids, valid_employee_ids)
+                if wo_data:
+                    chunk_work_orders.append(wo_data['work_order'])
+                    chunk_wo_tasks.extend(wo_data['wo_tasks'])
+                    chunk_parts_transactions.extend(wo_data['parts_transactions'])
+                    chunk_labor_entries.extend(wo_data['labor_entries'])
+                    chunk_meter_readings.extend(wo_data['meter_readings'])
+                    chunk_maintenance_history.append(wo_data['maintenance_history'])
+                    
+                    local_wo_counter += 1
+                    local_task_counter += len(wo_data['wo_tasks'])
+                    local_trans_counter += len(wo_data['parts_transactions'])
+                    local_labor_counter += len(wo_data['labor_entries'])
+                    local_meter_counter += len(wo_data['meter_readings'])
+                    local_history_counter += 1
             
             current_date += timedelta(days=1)
         
-        print(f"Generated {len(self.work_orders)} work orders with {len(self.wo_tasks)} tasks")
+        # Return all chunk data
+        return {
+            'work_orders': chunk_work_orders,
+            'wo_tasks': chunk_wo_tasks,
+            'parts_transactions': chunk_parts_transactions,
+            'labor_entries': chunk_labor_entries,
+            'meter_readings': chunk_meter_readings,
+            'maintenance_history': chunk_maintenance_history
+        }
+    
+    def _generate_maintenance_operations_sequential(self, start_date: datetime, days: int, 
+                                                   valid_machine_ids: List[str], valid_employee_ids: List[str]):
+        """Fallback sequential maintenance operations for small datasets"""
+        print("Generating maintenance operations (sequential fallback)...")
+        # Keep original sequential logic for small datasets
+        current_date = start_date
+        
+        for day in range(days):
+            num_wos = random.randint(*WORK_ORDERS_PER_DAY)
+            for _ in range(num_wos):
+                self._create_work_order(current_date)
+            current_date += timedelta(days=1)
+        
+        print(f"Generated {len(self.work_orders)} work orders with {len(self.wo_tasks)} tasks (sequential)")
+    
+    def _create_work_order_local(self, date: datetime, wo_counter: int, task_counter: int, 
+                                trans_counter: int, labor_counter: int, meter_counter: int, 
+                                history_counter: int, valid_machine_ids: List[str], valid_employee_ids: List[str]) -> Dict:
+        """Create work order with all related data (local/chunk version)"""
+        if not self.assets:
+            return None
+        
+        asset = random.choice(self.assets)
+        wo_type = random.choice(['preventive', 'corrective', 'breakdown', 'inspection'])
+        
+        machine_id = random.choice(valid_machine_ids) if valid_machine_ids else asset['asset_id']
+        assigned_to = random.choice(valid_employee_ids) if valid_employee_ids else 'EMP-000001'
+        
+        actual_start = date + timedelta(hours=random.randint(8, 16))
+        duration_hours = round(random.uniform(2, 8), 2)
+        actual_end = actual_start + timedelta(hours=duration_hours)
+        
+        work_order = {
+            'work_order_id': f"WO-{str(wo_counter).zfill(6)}",
+            'work_order_number': f"WO-{date.strftime('%Y%m%d')}-{wo_counter:04d}",
+            'asset_id': asset['asset_id'],
+            'machine_id': machine_id,
+            'wo_type': wo_type,
+            'priority': random.choice(['emergency', 'urgent', 'high', 'medium', 'low']),
+            'description': f"{wo_type.title()} maintenance for {asset['asset_name']}",
+            'problem_description': f"Routine {wo_type} work",
+            'failure_code': random.choice(self.failure_codes)['failure_code'] if self.failure_codes else f"FC-{random.randint(100, 999)}",
+            'scheduled_start_date': date.strftime('%Y-%m-%d'),
+            'scheduled_end_date': (date + timedelta(hours=random.randint(4, 24))).strftime('%Y-%m-%d'),
+            'estimated_duration_hours': round(random.uniform(2, 8), 2),
+            'actual_start_date': actual_start.strftime('%Y-%m-%d %H:%M:%S'),
+            'actual_end_date': actual_end.strftime('%Y-%m-%d %H:%M:%S'),
+            'actual_duration_hours': duration_hours,
+            'wo_status': random.choice(['completed', 'completed', 'completed', 'in_progress']),
+            'assigned_to': assigned_to,
+            'downtime_minutes': random.randint(0, 480) if wo_type == 'breakdown' else 0,
+            'estimated_cost': round(random.uniform(1000, 20000), 2),
+            'actual_total_cost': round(random.uniform(1000, 20000), 2),
+            'created_at': date.strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        # Create tasks
+        wo_tasks = []
+        num_tasks = random.randint(2, 5)
+        task_types = ['inspection', 'replacement', 'adjustment', 'cleaning', 'lubrication']
+        
+        for seq in range(1, num_tasks + 1):
+            task = {
+                'task_id': f"TASK-{str(task_counter + seq - 1).zfill(6)}",
+                'work_order_id': work_order['work_order_id'],
+                'task_sequence': seq,
+                'task_description': f"Task {seq}: {random.choice(task_types).title()}",
+                'task_type': random.choice(task_types),
+                'estimated_duration_minutes': random.randint(30, 180),
+                'actual_duration_minutes': random.randint(30, 180),
+                'task_status': 'completed' if work_order['wo_status'] == 'completed' else 'pending',
+                'task_result': 'pass',
+                'created_at': date.strftime('%Y-%m-%d %H:%M:%S')
+            }
+            wo_tasks.append(task)
+        
+        # Create parts transactions
+        parts_transactions = []
+        if self.mro_parts:
+            num_parts = random.randint(1, 3)
+            for i in range(num_parts):
+                part = random.choice(self.mro_parts)
+                qty = random.randint(1, 5)
+                
+                trans = {
+                    'transaction_id': f"PTRANS-{str(trans_counter + i).zfill(6)}",
+                    'transaction_number': f"TN-{str(trans_counter + i).zfill(8)}",
+                    'work_order_id': work_order['work_order_id'],
+                    'mro_part_id': part['part_id'],
+                    'transaction_type': 'issued',
+                    'quantity': qty,
+                    'unit_cost': part['unit_price'],
+                    'total_cost': qty * part['unit_price'],
+                    'warehouse_id': random.choice(self.warehouses)['warehouse_id'] if self.warehouses else 'WH-000001',
+                    'transaction_date': actual_start.strftime('%Y-%m-%d %H:%M:%S'),
+                    'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+                parts_transactions.append(trans)
+        
+        # Create labor entries
+        labor_entries = []
+        num_laborers = random.randint(1, 3)
+        for i in range(num_laborers):
+            labor = {
+                'entry_id': f"LABOR-{str(labor_counter + i).zfill(6)}",
+                'work_order_id': work_order['work_order_id'],
+                'technician_id': random.choice(valid_employee_ids) if valid_employee_ids else assigned_to,
+                'work_date': actual_start.strftime('%Y-%m-%d'),
+                'start_time': actual_start.strftime('%Y-%m-%d %H:%M:%S'),
+                'end_time': actual_end.strftime('%Y-%m-%d %H:%M:%S'),
+                'hours_worked': round(duration_hours / num_laborers, 2),
+                'hourly_rate': round(random.uniform(25, 85), 2),
+                'total_cost': round((duration_hours / num_laborers) * random.uniform(25, 85), 2),
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            labor_entries.append(labor)
+        
+        # Create meter readings
+        meter_readings = []
+        if random.random() < 0.7:  # 70% chance of meter reading
+            reading = {
+                'reading_id': f"METER-{str(meter_counter).zfill(6)}",
+                'asset_id': asset['asset_id'],
+                'meter_type': random.choice(['hours', 'cycles', 'distance', 'volume']),
+                'reading_value': round(random.uniform(1000, 50000), 2),
+                'reading_date': actual_end.strftime('%Y-%m-%d %H:%M:%S'),
+                'recorded_by': assigned_to,
+                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            }
+            meter_readings.append(reading)
+        
+        # Create maintenance history - use schema field names
+        maintenance_history = {
+            'history_id': f"HIST-{str(history_counter).zfill(6)}",
+            'asset_id': asset['asset_id'],
+            'event_type': 'work_order_completed',
+            'event_date': actual_end.strftime('%Y-%m-%d %H:%M:%S'),
+            'event_description': work_order['description'],
+            'work_order_id': work_order['work_order_id'],
+            'failure_code': work_order.get('failure_code'),
+            'downtime_hours': round(work_order.get('downtime_minutes', 0) / 60, 2),
+            'total_cost': work_order.get('actual_total_cost'),
+            'performed_by': assigned_to,
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        return {
+            'work_order': work_order,
+            'wo_tasks': wo_tasks,
+            'parts_transactions': parts_transactions,
+            'labor_entries': labor_entries,
+            'meter_readings': meter_readings,
+            'maintenance_history': maintenance_history
+        }
     
     def _create_work_order(self, date: datetime):
         """Create work order"""
@@ -599,14 +879,14 @@ class CMMSDataGenerator:
             trans = {
                 'transaction_id': self.generate_id('PTRANS', 'trans'),
                 'transaction_number': f"PT-{date.strftime('%Y%m%d')}-{self.counters['trans']:05d}",
-                'mro_part_id': part['mro_part_id'],
+                'work_order_id': wo['work_order_id'],
+                'mro_part_id': part['part_id'],
                 'transaction_type': 'issue',
                 'transaction_date': date.strftime('%Y-%m-%d %H:%M:%S'),
                 'quantity': qty,
                 'unit_of_measure': part['unit_of_measure'],
                 'unit_cost': part['standard_cost'],
                 'total_cost': round(qty * part['standard_cost'], 2),
-                'work_order_id': wo['work_order_id'],
                 'asset_id': wo['asset_id'],
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             }
@@ -621,35 +901,48 @@ class CMMSDataGenerator:
         if not tech:
             return
         
-        hours = wo['actual_duration_hours']
+        hours = wo.get('actual_duration_hours', 0)
         
         entry = {
             'entry_id': self.generate_id('LABOR', 'labor'),
             'work_order_id': wo['work_order_id'],
             'technician_id': tech['technician_id'],
-            'start_time': wo['actual_start_date'],
-            'end_time': wo['actual_end_date'],
-            'duration_hours': hours,
-            'labor_type': 'regular',
-            'hourly_rate': tech['hourly_rate'],
-            'labor_cost': round(hours * tech['hourly_rate'], 2),
-            'approved': True,
+            'work_date': wo.get('actual_start_date', date.strftime('%Y-%m-%d'))[:10],
+            'start_time': wo.get('actual_start_date', date.strftime('%Y-%m-%d %H:%M:%S')),
+            'end_time': wo.get('actual_end_date', (date + timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M:%S')),
+            'hours_worked': hours,
+            'hourly_rate': tech.get('hourly_rate', 50.0),
+            'total_cost': round(hours * tech.get('hourly_rate', 50.0), 2),
             'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
         self.labor_entries.append(entry)
     
     def _create_maintenance_history(self, wo: dict, asset: dict, date: datetime):
         """Create maintenance history record"""
+        # Ensure event_date is NEVER null - use multiple fallbacks
+        event_date = (
+            wo.get('actual_end_date') or 
+            wo.get('scheduled_end_date') or 
+            wo.get('actual_start_date') or 
+            wo.get('scheduled_start_date') or 
+            date.strftime('%Y-%m-%d %H:%M:%S')
+        )
+        
+        # If event_date is just a date without time, add time component
+        if event_date and len(event_date) == 10:
+            event_date = f"{event_date} 12:00:00"
+        
         history = {
             'history_id': self.generate_id('HIST', 'history'),
             'asset_id': asset['asset_id'],
             'event_type': 'work_order_completed',
-            'event_date': wo['actual_end_date'],
-            'event_description': wo['description'],
+            'event_date': event_date,
+            'event_description': wo.get('description', 'Maintenance work completed'),
             'work_order_id': wo['work_order_id'],
             'failure_code': wo.get('failure_code'),
             'downtime_hours': round(wo.get('downtime_minutes', 0) / 60, 2),
             'total_cost': wo.get('actual_total_cost'),
+            'performed_by': wo.get('assigned_to'),
             'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
         self.maintenance_history.append(history)
@@ -691,9 +984,9 @@ class CMMSDataGenerator:
         
         for pm_schedule in self.pm_schedules:
             log = {
-                'pm_log_id': self.generate_id('PMLOG', 'history'),
+                'log_id': self.generate_id('PMLOG', 'history'),
                 'pm_schedule_id': pm_schedule['pm_schedule_id'],
-                'generated_work_order_id': random.choice(self.work_orders)['work_order_id'],
+                'generated_work_order_id': random.choice(self.work_orders)['work_order_id'] if self.work_orders else None,
                 'generation_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'next_due_date': (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d'),
                 'status': 'generated',

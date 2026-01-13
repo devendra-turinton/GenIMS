@@ -47,9 +47,12 @@ CYCLE_INTERVAL_SECONDS = int(os.getenv('ERP_CYCLE_INTERVAL', '86400'))  # Run ev
 RUN_TIME_HOUR = int(os.getenv('ERP_RUN_TIME_HOUR', '2'))  # 2 AM daily run
 
 # Business Volumes (per day)
-SALES_ORDERS_PER_DAY = (3, 8)
-PURCHASE_ORDERS_PER_DAY = (2, 5)
-GOODS_RECEIPTS_PER_DAY = (5, 10)
+# ERP Business Volume Configuration - Aligned with Historical Data
+# Enterprise scale: 150-300 sales orders/day across 4 factories (~38-75 per factory)
+# Daemon generates subset for real-time operations (30-40% coverage)
+SALES_ORDERS_PER_DAY = (45, 120)  # 30-40% of historical 150-300 for continuous ops
+PURCHASE_ORDERS_PER_DAY = (25, 65)  # 30-40% of historical 80-160, aligned with sales
+GOODS_RECEIPTS_PER_DAY = (30, 80)   # Slightly higher than PO to account for multi-line receipts
 NEW_MATERIALS_PER_WEEK = (0, 2)
 
 # MRP Configuration
@@ -296,7 +299,7 @@ def _initialize_counters():
             'purchase_order': ('purchase_orders', 'purchase_order_id', 'PO'),
             'goods_receipt': ('goods_receipts', 'goods_receipt_id', 'GR'),
             'inv_transaction': ('inventory_transactions', 'transaction_id', 'INVT'),
-            'mrp_run': ('mrp_runs', 'run_number', 'MRP'),
+            'mrp_run': ('mrp_runs', 'mrp_run_id', 'MRP'),
             'gl_transaction': ('general_ledger', 'gl_transaction_id', 'GL')
         }
         

@@ -13,21 +13,33 @@ from pathlib import Path
 from decimal import Decimal
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+import multiprocessing
+import math
 
 # Add scripts to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
 from generator_helper import get_helper
 from data_registry import get_registry
+from time_coordinator import TimeCoordinator as SharedTimeCoordinator
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class TimeCoordinator:
-    """Enterprise Time Coordinator for current-date enforcement"""
+    """Enterprise Time Coordinator with parallel processing support"""
     def __init__(self):
-        # ALWAYS use current date for data generation (enterprise reliability)
-        self.current_date = datetime(2026, 1, 7)  # Current date enforcement
+        # Use shared time coordinator for consistency
+        try:
+            self.shared_coordinator = SharedTimeCoordinator()
+            self.current_date = self.shared_coordinator.get_current_time()
+        except Exception:
+            # Fallback to local implementation
+            self.current_date = datetime(2026, 1, 7)
+            self.shared_coordinator = None
+        
         self.timestamp_counter = 0
         logger.info(f"Time Coordinator initialized: {self.current_date}")
     
@@ -38,7 +50,7 @@ class TimeCoordinator:
         return self.current_date
     
     def get_unique_timestamp(self):
-        """Generate unique timestamp with millisecond precision"""
+        """Generate unique timestamp with microsecond precision"""
         self.timestamp_counter += 1
         return self.current_date.replace(microsecond=self.timestamp_counter % 1000000)
     
@@ -51,10 +63,10 @@ class TimeCoordinator:
         return self.current_date + timedelta(days=days_ahead)
     
     def time_coordination_delay(self, operation_name="operation"):
-        """Add time coordination delay between operations"""
-        delay = random.uniform(2, 3)
-        time.sleep(delay)
-        logger.info(f"Time coordination delay for {operation_name}: {delay:.2f}s")
+        """Minimal delay for parallel processing"""
+        # Reduced delay for ultra-fast parallel processing
+        time.sleep(0.001)
+        logger.debug(f"Time coordination for {operation_name}")
 
 class SupplierPortalDataGenerator:
     def __init__(self, master_data_file=None, erp_data_file=None):
@@ -130,8 +142,25 @@ class SupplierPortalDataGenerator:
             'rfq': 1000, 'rfq_line': 1000, 'rfq_response': 1000, 'response_line': 1000,
             'contract': 1000, 'pricing': 1000, 'metric': 1000, 'scorecard': 1000,
             'invoice': 1000, 'inv_line': 1000, 'match': 1000, 'qual': 1000,
-            'doc': 1000, 'audit': 1000, 'user': 1000, 'req': 1000, 'req_line': 1000
+            'doc': 1000, 'audit': 1000, 'user': 1000, 'req': 1000, 'req_line': 1000,
+            'finding': 1000, 'comparison': 1000, 'history': 1000, 'rfq_supplier': 1000
         }
+        
+        # Counter keys for ID generation
+        self.counter_keys = {
+            'rfq_id': 'rfq', 'rfq_line_id': 'rfq_line', 'rfq_response_id': 'rfq_response',
+            'response_line_id': 'response_line', 'contract_id': 'contract', 'pricing_id': 'pricing',
+            'metric_id': 'metric', 'scorecard_id': 'scorecard', 'invoice_id': 'invoice',
+            'invoice_line_id': 'inv_line', 'match_id': 'match', 'qualification_id': 'qual',
+            'document_id': 'doc', 'audit_id': 'audit', 'user_id': 'user', 'requisition_id': 'req',
+            'requisition_line_id': 'req_line', 'finding_id': 'finding', 'comparison_id': 'comparison',
+            'history_id': 'history', 'rfq_supplier_id': 'rfq_supplier'
+        }
+        
+        # Parallel processing configuration
+        self.max_workers = min(8, multiprocessing.cpu_count() - 2)
+        self.data_lock = threading.Lock()
+        logger.info(f"Parallel processing configured with {self.max_workers} workers")
     
     def validate_rfq_response_compliance(self, response_data):
         """Validate RFQ response compliance"""
@@ -243,27 +272,618 @@ class SupplierPortalDataGenerator:
         return f'MAT-{random.randint(1, 100):06d}'
     
     def generate_id(self, prefix: str, counter_key: str) -> str:
-        id_val = f"{prefix}-{str(self.counters[counter_key]).zfill(6)}"
-        self.counters[counter_key] += 1
-        return id_val
+        """Thread-safe ID generation for parallel processing"""
+        with self.data_lock:
+            id_val = f"{prefix}-{str(self.counters[counter_key]).zfill(6)}"
+            self.counters[counter_key] += 1
+            return id_val
     
     def generate_all_data(self):
-        """Generate all supplier portal data with enterprise patterns"""
+        """Generate all supplier portal data with ultra-fast parallel processing"""
         logger.info(f"\n{'='*80}")
-        logger.info(f"Generating Supplier Portal Data with TimeCoordinator")
+        logger.info(f"Generating Supplier Portal Data with Ultra-Fast Parallel Processing")
         logger.info(f"Current Date: {self.time_coordinator.current_date}")
+        logger.info(f"Workers: {self.max_workers}, Parallel Mode: Enabled")
         logger.info(f"{'='*80}\n")
         
-        # Generate data with time coordination between phases
-        self.generate_purchase_requisitions()
-        self.generate_rfqs()
-        self.generate_supplier_contracts()
-        self.generate_performance_metrics()
-        self.generate_supplier_invoices()
-        self.generate_supplier_qualification()
-        self.generate_portal_users()
+        start_time = time.time()
         
+        # Execute all data generation operations in parallel
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all data generation tasks
+            futures = {
+                executor.submit(self.generate_supplier_portal_operations_parallel): "supplier_portal_operations"
+            }
+            
+            # Process completed futures
+            for future in as_completed(futures):
+                operation = futures[future]
+                try:
+                    result = future.result()
+                    logger.info(f"✓ Completed {operation}: {result}")
+                except Exception as e:
+                    logger.error(f"✗ Failed {operation}: {e}")
+        
+        elapsed = time.time() - start_time
+        logger.info(f"\n🚀 Ultra-fast parallel processing completed in {elapsed:.3f} seconds")
         self._print_summary()
+    
+    def generate_supplier_portal_operations_parallel(self):
+        """Generate all supplier portal data with parallel processing and day-based chunking"""
+        logger.info("Starting parallel supplier portal data generation...")
+        
+        # Calculate day-based chunks for parallel processing
+        total_days = 90  # 3 months of historical data
+        chunk_size = max(1, total_days // self.max_workers)
+        day_chunks = [
+            (day_start, min(day_start + chunk_size - 1, total_days - 1))
+            for day_start in range(0, total_days, chunk_size)
+        ]
+        
+        logger.info(f"Processing {total_days} days across {len(day_chunks)} chunks with {self.max_workers} workers")
+        
+        # Thread-safe data collectors
+        all_purchase_requisitions = []
+        all_req_lines = []
+        all_rfq_headers = []
+        all_rfq_lines = []
+        all_rfq_suppliers = []
+        all_rfq_responses = []
+        all_rfq_response_lines = []
+        all_supplier_contracts = []
+        all_contract_pricing = []
+        all_performance_metrics = []
+        all_scorecards = []
+        all_supplier_invoices = []
+        all_invoice_lines = []
+        all_three_way_matches = []
+        all_qualification_records = []
+        all_supplier_documents = []
+        all_supplier_audits = []
+        all_portal_users = []
+        
+        def process_chunk(chunk_info):
+            """Process a chunk of days for supplier portal operations"""
+            day_start, day_end = chunk_info
+            chunk_id = f"{day_start}-{day_end}"
+            
+            # Local data for this chunk
+            local_data = {
+                'purchase_requisitions': [], 'req_lines': [],
+                'rfq_headers': [], 'rfq_lines': [], 'rfq_suppliers': [],
+                'rfq_responses': [], 'rfq_response_lines': [],
+                'supplier_contracts': [], 'contract_pricing': [],
+                'performance_metrics': [], 'scorecards': [],
+                'supplier_invoices': [], 'invoice_lines': [], 'three_way_matches': [],
+                'qualification_records': [], 'supplier_documents': [], 'supplier_audits': [],
+                'portal_users': []
+            }
+            
+            # Local counters for thread safety
+            local_counters = {
+                'rfq': 1000 + day_start * 10, 'rfq_line': 1000 + day_start * 50,
+                'rfq_supplier': 1000 + day_start * 50, 'rfq_response': 1000 + day_start * 20, 'response_line': 1000 + day_start * 100,
+                'contract': 1000 + day_start * 5, 'pricing': 1000 + day_start * 30,
+                'metric': 1000 + day_start * 15, 'scorecard': 1000 + day_start * 15,
+                'invoice': 1000 + day_start * 8, 'inv_line': 1000 + day_start * 40,
+                'match': 1000 + day_start * 8, 'qual': 1000 + day_start * 2,
+                'doc': 1000 + day_start * 8, 'audit': 1000 + day_start * 2,
+                'user': 1000 + day_start * 3, 'req': 1000 + day_start * 12,
+                'req_line': 1000 + day_start * 60,
+                'finding': 1000 + day_start * 5, 'comparison': 1000 + day_start * 3, 'history': 1000 + day_start * 5
+            }
+            
+            # Helper methods for this chunk
+            def local_generate_id(prefix: str, counter_key: str) -> str:
+                id_val = f"{prefix}-{str(local_counters[counter_key]).zfill(6)}"
+                local_counters[counter_key] += 1
+                return id_val
+            
+            def local_get_valid_supplier_id():
+                if self.registry and hasattr(self.registry, 'get_random_supplier_id'):
+                    return self.registry.get_random_supplier_id()
+                elif self.suppliers:
+                    supplier = random.choice(self.suppliers)
+                    return supplier.get('supplier_id', 'SUP-000001') if isinstance(supplier, dict) else supplier
+                return f'SUP-{random.randint(1, 30):06d}'
+            
+            def local_get_valid_employee_id():
+                if self.registry and hasattr(self.registry, 'get_random_employee_id'):
+                    return self.registry.get_random_employee_id()
+                elif self.employees:
+                    employee = random.choice(self.employees)
+                    return employee.get('employee_id', 'EMP-000001') if isinstance(employee, dict) else employee
+                return f'EMP-{random.randint(1, 50):06d}'
+            
+            def local_get_valid_material_id():
+                if self.registry and hasattr(self.registry, 'get_random_material_id'):
+                    return self.registry.get_random_material_id()
+                elif self.materials:
+                    material = random.choice(self.materials)
+                    return material.get('material_id', 'MAT-000001') if isinstance(material, dict) else material
+                return f'MAT-{random.randint(1, 100):06d}'
+            
+            # Process each day in this chunk
+            records_per_day = {
+                'requisitions': 7, 'rfqs': 3, 'contracts': 1, 'metrics': 5,
+                'invoices': 2, 'qualifications': 0.3, 'portal_users': 0.2
+            }
+            
+            for day_offset in range(day_start, day_end + 1):
+                day_date = self.time_coordinator.current_date - timedelta(days=day_offset)
+                
+                # Purchase Requisitions (7 per day)
+                for i in range(records_per_day['requisitions']):
+                    req_date = day_date.replace(hour=8) + timedelta(hours=random.randint(0, 10))
+                    required_by = req_date + timedelta(days=random.randint(30, 90))
+                    status = random.choice(['draft', 'submitted', 'approved', 'rejected', 'converted_to_rfq'])
+                    
+                    req = {
+                        'requisition_id': local_generate_id('REQ', 'req'),
+                        'requisition_number': f'PR-{self.time_coordinator.current_date.year}-{local_counters["req"]:05d}',
+                        'requested_by': local_get_valid_employee_id(),
+                        'requisition_date': req_date.strftime('%Y-%m-%d'),
+                        'required_by_date': required_by.strftime('%Y-%m-%d'),
+                        'requisition_type': random.choice(['standard', 'urgent', 'capital']),
+                        'purpose': 'Material requirement for production',
+                        'estimated_total': float(Decimal(str(random.uniform(50000, 500000))).quantize(Decimal('0.01'))),
+                        'requisition_status': status,
+                        'created_at': req_date.strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    local_data['purchase_requisitions'].append(req)
+                    
+                    # Generate 2-5 requisition lines
+                    for j in range(random.randint(2, 5)):
+                        line = {
+                            'line_id': local_generate_id('REQLINE', 'req_line'),
+                            'requisition_id': req['requisition_id'],
+                            'line_number': j + 1,
+                            'material_id': local_get_valid_material_id(),
+                            'item_description': f'Material item {j+1}',
+                            'quantity': float(Decimal(str(random.uniform(100, 1000))).quantize(Decimal('0.01'))),
+                            'unit_of_measure': random.choice(['PC', 'KG', 'M', 'L']),
+                            'estimated_unit_price': float(Decimal(str(random.uniform(50, 500))).quantize(Decimal('0.01'))),
+                            'created_at': req_date.strftime('%Y-%m-%d %H:%M:%S')
+                        }
+                        line['estimated_total'] = float(Decimal(str(line['quantity'])) * Decimal(str(line['estimated_unit_price'])))
+                        local_data['req_lines'].append(line)
+                
+                # RFQs (3 per day)
+                for i in range(records_per_day['rfqs']):
+                    rfq_date = day_date.replace(hour=9) + timedelta(hours=random.randint(0, 8))
+                    deadline = rfq_date + timedelta(days=random.randint(7, 21))
+                    status = random.choice(['published', 'response_period', 'evaluation', 'awarded'])
+                    
+                    rfq = {
+                        'rfq_id': local_generate_id('RFQ', 'rfq'),
+                        'rfq_number': f'RFQ-{self.time_coordinator.current_date.year}-{local_counters["rfq"]:05d}',
+                        'rfq_title': f'RFQ for {random.choice(["Raw Materials", "Components", "Services", "Equipment"])}',
+                        'rfq_description': 'Request for quotation for materials',
+                        'rfq_type': random.choice(['standard', 'urgent', 'blanket']),
+                        'requested_by': local_get_valid_employee_id(),
+                        'rfq_date': rfq_date.strftime('%Y-%m-%d'),
+                        'response_deadline': deadline.strftime('%Y-%m-%d'),
+                        'total_estimated_value': float(Decimal(str(random.uniform(100000, 2000000))).quantize(Decimal('0.01'))),
+                        'rfq_status': status,
+                        'published_date': rfq_date.strftime('%Y-%m-%d'),
+                        'created_at': rfq_date.strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    local_data['rfq_headers'].append(rfq)
+                    
+                    # Generate RFQ lines and supplier invitations
+                    for j in range(random.randint(2, 8)):
+                        line = {
+                            'line_id': local_generate_id('RFQLINE', 'rfq_line'),
+                            'rfq_id': rfq['rfq_id'],
+                            'line_number': j + 1,
+                            'item_type': random.choice(['material', 'service']),
+                            'material_id': local_get_valid_material_id(),
+                            'item_description': f'Material specification {j+1}',
+                            'quantity': float(Decimal(str(random.uniform(100, 5000))).quantize(Decimal('0.01'))),
+                            'unit_of_measure': random.choice(['PC', 'KG', 'M']),
+                            'target_price': float(Decimal(str(random.uniform(50, 500))).quantize(Decimal('0.01'))),
+                            'created_at': rfq_date.strftime('%Y-%m-%d %H:%M:%S')
+                        }
+                        line['estimated_total'] = float(Decimal(str(line['quantity'])) * Decimal(str(line['target_price'])))
+                        local_data['rfq_lines'].append(line)
+                    
+                    # Generate supplier invitations (ensure unique suppliers per RFQ)
+                    invited_suppliers = []
+                    for k in range(random.randint(3, 5)):
+                        # Get unique supplier for this RFQ
+                        max_attempts = 10
+                        for attempt in range(max_attempts):
+                            supplier_id = local_get_valid_supplier_id()
+                            if supplier_id not in invited_suppliers:
+                                invited_suppliers.append(supplier_id)
+                                break
+                    
+                    for supplier_id in invited_suppliers:
+                        invitation = {
+                            'rfq_supplier_id': local_generate_id('RFQSUP', 'rfq_supplier'),
+                            'rfq_id': rfq['rfq_id'],
+                            'supplier_id': supplier_id,
+                            'invited_date': rfq_date.strftime('%Y-%m-%d %H:%M:%S'),
+                            'response_status': random.choice(['responded', 'viewed', 'pending', 'declined']),
+                            'created_at': rfq_date.strftime('%Y-%m-%d %H:%M:%S')
+                        }
+                        local_data['rfq_suppliers'].append(invitation)
+                        
+                        # Generate responses for responded suppliers
+                        if invitation['response_status'] == 'responded':
+                            response_date = rfq_date + timedelta(days=random.randint(1, 14))
+                            
+                            response = {
+                                'response_id': local_generate_id('RFQRESP', 'rfq_response'),
+                                'response_number': f'QT-{self.time_coordinator.current_date.year}-{local_counters["rfq_response"]:05d}',
+                                'rfq_id': rfq['rfq_id'],
+                                'supplier_id': supplier_id,
+                                'response_date': response_date.strftime('%Y-%m-%d %H:%M:%S'),
+                                'valid_until_date': (response_date + timedelta(days=30)).strftime('%Y-%m-%d'),
+                                'payment_terms': random.choice(['30 days', '60 days', '90 days']),
+                                'response_status': random.choice(['submitted', 'shortlisted', 'awarded']),
+                                'total_quoted_value': float(Decimal(str(random.uniform(100000, 2000000))).quantize(Decimal('0.01'))),
+                                'created_at': response_date.strftime('%Y-%m-%d %H:%M:%S')
+                            }
+                            local_data['rfq_responses'].append(response)
+                
+                # Supplier Contracts (1 per day, spread across chunks)
+                if day_offset % records_per_day['contracts'] == 0:
+                    supplier_id = local_get_valid_supplier_id()
+                    start_date = day_date
+                    end_date = start_date + timedelta(days=365)
+                    
+                    contract = {
+                        'contract_id': local_generate_id('CONTRACT', 'contract'),
+                        'contract_number': f'CONT-{self.time_coordinator.current_date.year}-{local_counters["contract"]:03d}',
+                        'supplier_id': supplier_id,
+                        'contract_name': f'Annual Supply Agreement {self.time_coordinator.current_date.year}',
+                        'contract_type': random.choice(['price_agreement', 'blanket_order', 'framework']),
+                        'start_date': start_date.strftime('%Y-%m-%d'),
+                        'end_date': end_date.strftime('%Y-%m-%d'),
+                        'payment_terms': random.choice(['30 days', '45 days', '60 days']),
+                        'committed_annual_value': float(Decimal(str(random.uniform(500000, 5000000))).quantize(Decimal('0.01'))),
+                        'auto_renew': random.random() > 0.5,
+                        'contract_status': 'active',
+                        'actual_spend_to_date': float(Decimal(str(random.uniform(100000, 1000000))).quantize(Decimal('0.01'))),
+                        'orders_placed': random.randint(10, 50),
+                        'created_at': start_date.strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                    local_data['supplier_contracts'].append(contract)
+                    
+                    # Generate contract pricing
+                    for j in range(random.randint(5, 10)):
+                        pricing = {
+                            'pricing_id': local_generate_id('PRICING', 'pricing'),
+                            'contract_id': contract['contract_id'],
+                            'material_id': local_get_valid_material_id(),
+                            'unit_price': float(Decimal(str(random.uniform(50, 500))).quantize(Decimal('0.0001'))),
+                            'effective_from': start_date.strftime('%Y-%m-%d'),
+                            'effective_to': end_date.strftime('%Y-%m-%d'),
+                            'standard_lead_time_days': random.randint(15, 45),
+                            'is_active': True,
+                            'created_at': start_date.strftime('%Y-%m-%d %H:%M:%S')
+                        }
+                        local_data['contract_pricing'].append(pricing)
+            
+            # Collect thread-safe data
+            with self.data_lock:
+                all_purchase_requisitions.extend(local_data['purchase_requisitions'])
+                all_req_lines.extend(local_data['req_lines'])
+                all_rfq_headers.extend(local_data['rfq_headers'])
+                all_rfq_lines.extend(local_data['rfq_lines'])
+                all_rfq_suppliers.extend(local_data['rfq_suppliers'])
+                all_rfq_responses.extend(local_data['rfq_responses'])
+                all_rfq_response_lines.extend(local_data['rfq_response_lines'])
+                all_supplier_contracts.extend(local_data['supplier_contracts'])
+                all_contract_pricing.extend(local_data['contract_pricing'])
+                all_performance_metrics.extend(local_data['performance_metrics'])
+                all_scorecards.extend(local_data['scorecards'])
+                all_supplier_invoices.extend(local_data['supplier_invoices'])
+                all_invoice_lines.extend(local_data['invoice_lines'])
+                all_three_way_matches.extend(local_data['three_way_matches'])
+                all_qualification_records.extend(local_data['qualification_records'])
+                all_supplier_documents.extend(local_data['supplier_documents'])
+                all_supplier_audits.extend(local_data['supplier_audits'])
+                all_portal_users.extend(local_data['portal_users'])
+            
+            return f"Chunk {chunk_id}: Generated {len(local_data['purchase_requisitions'])} requisitions, {len(local_data['rfq_headers'])} RFQs, {len(local_data['supplier_contracts'])} contracts"
+        
+        # Execute parallel processing
+        start_time = time.time()
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = {executor.submit(process_chunk, chunk): chunk for chunk in day_chunks}
+            
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    logger.info(f"  ✓ {result}")
+                except Exception as e:
+                    logger.error(f"  ✗ Chunk failed: {e}")
+        
+        # Assign collected data to instance variables
+        self.purchase_requisitions = all_purchase_requisitions
+        self.req_lines = all_req_lines
+        self.rfq_headers = all_rfq_headers
+        self.rfq_lines = all_rfq_lines
+        self.rfq_suppliers = all_rfq_suppliers
+        self.rfq_responses = all_rfq_responses
+        self.rfq_response_lines = all_rfq_response_lines
+        self.supplier_contracts = all_supplier_contracts
+        self.contract_pricing = all_contract_pricing
+        self.performance_metrics = all_performance_metrics
+        self.scorecards = all_scorecards
+        self.supplier_invoices = all_supplier_invoices
+        self.invoice_lines = all_invoice_lines
+        self.three_way_matches = all_three_way_matches
+        self.qualification_records = all_qualification_records
+        self.supplier_documents = all_supplier_documents
+        self.supplier_audits = all_supplier_audits
+        self.portal_users = all_portal_users
+        
+        # Generate additional data for completeness
+        self._generate_additional_supplier_data()
+        
+        elapsed = time.time() - start_time
+        total_records = (len(self.purchase_requisitions) + len(self.req_lines) + 
+                        len(self.rfq_headers) + len(self.rfq_lines) +
+                        len(self.supplier_contracts) + len(self.contract_pricing))
+        
+        return f"Generated {total_records:,} supplier portal records in {elapsed:.3f}s"
+    
+    def _generate_additional_supplier_data(self):
+        """Generate additional supplier data not covered in parallel chunks"""
+        logger.info("Generating additional supplier data...")
+        
+        # Generate performance metrics (5 per unique supplier)
+        unique_suppliers = set()
+        for contract in self.supplier_contracts:
+            unique_suppliers.add(contract['supplier_id'])
+        
+        for supplier_id in unique_suppliers:
+            for month_offset in range(6):  # 6 months of metrics
+                metric_date = self.time_coordinator.current_date - timedelta(days=30 * month_offset)
+                
+                total_pos = random.randint(5, 20)
+                ontime_pct = random.uniform(75, 98)
+                acceptance_pct = random.uniform(95, 99.9)
+                response_rate = random.uniform(70, 100)
+                
+                # Calculate overall rating
+                delivery_score = ontime_pct
+                quality_score = acceptance_pct
+                responsiveness_score = response_rate
+                commercial_score = random.uniform(85, 98)
+                
+                overall_score, rating = self.calculate_supplier_rating({
+                    'delivery_score': delivery_score,
+                    'quality_score': quality_score, 
+                    'responsiveness_score': responsiveness_score,
+                    'commercial_score': commercial_score
+                })
+                
+                metric = {
+                    'metric_id': self.generate_id('METRIC', 'metric'),
+                    'supplier_id': supplier_id,
+                    'metric_period': metric_date.strftime('%Y-%m'),
+                    'total_pos_issued': total_pos,
+                    'pos_delivered_ontime': int(total_pos * ontime_pct / 100),
+                    'ontime_delivery_pct': round(ontime_pct, 2),
+                    'average_lead_time_days': round(random.uniform(20, 45), 1),
+                    'total_quantity_received': round(random.uniform(1000, 10000), 4),
+                    'quality_acceptance_pct': round(acceptance_pct, 2),
+                    'response_rate_pct': round(response_rate, 2),
+                    'overall_score': overall_score,
+                    'performance_rating': rating,
+                    'created_at': metric_date.strftime('%Y-%m-%d %H:%M:%S')
+                }
+                self.performance_metrics.append(metric)
+                
+                # Generate scorecard
+                scorecard = {
+                    'scorecard_id': self.generate_id('SCORECARD', 'scorecard'),
+                    'supplier_id': supplier_id,
+                    'scorecard_period': metric_date.strftime('%Y-%m'),
+                    'scorecard_type': 'monthly',
+                    'delivery_score': round(delivery_score, 2),
+                    'quality_score': round(quality_score, 2),
+                    'responsiveness_score': round(responsiveness_score, 2),
+                    'commercial_score': round(commercial_score, 2),
+                    'overall_score': overall_score,
+                    'supplier_rating': rating,
+                    'action_required': overall_score < 75,
+                    'published_to_supplier': month_offset < 3,
+                    'created_at': metric_date.strftime('%Y-%m-%d %H:%M:%S')
+                }
+                self.scorecards.append(scorecard)
+        
+        # Generate invoices with invoice lines (2 per day total)
+        for i in range(180):  # 90 days × 2 invoices per day
+            invoice_date = self.time_coordinator.current_date - timedelta(days=random.randint(1, 90))
+            supplier_id = random.choice(list(unique_suppliers)) if unique_suppliers else 'SUP-000001'
+            
+            subtotal = Decimal(str(random.uniform(50000, 500000))).quantize(Decimal('0.01'))
+            tax_amount = (subtotal * Decimal('0.18')).quantize(Decimal('0.01'))
+            total_amount = subtotal + tax_amount
+            
+            matching_status = random.choice(['matched', 'variance', 'pending'])
+            
+            invoice = {
+                'invoice_id': self.generate_id('INV', 'invoice'),
+                'invoice_number': f'SI-{self.time_coordinator.current_date.year}-{i+1:05d}',
+                'supplier_invoice_number': f'SUP-INV-{i+1:05d}',
+                'supplier_id': supplier_id,
+                'purchase_order_id': f'PO-{random.randint(1000, 5000):05d}',
+                'invoice_date': invoice_date.strftime('%Y-%m-%d'),
+                'due_date': (invoice_date + timedelta(days=30)).strftime('%Y-%m-%d'),
+                'subtotal': float(subtotal),
+                'tax_amount': float(tax_amount),
+                'total_amount': float(total_amount),
+                'matching_status': matching_status,
+                'invoice_status': random.choice(['received', 'approved', 'paid']) if matching_status == 'matched' else 'under_review',
+                'payment_status': 'paid' if matching_status == 'matched' and random.random() > 0.5 else 'pending',
+                'created_at': invoice_date.strftime('%Y-%m-%d %H:%M:%S')
+            }
+            self.supplier_invoices.append(invoice)
+            
+            # Generate 2-5 invoice lines for each invoice
+            num_lines = random.randint(2, 5)
+            for j in range(num_lines):
+                qty = Decimal(str(random.uniform(100, 1000))).quantize(Decimal('0.01'))
+                unit_price = Decimal(str(random.uniform(50, 500))).quantize(Decimal('0.0001'))
+                line_total = (qty * unit_price).quantize(Decimal('0.01'))
+                
+                line = {
+                    'line_id': self.generate_id('INVLINE', 'inv_line'),
+                    'invoice_id': invoice['invoice_id'],
+                    'line_number': j + 1,
+                    'material_id': self.get_valid_material_id(),
+                    'line_description': f'Material line {j+1}',
+                    'invoiced_quantity': float(qty),
+                    'unit_of_measure': random.choice(['PC', 'KG', 'M']),
+                    'unit_price': float(unit_price),
+                    'line_total': float(line_total),
+                    'created_at': invoice_date.strftime('%Y-%m-%d %H:%M:%S')
+                }
+                self.invoice_lines.append(line)
+            
+            # Generate 3-way match log for each invoice
+            match_log = {
+                'log_id': self.generate_id('MATCH', 'match'),
+                'invoice_id': invoice['invoice_id'],
+                'match_timestamp': invoice_date.strftime('%Y-%m-%d %H:%M:%S'),
+                'match_type': 'automatic',
+                'po_id': invoice['purchase_order_id'],
+                'match_result': matching_status,
+                'expected_amount': float(subtotal),
+                'actual_amount': float(subtotal),
+                'variance_amount': 0.0 if matching_status == 'matched' else float(random.uniform(-1000, 1000)),
+                'action_taken': 'auto_approved' if matching_status == 'matched' else 'pending_review'
+            }
+            self.three_way_matches.append(match_log)
+        
+        # Generate RFQ response lines for existing responses
+        for response in self.rfq_responses:
+            # Find corresponding RFQ lines
+            rfq_lines = [line for line in self.rfq_lines if line['rfq_id'] == response['rfq_id']]
+            total_quoted = Decimal('0.00')
+            
+            for line in rfq_lines:
+                # Quote with realistic variance (±15% to +25%)
+                variance = random.uniform(-0.15, 0.25)
+                unit_price = Decimal(str(line['target_price'])) * Decimal(str(1 + variance))
+                total_price = unit_price * Decimal(str(line['quantity']))
+                
+                resp_line = {
+                    'response_line_id': self.generate_id('RESPLINE', 'response_line'),
+                    'response_id': response['response_id'],
+                    'rfq_line_id': line['line_id'],
+                    'line_number': line['line_number'],
+                    'unit_price': float(unit_price.quantize(Decimal('0.0001'))),
+                    'total_price': float(total_price.quantize(Decimal('0.01'))),
+                    'lead_time_days': random.randint(15, 60),
+                    'meets_specifications': random.random() > 0.1,
+                    'created_at': response['created_at']
+                }
+                self.rfq_response_lines.append(resp_line)
+                total_quoted += total_price
+            
+            # Update response total quoted value
+            response['total_quoted_value'] = float(total_quoted)
+        
+        # Generate qualification records and portal users for unique suppliers
+        for supplier_id in list(unique_suppliers)[:20]:  # Limit to 20 suppliers
+            # Qualification record
+            qual_date = self.time_coordinator.current_date - timedelta(days=random.randint(30, 180))
+            status = random.choice(['approved', 'under_review', 'sample_testing'])
+            
+            qual = {
+                'qualification_id': self.generate_id('QUAL', 'qual'),
+                'supplier_id': supplier_id,
+                'qualification_status': status,
+                'business_license_verified': True,
+                'tax_registration_verified': True,
+                'bank_details_verified': True,
+                'iso_certificate_verified': random.random() > 0.3,
+                'financial_health_score': round(random.uniform(60, 95), 2),
+                'technical_capability_score': round(random.uniform(70, 95), 2),
+                'audit_score': round(random.uniform(75, 95), 2),
+                'approved_date': qual_date.strftime('%Y-%m-%d') if status == 'approved' else None,
+                'created_at': qual_date.strftime('%Y-%m-%d %H:%M:%S')
+            }
+            self.qualification_records.append(qual)
+            
+            # Generate documents for qualified supplier
+            doc_types = ['business_license', 'tax_certificate', 'iso_9001', 'bank_statement']
+            for doc_type in doc_types:
+                issue_date = qual_date - timedelta(days=random.randint(30, 365))
+                expiry_date = issue_date + timedelta(days=365)
+                
+                doc = {
+                    'document_id': self.generate_id('DOC', 'doc'),
+                    'supplier_id': supplier_id,
+                    'document_type': doc_type,
+                    'document_name': f'{doc_type.upper()} - {supplier_id}',
+                    'issue_date': issue_date.strftime('%Y-%m-%d'),
+                    'expiry_date': expiry_date.strftime('%Y-%m-%d'),
+                    'verified': True,
+                    'verified_date': qual_date.strftime('%Y-%m-%d'),
+                    'document_status': 'verified' if expiry_date > self.time_coordinator.current_date else 'expired',
+                    'days_to_expiry': (expiry_date - self.time_coordinator.current_date).days,
+                    'document_url': f'/documents/supplier/{supplier_id}/{doc_type}.pdf',
+                    'created_at': issue_date.strftime('%Y-%m-%d %H:%M:%S')
+                }
+                self.supplier_documents.append(doc)
+            
+            # Generate audit record if qualified
+            if status in ['approved', 'sample_testing']:
+                audit_date = qual_date + timedelta(days=random.randint(15, 45))
+                
+                audit = {
+                    'audit_id': self.generate_id('AUDIT', 'audit'),
+                    'audit_number': f'AUD-{self.time_coordinator.current_date.year}-{len(self.supplier_audits)+1:03d}',
+                    'supplier_id': supplier_id,
+                    'audit_type': 'initial',
+                    'audit_scope': 'quality_system',
+                    'planned_date': audit_date.strftime('%Y-%m-%d'),
+                    'actual_date': audit_date.strftime('%Y-%m-%d'),
+                    'audit_duration_hours': round(random.uniform(4, 8), 1),
+                    'lead_auditor': self.get_valid_employee_id(),
+                    'audit_score': round(random.uniform(75, 95), 2),
+                    'audit_rating': random.choice(['excellent', 'satisfactory', 'needs_improvement']),
+                    'major_findings': random.randint(0, 2),
+                    'minor_findings': random.randint(0, 5),
+                    'observations': random.randint(2, 10),
+                    'audit_status': 'completed',
+                    'created_at': audit_date.strftime('%Y-%m-%d %H:%M:%S')
+                }
+                self.supplier_audits.append(audit)
+            
+            # Portal users (1-3 per supplier)
+            for i in range(random.randint(1, 3)):
+                roles = ['admin', 'sales', 'accounts', 'quality']
+                role = roles[min(i, len(roles)-1)]
+                
+                user = {
+                    'portal_user_id': self.generate_id('PORTALUSER', 'user'),
+                    'supplier_id': supplier_id,
+                    'user_email': f'user{i+1}@{supplier_id.lower()}.com',
+                    'user_name': f'User {i+1} - {supplier_id}',
+                    'user_phone': f'+91-{random.randint(7000000000, 9999999999)}',
+                    'user_role': role,
+                    'can_view_rfqs': True,
+                    'can_submit_quotes': role in ['admin', 'sales'],
+                    'can_view_pos': True,
+                    'can_submit_invoices': role in ['admin', 'accounts'],
+                    'can_view_payments': role in ['admin', 'accounts'],
+                    'can_view_performance': role == 'admin',
+                    'is_active': True,
+                    'login_count': random.randint(5, 100),
+                    'created_at': self.time_coordinator.current_date.strftime('%Y-%m-%d %H:%M:%S')
+                }
+                self.portal_users.append(user)
+        
+        logger.info(f"Generated additional data: {len(self.performance_metrics)} metrics, {len(self.supplier_invoices)} invoices, {len(self.invoice_lines)} invoice lines, {len(self.rfq_response_lines)} response lines, {len(self.portal_users)} users, {len(self.supplier_documents)} documents, {len(self.supplier_audits)} audits")
     
     # ========================================================================
     # PURCHASE REQUISITIONS
@@ -275,7 +895,7 @@ class SupplierPortalDataGenerator:
         
         statuses = ['draft', 'submitted', 'approved', 'rejected', 'converted_to_rfq']
         
-        for i in range(30):
+        for i in range(600):  # Enterprise volume: 150 per factory x 4 factories
             req_date = self.time_coordinator.generate_past_datetime(random.randint(1, 90))
             required_by = req_date + timedelta(days=random.randint(30, 90))
             status = random.choice(statuses)
@@ -324,7 +944,7 @@ class SupplierPortalDataGenerator:
         
         statuses = ['published', 'response_period', 'evaluation', 'awarded']
         
-        for i in range(20):
+        for i in range(240):  # Enterprise volume: 60 RFQs per factory x 4 factories
             rfq_date = self.time_coordinator.generate_past_datetime(random.randint(1, 60))
             deadline = rfq_date + timedelta(days=random.randint(7, 21))
             status = random.choice(statuses)
@@ -379,7 +999,7 @@ class SupplierPortalDataGenerator:
             
             for supplier_id in invited_suppliers:
                 invitation = {
-                    'rfq_supplier_id': self.generate_id('RFQSUP', 'rfq'),
+                    'rfq_supplier_id': self.generate_id('RFQSUP', 'rfq_supplier'),  # Use proper counter key
                     'rfq_id': rfq['rfq_id'],
                     'supplier_id': supplier_id,
                     'invited_date': rfq_date.strftime('%Y-%m-%d %H:%M:%S'),
@@ -453,7 +1073,7 @@ class SupplierPortalDataGenerator:
         
         # Create contracts for available suppliers
         supplier_count = 0
-        for i in range(min(20, 30)):  # Limit to reasonable number
+        for i in range(min(120, 150)):  # Enterprise volume: 30 contracts per factory x 4 factories
             supplier_id = self.get_valid_supplier_id()
             start_date = self.time_coordinator.generate_past_datetime(random.randint(30, 365))
             end_date = start_date + timedelta(days=365)
@@ -506,7 +1126,7 @@ class SupplierPortalDataGenerator:
         logger.info("Generating supplier performance metrics...")
         
         # Last 6 months of data for available suppliers
-        for supplier_idx in range(min(20, 30)):  # Limit to reasonable number
+        for supplier_idx in range(min(120, 150)):  # Enterprise volume: 30 suppliers per factory x 4 factories
             supplier_id = self.get_valid_supplier_id()
             
             for months_ago in range(6):
@@ -991,7 +1611,8 @@ class SupplierPortalDataGenerator:
             ref_type = random.choice(['rfq', 'purchase_order', 'invoice', 'quality_issue', 'general'])
             # small chance of attachments (array)
             attach_count = random.choice([0, 0, 1, 2])
-            attachments = [f"/attachments/{supplier_id}/comm_{i+1}_{k+1}.pdf" for k in range(attach_count)]
+            attachments_list = [f"/attachments/{supplier_id}/comm_{i+1}_{k+1}.pdf" for k in range(attach_count)]
+            attachments = '{' + ','.join(attachments_list) + '}' if attachments_list else None  # PostgreSQL array format
             communications.append({
                 'communication_id': f"COMM-{i+1:05d}",
                 'supplier_id': supplier_id,
@@ -1023,15 +1644,12 @@ class SupplierPortalDataGenerator:
                 actual_closure_date = None
             
             findings.append({
-                'audit_finding_id': f"AUDFIND-{i+1}",
-                'supplier_audit_id': f"SUPP-AUDIT-{random.randint(1, 10):04d}",
+                'finding_id': self.generate_id('FIND', 'finding'),  # PRIMARY KEY
+                'audit_id': f"SUPP-AUDIT-{random.randint(1, 10):04d}",
                 'finding_type': random.choice(['critical', 'major', 'minor', 'observation']),
                 'finding_description': f"Audit finding {i+1}",
-                'root_cause': f"Root cause analysis {i+1}",
                 'corrective_action': f"Corrective action for finding",
-                'target_closure_date': self.time_coordinator.generate_future_datetime(random.randint(7, 90)).strftime('%Y-%m-%d'),
-                'actual_closure_date': actual_closure_date,
-                'status': status
+                'target_date': self.time_coordinator.generate_future_datetime(random.randint(7, 90)).strftime('%Y-%m-%d')
             })
         return findings
     
@@ -1040,15 +1658,9 @@ class SupplierPortalDataGenerator:
         comparisons = []
         for i in range(15):
             comparisons.append({
-                'quote_comparison_id': f"QUOTCOMP-{i+1}",
+                'comparison_id': self.generate_id('COMP', 'comparison'),  # PRIMARY KEY
                 'rfq_id': f"RFQ-{random.randint(1, 20):04d}",
-                'supplier_1_id': f"SUP-{random.randint(1, 30):04d}",
-                'supplier_2_id': f"SUP-{random.randint(1, 30):04d}",
-                'supplier_3_id': f"SUP-{random.randint(1, 30):04d}",
-                'comparison_date': (datetime.now() - timedelta(days=random.randint(0, 30))).strftime('%Y-%m-%d'),
-                'winner_supplier_id': f"SUP-{random.randint(1, 30):04d}",
-                'selection_reason': random.choice(['price', 'quality', 'delivery', 'combination']),
-                'notes': f"Quote comparison analysis {i+1}"
+                'comparison_date': (datetime.now() - timedelta(days=random.randint(0, 30))).strftime('%Y-%m-%d')
             })
         return comparisons
     
@@ -1080,16 +1692,9 @@ class SupplierPortalDataGenerator:
         ratings = []
         for i in range(30):
             ratings.append({
-                'rating_history_id': f"RATEHIST-{i+1}",
+                'history_id': self.generate_id('HIST', 'history'),  # PRIMARY KEY
                 'supplier_id': f"SUP-{random.randint(1, 30):04d}",
-                'rating_date': (datetime.now() - timedelta(days=random.randint(0, 90))).strftime('%Y-%m-%d'),
-                'overall_rating': round(random.uniform(2, 5), 1),
-                'quality_rating': round(random.uniform(2, 5), 1),
-                'delivery_rating': round(random.uniform(2, 5), 1),
-                'price_rating': round(random.uniform(2, 5), 1),
-                'service_rating': round(random.uniform(2, 5), 1),
-                'comments': f"Rating review {i+1}",
-                'rated_by_employee_id': f"EMP-{random.randint(1, 50):06d}"
+                'rating_date': (datetime.now() - timedelta(days=random.randint(0, 90))).strftime('%Y-%m-%d')
             })
         return ratings
     
@@ -1097,29 +1702,15 @@ class SupplierPortalDataGenerator:
         """Generate three-way match log records (PO, Invoice, Receipt matching)"""
         matches = []
         for i in range(30):
-            status = random.choice(['matched', 'variance', 'blocked', 'exception'])
-            # Resolve dates for matched/variance statuses with 85% probability, exception with 60%
-            if status == 'matched' and random.random() < 0.95:
-                resolved_date = (datetime.now() - timedelta(days=random.randint(0, 7))).strftime('%Y-%m-%d')
-            elif status in ['variance', 'blocked'] and random.random() < 0.80:
-                resolved_date = (datetime.now() - timedelta(days=random.randint(0, 14))).strftime('%Y-%m-%d')
-            elif status == 'exception' and random.random() < 0.60:
-                resolved_date = (datetime.now() - timedelta(days=random.randint(1, 30))).strftime('%Y-%m-%d')
-            else:
-                resolved_date = None
+            match_result = random.choice(['matched', 'quantity_variance', 'price_variance', 'multiple_variances', 'failed'])
             
             matches.append({
-                'three_way_match_id': f"3WM-{i+1}",
-                'purchase_order_id': f"PO-{random.randint(1000, 5000):05d}",
-                'supplier_invoice_id': f"INV-{random.randint(1000, 5000):05d}",
-                'goods_receipt_id': f"GR-{random.randint(1000, 5000):05d}",
-                'match_date': (datetime.now() - timedelta(days=random.randint(0, 30))).strftime('%Y-%m-%d'),
-                'po_amount': round(random.uniform(1000, 100000), 2),
-                'invoice_amount': round(random.uniform(1000, 100000), 2),
-                'variance_percent': round(random.uniform(-5, 5), 2),
-                'match_status': status,
-                'resolution': f"Resolution for match {i+1}" if status in ['exception', 'variance', 'blocked'] else 'None',
-                'resolved_date': resolved_date
+                'log_id': self.generate_id('MATCH', 'match'),  # PRIMARY KEY (schema expects log_id)
+                'invoice_id': f"INV-{random.randint(1000, 5000):05d}",
+                'match_type': random.choice(['automatic', 'manual', 'override']),
+                'po_id': f"PO-{random.randint(1000, 5000):05d}",
+                'receipt_id': f"GR-{random.randint(1000, 5000):05d}",
+                'match_result': match_result
             })
         return matches
     
@@ -1163,7 +1754,7 @@ if __name__ == "__main__":
     generator.generate_all_data()
     
     # Export to JSON (in same folder as script)
-    json_file = script_dir / "supplier_portal_data.json"
+    json_file = script_dir / "genims_supplier_portal_data.json"
     generator.to_json(str(json_file))
     
     end_time = time.time()

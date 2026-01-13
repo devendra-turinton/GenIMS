@@ -61,7 +61,9 @@ PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
 PG_CRM_DB = os.getenv('DB_CRM', 'genims_crm_db')
 
 BATCH_SIZE = 5000
-TOTAL_RECORDS = 14400  # 30 days of 8 hourly CRM records
+# Aligned with historical generator: 80-200 leads/day + opportunities + activities + cases
+# Daily CRM operations: ~120 leads + ~30 opportunities + ~80 activities + ~40 cases = ~270 total
+TOTAL_RECORDS = 400  # Daily CRM operations across 4 factories
 
 # Logging
 log_dir = os.getenv('DAEMON_LOG_DIR', os.path.join(os.path.dirname(__file__), '..', '..', 'logs'))
@@ -145,6 +147,7 @@ def initialize_id_counters():
     """Initialize counters from existing data in database"""
     global counters
     try:
+        counters['lead'] = get_max_id_counter('leads', 'lead_id')
         counters['opportunity'] = get_max_id_counter('opportunities', 'opportunity_id')
         counters['activity'] = get_max_id_counter('activities', 'activity_id')
         counters['task'] = get_max_id_counter('tasks', 'task_id')
@@ -278,6 +281,7 @@ def main():
     logger.info("="*80)
     
     # Generate data
+    leads = []
     opportunities = []
     activities = []
     tasks = []
@@ -311,10 +315,12 @@ def main():
     
     logger.info(f"FK Validation: {len(master_data['accounts'])} accounts, {len(master_data['contacts'])} contacts, {len(valid_employee_ids)} employees")
     
-    # Generate CRM records (multiple per hour)
+    # Generate CRM records spread across 10-hour business day (8 AM - 6 PM)
     for i in range(TOTAL_RECORDS):
-        timestamp_offset = i * 300  # 5 minute intervals
-        current_ts = sim_base_time + timedelta(seconds=timestamp_offset)
+        # Spread CRM operations across 10-hour business day
+        business_hours_minutes = 10 * 60  # 600 minutes
+        minute_offset = (i * business_hours_minutes) // TOTAL_RECORDS
+        current_ts = sim_base_time.replace(hour=8) + timedelta(minutes=minute_offset)
         
         # Validated FK selection
         try:
@@ -326,9 +332,31 @@ def main():
             logger.error(f"FK reference error at record {i}")
             continue
         
-        # Opportunities (1 per 100 records)
-        if i % 100 == 0:
-            opp_id = f"OPP-{(counters['opportunity'] + i // 100):06d}"
+        # Leads (daily target: ~120 leads aligned with historical 80-200/day)
+        # Generate lead every ~3 records to achieve ~130 leads per day
+        if i % 3 == 0:
+            lead_id = f"LEAD-{counters['lead']:06d}"
+            counters['lead'] += 1
+            leads.append({
+                'lead_id': lead_id,
+                'lead_number': f"LEAD-{run_timestamp}-{i // 3:04d}",
+                'contact_first_name': f"Lead{i // 3}",
+                'contact_last_name': "Prospect",
+                'email': f"lead{i // 3}@example.com",
+                'company_name': f"Company-{i // 3}",
+                'phone': f"+1-555-{random.randint(1000, 9999)}",
+                'lead_source': random.choice(['website', 'trade_show', 'referral', 'cold_call', 'social_media']),
+                'lead_status': random.choice(['new', 'contacted', 'qualified', 'unqualified', 'converted']),
+                'industry': random.choice(['manufacturing', 'automotive', 'electronics', 'pharmaceuticals']),
+                'lead_grade': random.choice(['A', 'B', 'C', 'D']),
+                'assigned_to': sales_rep,
+                'created_at': current_ts
+            })
+
+        # Opportunities (daily target: ~30 opportunities aligned with sales orders)
+        # Generate opportunity every ~13 records to achieve ~30 opportunities per day
+        if i % 13 == 0:
+            opp_id = f"OPP-{(counters['opportunity'] + i // 13):06d}"
             stage = random.choice(['prospecting', 'qualification', 'proposal', 'negotiation', 'closed_won'])
             
             # Calculate probability based on stage
@@ -339,7 +367,7 @@ def main():
             
             opportunities.append({
                 'opportunity_id': opp_id,
-                'opportunity_number': f"OPP-{run_timestamp}-{i // 100:04d}",
+                'opportunity_number': f"OPP-{run_timestamp}-{i // 13:04d}",
                 'account_id': account,
                 'opportunity_name': f"Opportunity-{i // 100}",
                 'opportunity_type': random.choice(['new_business', 'expansion', 'renewal', 'upsell']),
@@ -353,12 +381,13 @@ def main():
                 'created_at': time_coord.get_current_time()
             })
         
-        # Activities (1 per 50 records)
-        if i % 50 == 0:
-            act_id = f"ACT-{(counters['activity'] + i // 50):06d}"
+        # Activities (daily target: ~80 sales activities)
+        # Generate activity every ~5 records to achieve ~80 activities per day
+        if i % 5 == 0:
+            act_id = f"ACT-{(counters['activity'] + i // 5):06d}"
             activities.append({
                 'activity_id': act_id,
-                'activity_number': f"ACT-{run_timestamp}-{i // 50:04d}",
+                'activity_number': f"ACT-{run_timestamp}-{i // 5:04d}",
                 'account_id': account,
                 'contact_id': contact,
                 'activity_type': random.choice(['call', 'meeting', 'email', 'demo', 'site_visit']),
@@ -369,12 +398,13 @@ def main():
                 'created_at': time_coord.get_current_time()
             })
         
-        # Tasks (1 per 75 records)
-        if i % 75 == 0:
-            task_id = f"TASK-{(counters['task'] + i // 75):06d}"
+        # Tasks (daily target: ~40 follow-up tasks)
+        # Generate task every ~10 records to achieve ~40 tasks per day
+        if i % 10 == 0:
+            task_id = f"TASK-{(counters['task'] + i // 10):06d}"
             tasks.append({
                 'task_id': task_id,
-                'task_number': f"TASK-{run_timestamp}-{i // 75:04d}",
+                'task_number': f"TASK-{run_timestamp}-{i // 10:04d}",
                 'subject': f"Task-{i // 75}",
                 'task_type': random.choice(['follow_up', 'proposal', 'quote', 'demo', 'review']),
                 'priority': random.choice(['low', 'medium', 'high']),
@@ -384,14 +414,15 @@ def main():
                 'created_at': time_coord.get_current_time()
             })
         
-        # Cases (1 per 200 records)
-        if i % 200 == 0:
-            case_id = f"CASE-{(counters['case'] + i // 200):06d}"
+        # Cases (daily target: ~25 customer service cases)
+        # Generate case every ~16 records to achieve ~25 cases per day
+        if i % 16 == 0:
+            case_id = f"CASE-{(counters['case'] + i // 16):06d}"
             case_priority = random.choice(['low', 'medium', 'high', 'critical'])
             
             cases.append({
                 'case_id': case_id,
-                'case_number': f"CASE-{run_timestamp}-{i // 200:04d}",
+                'case_number': f"CASE-{run_timestamp}-{i // 16:04d}",
                 'account_id': account,
                 'contact_id': contact,
                 'case_type': random.choice(['question', 'problem', 'feature_request', 'complaint']),
@@ -403,9 +434,10 @@ def main():
                 'created_at': time_coord.get_current_time()
             })
         
-        # Customer Interactions (1 per 20 records)
-        if i % 20 == 0:
-            inter_id = f"INTER-{(counters['interaction'] + i // 20):06d}"
+        # Customer Interactions (daily target: ~50 customer touchpoints)
+        # Generate interaction every ~8 records to achieve ~50 interactions per day
+        if i % 8 == 0:
+            inter_id = f"INTER-{(counters['interaction'] + i // 8):06d}"
             interactions.append({
                 'interaction_id': inter_id,
                 'account_id': account,
@@ -419,9 +451,10 @@ def main():
                 'created_at': time_coord.get_current_time()
             })
         
-        if (i + 1) % 1000 == 0:
+        if (i + 1) % 100 == 0:
             logger.info(f"  Generated {i + 1:,} / {TOTAL_RECORDS:,} records")
     
+    logger.info(f"✓ Generated {len(leads):,} leads")
     logger.info(f"✓ Generated {len(opportunities):,} opportunities")
     logger.info(f"✓ Generated {len(activities):,} activities")
     logger.info(f"✓ Generated {len(tasks):,} tasks")
@@ -436,6 +469,19 @@ def main():
     try:
         cursor = pg_connection.cursor()
         cursor.execute("SET CONSTRAINTS ALL DEFERRED;")
+        
+        # Insert leads
+        if leads:
+            insert_sql = """INSERT INTO leads (
+                lead_id, lead_number, contact_first_name, contact_last_name, email, company_name,
+                phone, lead_source, lead_status, industry, lead_grade,
+                assigned_to, created_at
+            ) VALUES (%(lead_id)s, %(lead_number)s, %(contact_first_name)s,
+                %(contact_last_name)s, %(email)s, %(company_name)s, %(phone)s,
+                %(lead_source)s, %(lead_status)s, %(industry)s,
+                %(lead_grade)s, %(assigned_to)s, %(created_at)s)"""
+            logger.info(f"Inserting {len(leads):,} leads...")
+            insert_batch_parallel(cursor, insert_sql, leads, "leads", BATCH_SIZE, pg_connection)
         
         # Insert opportunities
         if opportunities:

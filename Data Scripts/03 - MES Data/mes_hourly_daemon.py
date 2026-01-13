@@ -37,8 +37,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Database Configuration - from Azure Cloud via config.env
 PG_HOST = os.getenv('POSTGRES_HOST', 'localhost')
 PG_PORT = int(os.getenv('POSTGRES_PORT', '5432'))
-PG_DATABASE = os.getenv('FOLDER_03_DATABASE', os.getenv('DB_MANUFACTURING', 'genims_manufacturing_db'))
-PG_MASTER_DATABASE = os.getenv('DB_MASTER', 'genims_master_db')  # Master data database
+PG_DATABASE = os.getenv('FOLDER_03_DATABASE', os.getenv('DB_MANUFACTURING', 'genims_manufacturing_db_try'))
+PG_MASTER_DATABASE = os.getenv('DB_MASTER', 'genims_master_db_try')  # Master data database
 PG_USER = os.getenv('POSTGRES_USER', 'postgres')
 PG_PASSWORD = os.getenv('POSTGRES_PASSWORD', '')
 PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
@@ -50,11 +50,13 @@ MES_BATCH_SIZE = int(os.getenv('MES_BATCH_SIZE', '5000'))  # Large batches for f
 MES_TOTAL_RECORDS = int(os.getenv('MES_TOTAL_RECORDS', '2880'))  # 1 day of production data (was 28800 = 100 days!)
 BATCH_SIZE = MES_BATCH_SIZE  # For backward compatibility
 
-# Production Rates (per hour)
-DAY_SHIFT_ORDERS = (4, 5)      # 06:00-14:00
-EVENING_SHIFT_ORDERS = (3, 4)   # 14:00-22:00
-NIGHT_SHIFT_ORDERS = (1, 2)     # 22:00-06:00
-WEEKEND_ORDERS = (1, 2)         # Saturday/Sunday (50% capacity)
+# Production Rates (per hour) - Aligned with Base Data (211 machines, ~60 lines)
+# Target: 240-360 WO/day across ~60 production lines (~4-6 WO per line per day)
+DAY_SHIFT_ORDERS = (6, 9)      # 06:00-14:00 (8h * ~7.5 = 60 WO/day)
+EVENING_SHIFT_ORDERS = (4, 7)   # 14:00-22:00 (8h * ~5.5 = 44 WO/day)
+NIGHT_SHIFT_ORDERS = (2, 4)     # 22:00-06:00 (8h * ~3 = 24 WO/day)
+WEEKEND_ORDERS = (2, 4)         # Saturday/Sunday (~50% capacity = 24 WO/day)
+# Total: ~128 WO/weekday + overtime peaks = realistic for 60 production lines
 
 # Quality Parameters
 FIRST_PASS_YIELD_RANGE = (92, 99.5)
@@ -1425,12 +1427,12 @@ def main():
     # Validate critical master data
     if not master_data.get('products'):
         logger.error("No products found in master data. Cannot create work orders.")
-        logger.error("Please populate products table in genims_master_db.")
+        logger.error("Please populate products table in genims_master_db_try.")
         return 1
     
     if not master_data.get('mappings'):
         logger.error("No line-product mappings found. Cannot assign products to lines.")
-        logger.error("Please populate line_product_mapping table in genims_master_db.")
+        logger.error("Please populate line_product_mapping table in genims_master_db_try.")
         return 1
     
     logger.info(f"Master data validation passed.")

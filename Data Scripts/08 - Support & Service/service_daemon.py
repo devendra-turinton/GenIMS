@@ -34,7 +34,9 @@ PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
 PG_SERVICE_DB = os.getenv('DB_SERVICE', 'genims_service_db')
 
 BATCH_SIZE = 5000
-TOTAL_RECORDS = 14400  # 30 days of 8 hourly service records
+# Aligned with historical generator: 200-400 tickets/day + comments + escalations + RMA
+# Daily service operations: ~300 tickets + ~600 comments + ~50 escalations + ~30 RMA = ~980 total
+TOTAL_RECORDS = 1000  # Daily service operations across 4 factories
 
 # Logging
 log_dir = os.getenv('DAEMON_LOG_DIR', os.path.join(os.path.dirname(__file__), '..', '..', 'logs'))
@@ -354,10 +356,12 @@ def main():
     logger.info(f"Using current date for data generation: {sim_base_time}")
     run_timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
     
-    # Generate service records (multiple per hour)
+    # Generate service records spread across 16-hour support window (6 AM - 10 PM)
     for i in range(TOTAL_RECORDS):
-        timestamp_offset = i * 300  # 5 minute intervals
-        current_ts = sim_base_time + timedelta(seconds=timestamp_offset)
+        # Spread service operations across 16-hour support day (customer service hours)
+        business_hours_minutes = 16 * 60  # 960 minutes
+        minute_offset = (i * business_hours_minutes) // TOTAL_RECORDS
+        current_ts = sim_base_time.replace(hour=6) + timedelta(minutes=minute_offset)
         
         # Use VALIDATED FK references from registry
         account = random.choice(master_data['accounts'])
@@ -369,10 +373,11 @@ def main():
         escalated_employee = random.choice(master_data['employees'])
         sla = random.choice(master_data['sla_definitions'])
         
-        # Service Tickets (1 per 50 records)
-        if i % 50 == 0:
-            ticket_id = f"TICKET-{(counters['ticket'] + i // 50):06d}"
-            ticket_num = f"TKT-{run_timestamp}-{i // 50:04d}"
+        # Service Tickets (daily target: ~300 tickets aligned with historical 200-400/day)
+        # Generate ticket every ~3 records to achieve ~300 tickets per day
+        if i % 3 == 0:
+            ticket_id = f"TICKET-{(counters['ticket'] + i // 3):06d}"
+            ticket_num = f"TKT-{run_timestamp}-{i // 3:04d}"
             
             # Calculate SLA times based on priority
             priority = random.choice(['Low', 'Medium', 'High', 'Critical'])
@@ -401,22 +406,24 @@ def main():
                 'updated_at': current_ts
             })
         
-        # Ticket Comments (2 per ticket = 1 per 25 records)
-        if i % 25 == 0:
-            comment_id = f"COMMENT-{(counters['comment'] + i // 25):06d}"
+        # Ticket Comments (daily target: ~500 comments = ~2 per ticket)
+        # Generate comment every ~2 records to achieve ~500 comments per day
+        if i % 2 == 0:
+            comment_id = f"COMMENT-{(counters['comment'] + i // 2):06d}"
             comments.append({
                 'comment_id': comment_id,
                 'ticket_id': tickets[-1]['ticket_id'] if tickets else f"TICKET-000001",
-                'comment_text': f"Comment on ticket issue {i // 25}",
+                'comment_text': f"Comment on ticket issue {i // 2}",
                 'comment_type': random.choice(['Customer', 'Internal', 'System']),
                 'is_public': random.choice([True, False]),
                 'created_by': assigned_employee,  # VALIDATED FK
                 'created_at': current_ts
             })
         
-        # Ticket Escalations (1 per 200 records)
-        if i % 200 == 0:
-            esc_id = f"ESC-{(counters['escalation'] + i // 200):06d}"
+        # Ticket Escalations (daily target: ~50 escalations for complex issues)
+        # Generate escalation every ~20 records to achieve ~50 escalations per day
+        if i % 20 == 0:
+            esc_id = f"ESC-{(counters['escalation'] + i // 20):06d}"
             escalations.append({
                 'escalation_id': esc_id,
                 'ticket_id': tickets[-1]['ticket_id'] if tickets else f"TICKET-000001",
@@ -427,10 +434,11 @@ def main():
                 'escalated_at': current_ts
             })
         
-        # RMA Requests (1 per 150 records)
-        if i % 150 == 0:
-            rma_id = f"RMA-{(counters['rma'] + i // 150):06d}"
-            rma_num = f"RMA-{run_timestamp}-{i // 150:04d}"
+        # RMA Requests (daily target: ~30 return requests)
+        # Generate RMA every ~33 records to achieve ~30 RMA requests per day
+        if i % 33 == 0:
+            rma_id = f"RMA-{(counters['rma'] + i // 33):06d}"
+            rma_num = f"RMA-{run_timestamp}-{i // 33:04d}"
             rma_requests.append({
                 'rma_id': rma_id,
                 'rma_number': rma_num,
@@ -446,10 +454,11 @@ def main():
                 'created_at': current_ts
             })
         
-        # Warranty Claims (1 per 250 records)
-        if i % 250 == 0:
-            warranty_id = f"WC-{(counters['warranty'] + i // 250):06d}"
-            claim_num = f"CLM-{run_timestamp}-{i // 250:04d}"
+        # Warranty Claims (daily target: ~20 warranty claims)
+        # Generate warranty claim every ~50 records to achieve ~20 claims per day
+        if i % 50 == 0:
+            warranty_id = f"WC-{(counters['warranty'] + i // 50):06d}"
+            claim_num = f"CLM-{run_timestamp}-{i // 50:04d}"
             # Use proper warranty registration format
             warranty_reg_id = f"WAREG-{random.randint(100001, 999999)}"
             warranty_claims.append({
@@ -458,7 +467,7 @@ def main():
                 'warranty_id': warranty_reg_id,  # FIXED - Link to warranty_registrations table
                 'ticket_id': tickets[-1]['ticket_id'] if tickets else None,
                 'claim_date': current_ts.date(),
-                'issue_description': f"Warranty claim for product failure {i // 250}",
+                'issue_description': f"Warranty claim for product failure {i // 50}",
                 'failure_type': random.choice(['Hardware', 'Software', 'Performance', 'Defect']),
                 'claim_status': random.choice(['Pending', 'Approved', 'Rejected', 'Paid']),
                 'approved': random.choice([True, False]),
@@ -467,9 +476,10 @@ def main():
                 'created_at': current_ts
             })
         
-        # Service Metrics (1 per 100 records)
-        if i % 100 == 0:
-            metric_id = f"METRIC-{(counters['service_metric'] + i // 100):06d}"
+        # Service Metrics (daily target: ~100 service metrics for KPI tracking)
+        # Generate metric every ~10 records to achieve ~100 metrics per day
+        if i % 10 == 0:
+            metric_id = f"METRIC-{(counters['service_metric'] + i // 10):06d}"
             metrics.append({
                 'metric_id': metric_id,
                 'metric_date': current_ts.date(),
@@ -493,7 +503,7 @@ def main():
                 'created_at': current_ts
             })
         
-        if (i + 1) % 1000 == 0:
+        if (i + 1) % 200 == 0:
             logger.info(f"  Generated {i + 1:,} / {TOTAL_RECORDS:,} records")
     
     logger.info(f"✓ Generated {len(tickets):,} service tickets")

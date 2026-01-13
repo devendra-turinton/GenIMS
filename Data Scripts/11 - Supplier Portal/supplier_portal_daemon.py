@@ -69,7 +69,8 @@ PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
 PG_SUPPLIER_DB = os.getenv('DB_SUPPLIER', 'genims_supplier_db')
 
 BATCH_SIZE = 5000
-TOTAL_RECORDS = 14400  # 30 days worth
+# Daily supplier portal operations: ~120 requisitions + ~80 RFQs + ~150 invoices + ~250 other activities = ~600 total
+TOTAL_RECORDS = 600  # Daily supplier portal operations for enterprise procurement across 4 factories
 
 # Logging
 log_dir = os.getenv('DAEMON_LOG_DIR', os.path.join(os.path.dirname(__file__), '..', '..', 'logs'))
@@ -568,10 +569,12 @@ def main():
     # Track unique combinations to avoid UNIQUE constraint violations
     performance_metrics_seen = set(master_data.get('existing_metrics', []))
     
-    # Generate supplier portal records with enhanced validation
+    # Generate supplier portal records for daily procurement operations
     for i in range(TOTAL_RECORDS):
-        timestamp_offset = i * 300  # 5 minute intervals
-        current_ts = time_coord.get_timestamp_with_offset(timestamp_offset)
+        # Spread supplier portal operations across 10-hour business day (8 AM - 6 PM)
+        business_hours_minutes = 10 * 60  # 600 minutes
+        minute_offset = (i * business_hours_minutes) // TOTAL_RECORDS
+        current_ts = time_coord.get_current_time().replace(hour=8) + timedelta(minutes=minute_offset)
         current_date = current_ts.date()
         
         # Use validated IDs
@@ -580,9 +583,10 @@ def main():
         material = random.choice(valid_material_ids)
         department = random.choice(master_data['departments'])
         
-        # Purchase Requisitions (1 per 100 records) with enhanced validation
-        if i % 100 == 0:
-            req_counter = counters['requisition'] + i // 100
+        # Purchase Requisitions (daily target: ~120 requisitions to support procurement)
+        # Generate requisition every ~5 records to achieve ~120 requisitions per day
+        if i % 5 == 0:
+            req_counter = counters['requisition'] + i // 5
             req_id = f"REQ-{req_counter:06d}"
             req_num = f"PR-{time_coord.get_current_time().year}-{req_counter:06d}"
             
@@ -603,9 +607,10 @@ def main():
                 'created_at': current_ts
             })
         
-        # RFQ Headers (1 per 150 records) with deadline validation
-        if i % 150 == 0:
-            rfq_counter = counters['rfq'] + i // 150
+        # RFQ Headers (daily target: ~75 RFQs for competitive bidding)
+        # Generate RFQ every ~8 records to achieve ~75 RFQs per day
+        if i % 8 == 0:
+            rfq_counter = counters['rfq'] + i // 8
             rfq_id = f"RFQ-{time_coord.get_current_time().year}-{rfq_counter:05d}"
             rfq_num = rfq_id  # Use same format for both ID and number
             
@@ -629,10 +634,11 @@ def main():
                 'created_at': current_ts
             })
         
-        # Supplier Invoices (1 per 75 records) with 3-way matching logic
-        if i % 75 == 0:
-            inv_id = f"INV-{(counters['invoice'] + i // 75):06d}"
-            inv_num = f"SI-{time_coord.get_current_time().year}-{(counters['invoice'] + i // 75):05d}"
+        # Supplier Invoices (daily target: ~150 invoices for payment processing)
+        # Generate invoice every ~4 records to achieve ~150 invoices per day
+        if i % 4 == 0:
+            inv_id = f"INV-{(counters['invoice'] + i // 4):06d}"
+            inv_num = f"SI-{time_coord.get_current_time().year}-{(counters['invoice'] + i // 4):05d}"
             supplier_inv_num = f"SUPINV-{random.randint(100000, 999999)}"
             
             # Enhanced invoice generation with proper decimal handling
@@ -770,7 +776,7 @@ def main():
                     'created_at': current_ts
                 })
         
-        if (i + 1) % 1000 == 0:
+        if (i + 1) % 100 == 0:
             logger.info(f"  Generated {i + 1:,} / {TOTAL_RECORDS:,} records")
     
     logger.info(f"✓ Generated {len(requisitions):,} purchase requisitions")

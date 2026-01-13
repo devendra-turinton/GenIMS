@@ -46,7 +46,8 @@ PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
 PG_FINANCIAL_DB = os.getenv('DB_FINANCIAL', 'genims_financial_db')
 
 BATCH_SIZE = 5000
-TOTAL_RECORDS = 14400  # 30 days of hourly financial records
+# Daily financial operations: ~800 journal entries + ~400 balances + ~200 inter-company + ~300 sync items = ~1700 total
+TOTAL_RECORDS = 1700  # Daily financial operations for enterprise manufacturing across 4 factories
 
 # Logging
 log_dir = os.getenv('DAEMON_LOG_DIR', os.path.join(os.path.dirname(__file__), '..', '..', 'logs'))
@@ -609,10 +610,12 @@ def main():
     variance_data = []
     allocation_tracking = []
     
-    # Generate financial records
+    # Generate financial records spread across 12-hour business day (6 AM - 6 PM)
     for i in range(TOTAL_RECORDS):
-        timestamp_offset = i * 3600  # 1 hour intervals
-        current_ts = sim_base_time + timedelta(seconds=timestamp_offset)
+        # Spread financial operations across 12-hour business day for accounting activities
+        business_hours_minutes = 12 * 60  # 720 minutes
+        minute_offset = (i * business_hours_minutes) // TOTAL_RECORDS
+        current_ts = sim_base_time.replace(hour=6) + timedelta(minutes=minute_offset)
         current_date = current_ts.date()
         
         # Get fiscal period for current date
@@ -621,8 +624,9 @@ def main():
         else:
             fiscal_year, fiscal_period = 2026, 1
         
-        # Journal Entries (1 per 50 records)
-        if i % 50 == 0:
+        # Journal Entries (daily target: ~850 entries to support enterprise operations)
+        # Generate journal entry every ~2 records to achieve ~850 entries per day
+        if i % 2 == 0:
             je_id = f"JE-{(counters['journal_entry'] + len(journal_entries)):06d}"
             journal_num = f"JNL-{run_timestamp}-{len(journal_entries):04d}"
             
@@ -683,9 +687,10 @@ def main():
                 'created_at': current_ts
             })
         
-        # Account Balances (1 per 100 records)
+        # Account Balances (daily target: ~425 balance updates for financial reporting)
         # UNIQUE constraint: (account_id, fiscal_year, fiscal_period, cost_center_id)
-        if i % 100 == 0:
+        # Generate account balance every ~4 records to achieve ~425 balances per day
+        if i % 4 == 0:
             account = random.choice(master_data['accounts'])
             cost_center = random.choice(master_data['cost_centers']) if master_data['cost_centers'] else None
             
@@ -716,8 +721,9 @@ def main():
                     'last_updated': current_ts
                 })
         
-        # Inter-company Transactions (1 per 200 records)
-        if i % 200 == 0:
+        # Inter-company Transactions (daily target: ~170 inter-company transactions)
+        # Generate inter-company transaction every ~10 records to achieve ~170 transactions per day
+        if i % 10 == 0:
             ic_id = f"IC-{(counters['inter_company'] + len(inter_company_txns)):06d}"
             ic_num = f"IC-{run_timestamp}-{len(inter_company_txns):04d}"
             
@@ -736,8 +742,9 @@ def main():
                 'created_at': current_ts
             })
         
-        # Sync Queue Items (1 per 300 records)
-        if i % 300 == 0:
+        # Sync Queue Items (daily target: ~340 ERP/WMS sync items for integration)
+        # Generate sync queue item every ~5 records to achieve ~340 sync items per day
+        if i % 5 == 0:
             sync_id = f"SYNC-{len(sync_queue_items):06d}"
             sync_queue_items.append({
                 'sync_id': sync_id,
@@ -776,7 +783,7 @@ def main():
                 'created_at': current_ts
             })
         
-        if (i + 1) % 1000 == 0:
+        if (i + 1) % 200 == 0:
             logger.info(f"  Generated {i + 1:,} / {TOTAL_RECORDS:,} records")
     
     logger.info(f"✓ Generated {len(journal_entries):,} journal entries")

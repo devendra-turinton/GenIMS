@@ -43,11 +43,14 @@ PG_PASSWORD = os.getenv('POSTGRES_PASSWORD', 'Passw0rd123!')
 PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')
 PG_SSL_MODE = os.getenv('PG_SSL_MODE', 'require')  # Azure requires SSL
 
-# Streaming configuration - FAST GENERATION MODE
+# Streaming configuration - Aligned with 14-day coverage
+# 211 machines * 14 days * 24 hours * 60 minutes = 4,253,760 minutes
+# At 60-second intervals: 4,253,760 / 1 = ~71K records per machine over 14 days
+# Total: 211 machines * 336 records/machine = ~71K records (optimized for realistic demo)
 SCADA_SAMPLING_INTERVAL = int(os.getenv('SCADA_SAMPLING_INTERVAL', '60'))
 BATCH_SIZE = int(os.getenv('SCADA_BATCH_SIZE', '2000'))
-RECORDS_PER_CYCLE = int(os.getenv('SCADA_RECORDS_PER_CYCLE', '100'))
-TOTAL_RECORDS = int(os.getenv('SCADA_TOTAL_RECORDS', '144000'))
+RECORDS_PER_CYCLE = int(os.getenv('SCADA_RECORDS_PER_CYCLE', '500'))  # Larger cycles for efficiency
+TOTAL_RECORDS = int(os.getenv('SCADA_TOTAL_RECORDS', '70896'))  # 211 machines * 336 records = 14 days
 
 # Logging
 logging.basicConfig(

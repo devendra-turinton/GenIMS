@@ -38,7 +38,9 @@ PG_WMS_DB = os.getenv('DB_WMS', 'genims_wms_db')
 PG_MES_DB = os.getenv('DB_MANUFACTURING', 'genims_manufacturing_db')
 
 BATCH_SIZE = 5000
-TOTAL_RECORDS = 14400  # 10 days of hourly maintenance records
+# Aligned with historical generator: 150-300 WO/day + maintenance tasks + inspections
+# Daily maintenance operations: ~200 WO + ~400 tasks + ~100 inspections = ~700 total
+TOTAL_RECORDS = 700  # Daily maintenance operations across 4 factories
 
 # Logging
 log_dir = os.getenv('DAEMON_LOG_DIR', os.path.join(os.path.dirname(__file__), '..', '..', 'logs'))
@@ -382,18 +384,21 @@ def main():
     
     logger.info(f"CMMS simulation will start from: {sim_base_time}")
     
-    # Generate CMMS records (1 per hour = 14,400 records over 600 days)
+    # Generate CMMS records spread across 12-hour maintenance window (6 AM - 6 PM)
     for i in range(TOTAL_RECORDS):
-        timestamp_offset = i * 3600  # 1 hour per record
-        current_ts = sim_base_time + timedelta(seconds=timestamp_offset)
+        # Spread maintenance operations across 12-hour business day
+        business_hours_minutes = 12 * 60  # 720 minutes
+        minute_offset = (i * business_hours_minutes) // TOTAL_RECORDS
+        current_ts = sim_base_time.replace(hour=6) + timedelta(minutes=minute_offset)
         
         # Validate and get asset
         asset = random.choice(master_data['assets'])
         asset = validate_foreign_key('asset_id', asset)
         
-        # Work orders (1 per 50 records = ~288/10 days)
-        if i % 50 == 0:
-            wo_id = f"WO-{(counters['work_order'] + i // 50):06d}"
+        # Work orders (daily target: 150-300 across all factories = ~200 daily)
+        # Generate work order every ~3.5 records to achieve ~200 work orders per day
+        if i % 4 == 0:
+            wo_id = f"WO-{(counters['work_order'] + i // 4):06d}"
             
             # Assign technician if available
             assigned_technician = None
@@ -403,7 +408,7 @@ def main():
             # Enhanced work order with FK validation
             work_order = {
                 'work_order_id': wo_id,
-                'work_order_number': f"WO-{run_timestamp}-{i // 50:04d}",
+                'work_order_number': f"WO-{run_timestamp}-{i // 4:04d}",
                 'asset_id': asset,
                 'wo_type': random.choice(['preventive', 'corrective', 'predictive', 'breakdown']),
                 'priority': random.choice(['low', 'medium', 'high', 'urgent', 'emergency']),
@@ -417,13 +422,14 @@ def main():
             }
             work_orders.append(work_order)
         
-        # Work order tasks (1 per 20 records)
-        if i % 20 == 0:
+        # Work order tasks (daily target: ~400 tasks = ~2 tasks per work order)
+        # Generate task every ~2 records to achieve ~350 tasks per day
+        if i % 2 == 0:
             # Find recent WO for this task
-            wo_idx = (i // 50) if (i // 50) < len(work_orders) else len(work_orders) - 1
-            wo_id = work_orders[wo_idx]['work_order_id'] if work_orders else f"WO-{(counters['work_order'] + i // 50):06d}"
+            wo_idx = (i // 4) if (i // 4) < len(work_orders) else len(work_orders) - 1
+            wo_id = work_orders[wo_idx]['work_order_id'] if work_orders else f"WO-{(counters['work_order'] + i // 4):06d}"
             
-            task_id = f"TASK-{(counters['task'] + i // 20):06d}"
+            task_id = f"TASK-{(counters['task'] + i // 2):06d}"
             task = {
                 'task_id': task_id,
                 'work_order_id': wo_id,
@@ -438,11 +444,12 @@ def main():
             }
             work_order_tasks.append(task)
         
-        # Labor entries (1 per 100 records)
-        if i % 100 == 0 and master_data.get('technicians'):
-            entry_id = f"LABOR-{(counters['labor_entry'] + i // 100):06d}"
-            wo_idx = (i // 50) if (i // 50) < len(work_orders) else len(work_orders) - 1
-            wo_id = work_orders[wo_idx]['work_order_id'] if work_orders else f"WO-{(counters['work_order'] + i // 50):06d}"
+        # Labor entries (daily target: ~175 entries for labor tracking)
+        # Generate labor entry every ~4 records to achieve ~175 labor entries per day
+        if i % 4 == 0 and master_data.get('technicians'):
+            entry_id = f"LABOR-{(counters['labor_entry'] + i // 4):06d}"
+            wo_idx = (i // 4) if (i // 4) < len(work_orders) else len(work_orders) - 1
+            wo_id = work_orders[wo_idx]['work_order_id'] if work_orders else f"WO-{(counters['work_order'] + i // 4):06d}"
             
             # Validate technician FK
             technician_id = random.choice(master_data['technicians'])
@@ -466,7 +473,8 @@ def main():
             }
             labor_entries.append(labor_entry)
         
-        # Meter readings (1 per 10 records)
+        # Meter readings (daily target: ~70 readings for asset monitoring)
+        # Generate meter reading every ~10 records to achieve ~70 readings per day
         if i % 10 == 0:
             reading_id = f"MTR-{(counters['meter_reading'] + i // 10):06d}"
             
@@ -491,7 +499,7 @@ def main():
             }
             meter_readings.append(meter_reading)
         
-        if (i + 1) % 1000 == 0:
+        if (i + 1) % 100 == 0:
             logger.info(f"  Generated {i + 1:,} / {TOTAL_RECORDS:,} records")
     
     logger.info(f"✓ Generated {len(work_orders):,} work orders")

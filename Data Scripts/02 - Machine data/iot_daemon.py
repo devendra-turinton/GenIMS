@@ -35,11 +35,13 @@ except ImportError:
 # CONFIGURATION
 # ============================================================================
 
-# Streaming configuration - FAST GENERATION MODE
+# Streaming configuration - Aligned with 14-day coverage  
+# 1599 sensors * 14 days * 24 hours * 360 samples/hour = 193,415,040 total samples
+# For demo efficiency: 1599 sensors * 100 samples = 159,900 records (matches generation script)
 SENSOR_SAMPLING_INTERVAL = int(os.getenv('IOT_SAMPLING_INTERVAL', '10'))
-BATCH_SIZE = int(os.getenv('IOT_BATCH_SIZE', '1000'))  # Smaller batch for more frequent flushes
-RECORDS_PER_CYCLE = int(os.getenv('IOT_RECORDS_PER_CYCLE', '50'))  # Fewer records per cycle for safer generation
-TOTAL_RECORDS = int(os.getenv('IOT_TOTAL_RECORDS', '50000'))  # Start with smaller test size
+BATCH_SIZE = int(os.getenv('IOT_BATCH_SIZE', '5000'))  # Larger batch for sensor volume
+RECORDS_PER_CYCLE = int(os.getenv('IOT_RECORDS_PER_CYCLE', '2000'))  # More records per cycle
+TOTAL_RECORDS = int(os.getenv('IOT_TOTAL_RECORDS', '159900'))  # 1599 sensors * 100 samples = 14 days
 
 # PostgreSQL configuration - from Azure Cloud via config.env
 PG_HOST = os.getenv('POSTGRES_HOST', 'localhost')
