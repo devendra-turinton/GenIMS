@@ -553,17 +553,6 @@ class GenIMSSetup:
         if not gen_path.exists():
             return False, f"Generator missing: {gen_script}"
         
-        # DISABLED: Skip file age checks to force fresh generation
-        # if expected_output:
-        #     output_path = self.root_path / expected_output
-        #     if output_path.exists():
-        #         # Check if file is very recent (within last hour) and non-empty
-        #         import os
-        #         file_age = time.time() - os.path.getmtime(output_path)
-        #         file_size = os.path.getsize(output_path)
-        #         if file_age < 3600 and file_size > 1000:  # Less than 1 hour old and > 1KB
-        #             return False, f"Recent output exists: {expected_output}"
-        
         return True, "Ready"
     
     def run_single_generator_optimized(self, db_name, gen_script, expected_output, complexity, timeout):
@@ -703,19 +692,19 @@ class GenIMSSetup:
         """Get dependency priority for smart ordering"""
         # Base/foundational systems should run first
         dependency_order = {
-            'genims_operations_db': 1,  # Machine/sensor data
-            'genims_manufacturing_db': 2,  # MES data
-            'genims_erp_db': 3,  # ERP core
-            'genims_wms_db': 4,  # Warehouse
-            'genims_tms_db': 4,  # Transport
-            'genims_financial_db': 5,  # Financial
-            'genims_erp_wms_sync_db': 6,  # Sync operations
-            'genims_maintenance_db': 7,  # CMMS
-            'genims_crm_db': 8,  # CRM
-            'genims_service_db': 9,  # Service
-            'genims_hr_db': 10,  # HR
-            'genims_quality_db': 11,  # QMS
-            'genims_supplier_db': 12,  # Supplier portal
+            'genims_operations_db_try': 1,  # Machine/sensor data
+            'genims_manufacturing_db_try': 2,  # MES data
+            'genims_erp_db_try': 3,  # ERP core
+            'genims_wms_db_try': 4,  # Warehouse
+            'genims_tms_db_try': 4,  # Transport
+            'genims_financial_db_try': 5,  # Financial
+            'genims_erp_wms_sync_db_try': 6,  # Sync operations
+            'genims_maintenance_db_try': 7,  # CMMS
+            'genims_crm_db_try': 8,  # CRM
+            'genims_service_db_try': 9,  # Service
+            'genims_hr_db_try': 10,  # HR
+            'genims_quality_db_try': 11,  # QMS
+            'genims_supplier_db_try': 12,  # Supplier portal
         }
         return dependency_order.get(db_name, 999)
     
@@ -760,7 +749,7 @@ class GenIMSSetup:
         light_generators = []
         
         for db_name, config in DATABASES.items():
-            if db_name == 'genims_master_db':
+            if db_name == 'genims_master_db_try':
                 continue  # Already generated in step 3a
             
             generators = config.get('generators', [])
@@ -999,10 +988,11 @@ class GenIMSSetup:
         if not records:
             return 0
         
+        # Delete existing data (more reliable than TRUNCATE with FK constraints)
         try:
-            cursor.execute(f"TRUNCATE TABLE {table_name} CASCADE")
-        except:
-            pass
+            cursor.execute(f"DELETE FROM {table_name}")
+        except Exception as e:
+            logger.warning(f"    ⚠ Could not clear {table_name}: {str(e)[:100]}")
         
         cols = list(records[0].keys())
         
@@ -1055,14 +1045,14 @@ class GenIMSSetup:
                             val = loaded + 1
                         # Special handling for specific columns
                         elif c in ['run_start_time', 'run_end_time', 'start_time', 'end_time', 'actual_start_time', 'actual_end_time']:
-                            val = '2026-01-13 00:00:00'
+                            val = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         elif c in ['planned_start_time', 'planned_end_time']:
-                            val = '2026-01-13 08:00:00'
+                            val = datetime.now().replace(hour=8, minute=0, second=0).strftime('%Y-%m-%d %H:%M:%S')
                         elif c in ['transaction_date', 'created_at', 'updated_at']:
-                            val = '2026-01-13 00:00:00'
+                            val = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         # For date/timestamp columns
                         elif data_type in ['date', 'timestamp', 'timestamp without time zone', 'timestamp with time zone']:
-                            val = '2026-01-13' if data_type == 'date' else '2026-01-13 00:00:00'
+                            val = datetime.now().strftime('%Y-%m-%d') if data_type == 'date' else datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         # For numeric columns
                         elif data_type in ['integer', 'bigint', 'smallint', 'numeric', 'decimal', 'real', 'double precision']:
                             val = 1 if 'frequency' in c.lower() or 'days' in c.lower() else 0
@@ -1134,14 +1124,14 @@ class GenIMSSetup:
                                 val = batch_idx + idx + 1
                             # Special handling for specific columns
                             elif c in ['run_start_time', 'run_end_time', 'start_time', 'end_time', 'actual_start_time', 'actual_end_time']:
-                                val = '2026-01-13 00:00:00'
+                                val = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             elif c in ['planned_start_time', 'planned_end_time']:
-                                val = '2026-01-13 08:00:00'
+                                val = datetime.now().replace(hour=8, minute=0, second=0).strftime('%Y-%m-%d %H:%M:%S')
                             elif c in ['transaction_date', 'created_at', 'updated_at']:
-                                val = '2026-01-13 00:00:00'
+                                val = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             # For date/timestamp columns
                             elif data_type in ['date', 'timestamp', 'timestamp without time zone', 'timestamp with time zone']:
-                                val = '2026-01-13' if data_type == 'date' else '2026-01-13 00:00:00'
+                                val = datetime.now().strftime('%Y-%m-%d') if data_type == 'date' else datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             # For numeric columns
                             elif data_type in ['integer', 'bigint', 'smallint', 'numeric', 'decimal', 'real', 'double precision']:
                                 val = 1 if 'frequency' in c.lower() or 'days' in c.lower() else 0
